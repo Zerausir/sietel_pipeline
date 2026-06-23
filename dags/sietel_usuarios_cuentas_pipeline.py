@@ -91,12 +91,29 @@ def sietel_usuarios_cuentas_pipeline():
         from cargar_hechos_anio import cargar_hechos_anio
         cargar_hechos_anio(anio)
 
+    @task
+    def validar_carga(anios: list[int]):
+        """
+        Última tarea del DAG: compara conteos SQL Server vs PostgreSQL para
+        los años recién cargados, verifica que las dimensiones SCD no
+        tengan versiones vigentes duplicadas, y que la vista de consumo no
+        genere filas duplicadas por el JOIN de vigencia temporal.
+
+        Si encuentra cualquier discrepancia, esta tarea FALLA (la corrida
+        queda roja en la UI de Airflow) en vez de solo loguear una
+        advertencia que nadie revisaría. El resultado se registra también
+        en staging.control_cargas para auditoría histórica.
+        """
+        from validar_carga import validar_anios
+        validar_anios(anios)
+
     esquema = aplicar_esquema()
     dimensiones = cargar_dimensiones()
     anios = obtener_anios_a_cargar()
     hechos = cargar_hechos_de_anio.expand(anio=anios)
+    validacion = validar_carga(anios)
 
-    esquema >> dimensiones >> hechos
+    esquema >> dimensiones >> hechos >> validacion
 
 
 sietel_usuarios_cuentas_pipeline()

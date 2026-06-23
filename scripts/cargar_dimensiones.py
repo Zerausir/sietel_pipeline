@@ -76,13 +76,22 @@ def cargar_dim_isp():
                 vigente = vigentes.get(fila["isp_codigo"])
 
                 if vigente is None:
-                    # ISP nunca cargado: primera versión
+                    # ISP nunca cargado: primera versión. fecha_inicio_vigencia
+                    # se fija deliberadamente muy en el pasado (no now()) para
+                    # que los hechos históricos ya cargados en
+                    # staging.va_reporte_usuarios_cuentas (que pueden ser de
+                    # cualquier año desde 2011) puedan unirse correctamente
+                    # contra esta primera versión en la vista de consumo. Si
+                    # se usara now() como en versiones posteriores, todo el
+                    # histórico anterior a la fecha de la primera carga del
+                    # pipeline quedaría sin JOIN posible (huérfano).
                     pg_cur.execute(
                         """
                         INSERT INTO staging.dim_isp
                             (isp_codigo, isp_nombre, isp_ruc, isp_tipoPersona,
-                             isp_observacion, isp_telefono, regional, fechaModificacion)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                             isp_observacion, isp_telefono, regional, fechaModificacion,
+                             fecha_inicio_vigencia)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, '1900-01-01')
                         """,
                         (
                             fila["isp_codigo"], fila["isp_nombre"], fila["isp_ruc"],
@@ -159,12 +168,15 @@ def cargar_dim_permiso_va_agregado():
                 vigente = vigentes.get(fila["peva_codigo"])
 
                 if vigente is None:
+                    # Mismo criterio que en cargar_dim_isp: la primera versión
+                    # debe ser vigente desde antes del histórico cargado, no
+                    # desde el momento de la primera corrida del pipeline.
                     pg_cur.execute(
                         """
                         INSERT INTO staging.dim_permiso_va_agregado
                             (peva_codigo, isp_codigo, nombreComercial, opera,
-                             fechaPermiso, Resolucion)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                             fechaPermiso, Resolucion, fecha_inicio_vigencia)
+                        VALUES (%s, %s, %s, %s, %s, %s, '1900-01-01')
                         """,
                         (
                             fila["peva_codigo"], fila["isp_codigo"], fila["nombreComercial"],

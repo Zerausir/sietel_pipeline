@@ -127,7 +127,7 @@ CREATE INDEX IF NOT EXISTS ix_dim_permiso_codigo_vigente
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS staging.control_cargas (
     id                  BIGSERIAL PRIMARY KEY,
-    tipo_carga          VARCHAR(50) NOT NULL,       -- 'hechos_anual' | 'dimensiones'
+    tipo_carga          VARCHAR(50) NOT NULL,       -- 'hechos_anual' | 'dimensiones' | 'validacion_cruzada'
     anio                INTEGER,                     -- NULL cuando tipo_carga = 'dimensiones'
     filas_insertadas    INTEGER,
     filas_actualizadas  INTEGER,
