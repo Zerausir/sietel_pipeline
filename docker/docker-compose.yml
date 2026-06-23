@@ -1,0 +1,161 @@
+x-airflow-common:
+  &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-metadata-db/airflow
+    AIRFLOW__CORE__FERNET_KEY: '${AIRFLOW__CORE__FERNET_KEY}'
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: '4'   # limita concurrencia: no saturar SQL Server SIETEL sin indices
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: '${_AIRFLOW_WWW_USER_USERNAME}:admin'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-webserver:8080/execution/'
+    AIRFLOW__API_AUTH__JWT_SECRET: '${AIRFLOW__API_AUTH__JWT_SECRET}'
+    # Timeouts para tareas largas (VAReporteUsuariosCuentas sin indices puede tardar)
+    AIRFLOW__CORE__TASK_TIMEOUT: 900
+    AIRFLOW__CORE__KILLED_TASK_CLEANUP_TIME: 300
+    AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: 300
+    # Pool de conexiones a la BD de metadata de Airflow
+    AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: 10
+    AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE: 3600
+    AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_PRE_PING: 'true'
+    PYTHONPATH: '/opt/airflow'
+    # Credenciales SIETEL / Postgres analítico, inyectadas desde .env
+    SIETEL_SQLSERVER_HOST: ${SIETEL_SQLSERVER_HOST}
+    SIETEL_SQLSERVER_PORT: ${SIETEL_SQLSERVER_PORT:-1433}
+    SIETEL_SQLSERVER_USER: ${SIETEL_SQLSERVER_USER}
+    SIETEL_SQLSERVER_PASSWORD: ${SIETEL_SQLSERVER_PASSWORD}
+    SIETEL_SQLSERVER_DATABASE: ${SIETEL_SQLSERVER_DATABASE}
+    ANALITICO_PG_HOST: ${ANALITICO_PG_HOST:-host.docker.internal}
+    ANALITICO_PG_PORT: ${ANALITICO_PG_PORT:-5432}
+    ANALITICO_PG_USER: ${ANALITICO_PG_USER}
+    ANALITICO_PG_PASSWORD: ${ANALITICO_PG_PASSWORD}
+    ANALITICO_PG_DATABASE: ${ANALITICO_PG_DATABASE}
+  volumes:
+    - ../dags:/opt/airflow/dags
+    - ../scripts:/opt/airflow/scripts
+    - airflow_logs:/opt/airflow/logs
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    airflow-init:
+      condition: service_completed_successfully
+  extra_hosts:
+    - "host.docker.internal:host-gateway"   # necesario en Linux; en Docker Desktop/Windows no afecta
+
+services:
+  # PostgreSQL de metadata interna de Airflow (NO confundir con el Postgres
+  # analitico nativo de SIETEL, que corre en el host via ANALITICO_PG_HOST).
+  # samm_pipeline no levanta este servicio porque su Postgres de metadata
+  # vive bare-metal en otra VM; aqui si se incluye porque este proyecto no
+  # cuenta (todavia) con esa VM dedicada.
+  airflow-metadata-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_metadata_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "airflow" ]
+      interval: 5s
+      retries: 5
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - 8080:8080
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health" ]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 90s
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: [ "CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"' ]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 90s
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    healthcheck:
+      test: [ "CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"' ]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 90s
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: [ "CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"' ]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 90s
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        one_meg=1048576
+        mem_available=$$(($$(getconf _PHYS_PAGES) * $$(getconf PAGE_SIZE) / one_meg))
+        cpus_available=$$(grep -cE 'cpu[0-9]+' /proc/stat)
+        disk_available=$$(df / | tail -1 | awk '{print $$4}')
+        disk_available=$$(($${disk_available} / one_meg))
+        if (( mem_available < 4000 )); then
+          echo -e "\033[1;33mWARNING: Not enough memory. At least 4GB required.\e[0m"
+        fi
+        if (( cpus_available < 2 )); then
+          echo -e "\033[1;33mWARNING: At least 2 CPUs recommended.\e[0m"
+        fi
+        if (( disk_available < 10 )); then
+          echo -e "\033[1;33mWARNING: At least 10 GiB disk recommended.\e[0m"
+        fi
+        mkdir -p /sources/logs /sources/dags /sources/plugins
+        chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
+        exec /entrypoint airflow version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+    user: "0:0"
+    volumes:
+      - ..:/sources
+    depends_on:
+      airflow-metadata-db:
+        condition: service_healthy
+
+volumes:
+  airflow_metadata_db_data:
+  airflow_logs:
