@@ -37,6 +37,7 @@ x-airflow-common:
   volumes:
     - ../dags:/opt/airflow/dags
     - ../scripts:/opt/airflow/scripts
+    - ../sql:/opt/airflow/sql
     - airflow_logs:/opt/airflow/logs
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:

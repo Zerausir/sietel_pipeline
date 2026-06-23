@@ -125,7 +125,7 @@ def verificar_totales_anio(anio: int):
     logger.info("[4/5] Verificando totales agregados del año %s (SQL Server vs. PostgreSQL)...", anio)
     with sqlserver_cursor() as cur:
         cur.execute(
-            "SELECT COUNT(*) AS n FROM dbo.VAReporteUsuariosCuentas WHERE anio = %s", (anio,)
+            "SELECT COUNT(*) AS n FROM dbo.VAReporteUsuariosCuentas WHERE anio = ?", (anio,)
         )
         filas_origen = cur.fetchone()["n"]
 

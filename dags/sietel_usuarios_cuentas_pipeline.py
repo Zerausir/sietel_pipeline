@@ -48,6 +48,17 @@ default_args = {
     tags=["sietel", "arcotel", "usuarios_cuentas"],
 )
 def sietel_usuarios_cuentas_pipeline():
+    @task
+    def aplicar_esquema():
+        """
+        Aplica sql/01_ddl_postgres.sql contra la base analítica (que ya
+        debe existir, ej. "sietel_analitico"). Idempotente: si las tablas
+        ya existen y tienen datos, no las destruye ni las recrea -- las
+        cláusulas IF NOT EXISTS / CREATE OR REPLACE VIEW del propio DDL
+        garantizan esto.
+        """
+        from aplicar_esquema import aplicar_esquema as _aplicar_esquema
+        _aplicar_esquema()
 
     @task
     def cargar_dimensiones():
@@ -80,11 +91,12 @@ def sietel_usuarios_cuentas_pipeline():
         from cargar_hechos_anio import cargar_hechos_anio
         cargar_hechos_anio(anio)
 
+    esquema = aplicar_esquema()
     dimensiones = cargar_dimensiones()
     anios = obtener_anios_a_cargar()
     hechos = cargar_hechos_de_anio.expand(anio=anios)
 
-    dimensiones >> hechos
+    esquema >> dimensiones >> hechos
 
 
 sietel_usuarios_cuentas_pipeline()
