@@ -55,6 +55,18 @@ CREATE TABLE IF NOT EXISTS staging.va_reporte_usuarios_cuentas (
     u_total_r           INTEGER NOT NULL,
     u_total_c           INTEGER NOT NULL,
     u_total_ci          INTEGER NOT NULL,
+    -- Huella de integridad de contenido (no solo de identidad): hash MD5
+    -- determinista calculado sobre las columnas de métricas de esta fila,
+    -- en el mismo formato tanto al leer de SQL Server como al insertar
+    -- aquí. Permite certificar, en cada validación, que el VALOR de cada
+    -- fila migrada coincide con el valor de origen -- no solo que la
+    -- CANTIDAD de filas coincide (un COUNT(*) igual no garantiza que el
+    -- contenido sea idéntico). Mismo principio que el "GUARANTEE MODE" de
+    -- samm_pipeline (app/utils/postgres_handler.py), adaptado: SAMM genera
+    -- un ID determinista para garantizar mapeo 1:1 fila-a-registro; aquí
+    -- el ID natural ya existe (ruc_codigo), así que el hash certifica
+    -- contenido en vez de identidad.
+    hash_contenido      VARCHAR(32),
     -- Metadata de carga
     fecha_carga         TIMESTAMP NOT NULL DEFAULT now(),
     UNIQUE (ruc_codigo)
@@ -63,6 +75,13 @@ CREATE TABLE IF NOT EXISTS staging.va_reporte_usuarios_cuentas (
 CREATE INDEX IF NOT EXISTS ix_hechos_anio_mes ON staging.va_reporte_usuarios_cuentas (anio, mesNumero);
 CREATE INDEX IF NOT EXISTS ix_hechos_peva_codigo ON staging.va_reporte_usuarios_cuentas (peva_codigo);
 CREATE INDEX IF NOT EXISTS ix_hechos_par_codigo ON staging.va_reporte_usuarios_cuentas (par_codigo);
+
+-- Migración para tablas creadas ANTES de que existiera hash_contenido:
+-- CREATE TABLE IF NOT EXISTS no agrega columnas a una tabla que ya existe,
+-- así que la migración debe ser explícita. Esto vuelve seguro re-aplicar
+-- este script tanto en bases nuevas como en bases con datos previos.
+ALTER TABLE staging.va_reporte_usuarios_cuentas
+    ADD COLUMN IF NOT EXISTS hash_contenido VARCHAR(32);
 
 -- ----------------------------------------------------------------------------
 -- 2. DIMENSION ISP (SCD Tipo 2)

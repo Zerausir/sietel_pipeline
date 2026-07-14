@@ -12,14 +12,58 @@ filas históricas sin aportar valor analítico (ver discusión de diseño).
 
 La carga es idempotente: usa ON CONFLICT (ruc_codigo) DO UPDATE, por lo que
 reintentar la carga de un año ya cargado no duplica filas.
+
+CERTIFICACIÓN DE CONTENIDO (no solo de identidad):
+Cada fila lleva un hash_contenido (MD5) calculado de forma determinista
+sobre sus columnas de métricas, en COLUMNAS_HASH, en el mismo orden tanto
+al extraer de SQL Server como al insertar en PostgreSQL. Esto certifica
+que el VALOR de cada fila migrada es idéntico al de origen -- un COUNT(*)
+igual entre ambos lados no garantiza esto (dos filas distintas con el
+mismo conteo total podrían tener valores corruptos sin que el conteo lo
+detecte). Mismo principio que el "GUARANTEE MODE" de samm_pipeline
+(app/utils/postgres_handler.py): SAMM genera un ID determinista (MD5)
+sobre campos de negocio para garantizar mapeo 1:1 fila-a-registro; aquí el
+ID natural ya existe (ruc_codigo, PK de origen), así que el hash certifica
+contenido en vez de identidad -- scripts/validar_carga.py compara estos
+hashes entre SQL Server y PostgreSQL para detectar cualquier corrupción de
+valores que un simple conteo de filas no revelaría.
 """
 import argparse
+import hashlib
 import logging
 from datetime import datetime
 
 from config import postgres_cursor, sqlserver_cursor
 
 logger = logging.getLogger(__name__)
+
+# Orden FIJO y determinista de columnas sobre las que se calcula el hash.
+# Debe ser idéntico en cargar_hechos_anio.py y validar_carga.py -- un
+# cambio en este orden invalida la comparación de hashes existentes.
+COLUMNAS_HASH = [
+    "peva_codigo", "par_codigo", "anio", "mesNumero", "tipo_enlace",
+    "c_du_r", "c_du_c", "c_du_total",
+    "c_d_r", "c_d_c", "c_d_ci", "c_d_total",
+    "c_total_cuentas", "c_total_r", "c_total_c",
+    "u_du_r", "u_du_c", "u_du_total",
+    "u_d_r", "u_d_c", "u_d_ci", "u_d_total",
+    "u_total_usuarios", "u_total_r", "u_total_c", "u_total_ci",
+]
+
+
+def calcular_hash_fila(fila: dict) -> str:
+    """
+    Calcula un hash MD5 determinista sobre COLUMNAS_HASH de una fila.
+
+    Usa "|" como separador y str(None) explícito para valores nulos, de
+    modo que el mismo conjunto de valores produzca siempre el mismo hash,
+    sin ambigüedad por cómo cada driver (pyodbc vs psycopg2) representa
+    internamente los tipos.
+    """
+    valores = [str(fila.get(col)) if fila.get(col) is not None else "NULL" for col in COLUMNAS_HASH]
+    cadena = "|".join(valores)
+    return hashlib.md5(cadena.encode("utf-8")).hexdigest()
+
 
 SQL_EXTRAER_HECHOS_ANIO = """
     SELECT
@@ -54,11 +98,13 @@ SQL_UPSERT_HECHOS = """
         c_du_r, c_du_c, c_du_total, c_d_r, c_d_c, c_d_ci, c_d_total,
         c_total_cuentas, c_total_r, c_total_c,
         u_du_r, u_du_c, u_du_total, u_d_r, u_d_c, u_d_ci, u_d_total,
-        u_total_usuarios, u_total_r, u_total_c, u_total_ci
+        u_total_usuarios, u_total_r, u_total_c, u_total_ci,
+        hash_contenido
     ) VALUES (
         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+        %s
     )
     ON CONFLICT (ruc_codigo) DO UPDATE SET
         peva_codigo = EXCLUDED.peva_codigo,
@@ -78,6 +124,7 @@ SQL_UPSERT_HECHOS = """
         u_d_total = EXCLUDED.u_d_total,
         u_total_usuarios = EXCLUDED.u_total_usuarios, u_total_r = EXCLUDED.u_total_r,
         u_total_c = EXCLUDED.u_total_c, u_total_ci = EXCLUDED.u_total_ci,
+        hash_contenido = EXCLUDED.hash_contenido,
         fecha_carga = now()
 """
 
@@ -91,6 +138,7 @@ def cargar_hechos_anio(anio: int):
             filas = ms_cur.fetchall()
 
             for fila in filas:
+                hash_fila = calcular_hash_fila(fila)
                 pg_cur.execute(
                     SQL_UPSERT_HECHOS,
                     (
@@ -103,6 +151,7 @@ def cargar_hechos_anio(anio: int):
                         fila["u_du_r"], fila["u_du_c"], fila["u_du_total"],
                         fila["u_d_r"], fila["u_d_c"], fila["u_d_ci"], fila["u_d_total"],
                         fila["u_total_usuarios"], fila["u_total_r"], fila["u_total_c"], fila["u_total_ci"],
+                        hash_fila,
                     ),
                 )
                 filas_procesadas += 1
