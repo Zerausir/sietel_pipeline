@@ -14,6 +14,14 @@ VARIABLE DE AIRFLOW "sietel_anios_a_cargar":
   "2025"       → carga solo ese año específico (útil para pruebas)
   "2023,2024"  → carga esos años separados por coma
   ausente/otro → carga únicamente el año en curso (modo mensual regular)
+
+NOTA (2026-07): ANIO_INICIO_HISTORICO / ANIO_FIN_HISTORICO ya NO se definen
+en este archivo. Antes existían dos copias independientes (una aquí, otra
+en scripts/config.py) que ya habían divergido (2025 vs 2026). Ahora
+scripts/config.py es la única fuente de verdad; este DAG las importa de
+forma perezosa dentro de la propia tarea, igual que el resto de los
+imports de scripts/, para no encarecer el parseo periódico del DAG con las
+dependencias de config.py (pyodbc, psycopg2, carga de .env).
 """
 from datetime import datetime, timedelta
 import logging
@@ -25,9 +33,6 @@ from airflow.sdk import dag, task, Variable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 logger = logging.getLogger(__name__)
-
-ANIO_INICIO_HISTORICO = 2011
-ANIO_FIN_HISTORICO = 2025  # copia tiene datos hasta 2025; ajustar a 2026 en producción
 
 default_args = {
     "owner": "equipo_analitica_sietel",
@@ -67,7 +72,12 @@ def sietel_usuarios_cuentas_pipeline():
           "2025"          → solo ese año
           "2023,2024,2025"→ lista de años separados por coma
           ausente / otro  → solo el año en curso (modo mensual regular)
+
+        ANIO_INICIO_HISTORICO / ANIO_FIN_HISTORICO se importan desde
+        scripts/config.py (fuente única) en vez de redefinirse aquí.
         """
+        from config import ANIO_INICIO_HISTORICO, ANIO_FIN_HISTORICO
+
         valor = Variable.get("sietel_anios_a_cargar", default="mensual")
 
         if valor.strip().lower() == "historico":

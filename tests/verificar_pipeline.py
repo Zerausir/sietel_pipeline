@@ -4,19 +4,32 @@ Script de verificación del pipeline SIETEL -> PostgreSQL.
 No es una suite de unit tests (no hay mocks de SQL Server); son pruebas de
 integración que validan, contra el entorno real, que:
   1. Las conexiones a SQL Server y PostgreSQL funcionan.
-  2. El DDL de PostgreSQL fue aplicado (existen las tablas/vistas esperadas).
-  3. Las dimensiones SCD Tipo 2 no tienen más de una fila vigente por llave
-     natural (violación de invariante = bug en cargar_dimensiones.py).
-  4. Los totales agregados de hechos cargados coinciden, año por año, con
-     los totales correspondientes en SQL Server (detecta filas perdidas o
-     duplicadas durante la carga).
-  5. La vista de consumo analitico.v_usuarios_cuentas no genera filas
-     duplicadas por el JOIN de vigencia temporal (un error común en SCD
-     Tipo 2 es un JOIN que matchea contra más de una versión).
+  2. El DDL de PostgreSQL fue aplicado (existen las tablas/vistas esperadas
+     del módulo "Usuarios y Cuentas — Internet Fijo" basado en
+     dbo.VALineasDedicadas).
+  3. La validación cruzada certificada pasa para el/los año(s) indicado(s):
+     conteo de filas agregadas, hash MD5 de contenido fila a fila,
+     invariante de vigencia única en las dimensiones SCD Tipo 2, y ausencia
+     de duplicados en la vista de consumo.
+
+     Este paso delega en scripts/validar_carga.validar_anios() -- la misma
+     función que corre dentro de la tarea `validar_carga` del DAG -- en vez
+     de reimplementar la comparación. Antes este script tenía su propia
+     copia de la verificación de conteo/vista, y esa copia apuntaba a
+     dbo.VAReporteUsuariosCuentas / analitico.v_usuarios_cuentas, tablas de
+     un módulo anterior que ya no existen en el esquema actual (el pipeline
+     migró su fuente a dbo.VALineasDedicadas -- ver
+     Informe_Hallazgos_SIETEL.docx sobre por qué VAReporteUsuariosCuentas
+     se descartó como fuente auditable). Esa copia quedó obsoleta y
+     fallaría en el paso de verificación de DDL contra el esquema vigente.
 
 Uso:
-    python tests/verificar_pipeline.py --anio 2026
-    python tests/verificar_pipeline.py --anio 2026 --verbose
+    python tests/verificar_pipeline.py --anios 2026
+    python tests/verificar_pipeline.py --anios 2024 2025 2026 --verbose
+
+CAMBIO DE INTERFAZ: antes era `--anio <int>` (un solo año). Ahora es
+`--anios <int> [<int> ...]` (uno o más años), para poder pasarle a
+validar_anios() la misma lista de años que recibiría la tarea del DAG.
 """
 import argparse
 import logging
@@ -26,16 +39,17 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from config import postgres_cursor, sqlserver_cursor  # noqa: E402
+from validar_carga import validar_anios, ValidacionFallida  # noqa: E402
 
 logger = logging.getLogger("verificar_pipeline")
 
 TABLAS_ESPERADAS = [
-    "staging.va_reporte_usuarios_cuentas",
+    "staging.va_lineas_dedicadas_resumen",
     "staging.dim_isp",
     "staging.dim_permiso_va_agregado",
     "staging.control_cargas",
 ]
-VISTAS_ESPERADAS = ["analitico.v_usuarios_cuentas"]
+VISTAS_ESPERADAS = ["analitico.v_lineas_dedicadas_resumen"]
 
 
 class FalloVerificacion(Exception):
@@ -43,7 +57,7 @@ class FalloVerificacion(Exception):
 
 
 def verificar_conectividad():
-    logger.info("[1/5] Verificando conectividad...")
+    logger.info("[1/3] Verificando conectividad...")
     try:
         with sqlserver_cursor() as cur:
             cur.execute("SELECT 1")
@@ -61,7 +75,7 @@ def verificar_conectividad():
 
 
 def verificar_ddl_aplicado():
-    logger.info("[2/5] Verificando que el DDL fue aplicado...")
+    logger.info("[2/3] Verificando que el DDL fue aplicado...")
     with postgres_cursor(commit=False) as cur:
         for tabla in TABLAS_ESPERADAS:
             esquema, nombre = tabla.split(".")
@@ -88,90 +102,23 @@ def verificar_ddl_aplicado():
     logger.info("    OK: todas las tablas y vistas esperadas existen.")
 
 
-def verificar_unicidad_vigencia():
-    logger.info("[3/5] Verificando invariante SCD Tipo 2 (máximo 1 versión vigente por llave natural)...")
-    with postgres_cursor(commit=False) as cur:
-        cur.execute(
-            """
-            SELECT isp_codigo, COUNT(*) AS n
-            FROM staging.dim_isp WHERE es_vigente = true
-            GROUP BY isp_codigo HAVING COUNT(*) > 1
-            """
-        )
-        duplicados_isp = cur.fetchall()
-        if duplicados_isp:
-            raise FalloVerificacion(
-                f"dim_isp tiene {len(duplicados_isp)} isp_codigo con más de una versión vigente "
-                f"simultánea (ejemplo: {duplicados_isp[0]['isp_codigo']}). Revisar cargar_dimensiones.py."
-            )
-
-        cur.execute(
-            """
-            SELECT peva_codigo, COUNT(*) AS n
-            FROM staging.dim_permiso_va_agregado WHERE es_vigente = true
-            GROUP BY peva_codigo HAVING COUNT(*) > 1
-            """
-        )
-        duplicados_permiso = cur.fetchall()
-        if duplicados_permiso:
-            raise FalloVerificacion(
-                f"dim_permiso_va_agregado tiene {len(duplicados_permiso)} peva_codigo con más de "
-                f"una versión vigente simultánea (ejemplo: {duplicados_permiso[0]['peva_codigo']})."
-            )
-    logger.info("    OK: invariante de vigencia única se cumple en ambas dimensiones.")
-
-
-def verificar_totales_anio(anio: int):
-    logger.info("[4/5] Verificando totales agregados del año %s (SQL Server vs. PostgreSQL)...", anio)
-    with sqlserver_cursor() as cur:
-        cur.execute(
-            "SELECT COUNT(*) AS n FROM dbo.VAReporteUsuariosCuentas WHERE anio = ?", (anio,)
-        )
-        filas_origen = cur.fetchone()["n"]
-
-    with postgres_cursor(commit=False) as cur:
-        cur.execute(
-            "SELECT COUNT(*) AS n FROM staging.va_reporte_usuarios_cuentas WHERE anio = %s", (anio,)
-        )
-        filas_destino = cur.fetchone()["n"]
-
-    if filas_origen != filas_destino:
-        raise FalloVerificacion(
-            f"Discrepancia de conteo para año {anio}: SQL Server tiene {filas_origen} filas, "
-            f"PostgreSQL tiene {filas_destino}. Revisar si la carga de ese año falló a mitad de "
-            f"camino (ver staging.control_cargas) o si se insertaron filas duplicadas/perdidas."
-        )
-    logger.info("    OK: %s filas en ambos lados para el año %s.", filas_origen, anio)
-
-
-def verificar_vista_sin_duplicados(anio: int):
-    logger.info("[5/5] Verificando que la vista de consumo no duplica filas por el JOIN de vigencia...")
-    with postgres_cursor(commit=False) as cur:
-        cur.execute(
-            """
-            SELECT ruc_codigo, COUNT(*) AS n
-            FROM analitico.v_usuarios_cuentas
-            WHERE anio = %s
-            GROUP BY ruc_codigo
-            HAVING COUNT(*) > 1
-            """,
-            (anio,),
-        )
-        duplicados = cur.fetchall()
-        if duplicados:
-            raise FalloVerificacion(
-                f"La vista analitico.v_usuarios_cuentas devuelve más de una fila para "
-                f"{len(duplicados)} ruc_codigo del año {anio} (ejemplo: {duplicados[0]['ruc_codigo']}). "
-                f"Esto indica que el JOIN de vigencia temporal contra dim_isp/dim_permiso_va_agregado "
-                f"está matcheando más de una versión -- revisar las condiciones de fecha_inicio/"
-                f"fecha_fin_vigencia en sql/01_ddl_postgres.sql."
-            )
-    logger.info("    OK: la vista no produce duplicados para el año %s.", anio)
+def verificar_validacion_cruzada(anios: list[int]):
+    """
+    Delega en validar_carga.validar_anios(): conteo + hash MD5 de contenido
+    + invariante SCD Tipo 2 + vista sin duplicados, para cada año en anios.
+    Es la misma certificación que corre la tarea `validar_carga` del DAG.
+    """
+    logger.info("[3/3] Corriendo validación cruzada certificada para año(s) %s...", anios)
+    validar_anios(anios)
+    logger.info("    OK: validación cruzada certificada exitosa para %s.", anios)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Verifica la integridad del pipeline SIETEL -> PostgreSQL.")
-    parser.add_argument("--anio", type=int, required=True, help="Año a verificar contra SQL Server, ej. 2026")
+    parser.add_argument(
+        "--anios", type=int, nargs="+", required=True,
+        help="Año(s) a verificar contra SQL Server, ej. --anios 2026 o --anios 2024 2025 2026",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -180,19 +127,22 @@ def main():
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
 
-    verificaciones = [
-        verificar_conectividad,
-        verificar_ddl_aplicado,
-        verificar_unicidad_vigencia,
-        lambda: verificar_totales_anio(args.anio),
-        lambda: verificar_vista_sin_duplicados(args.anio),
-    ]
-
     fallos = []
-    for verificacion in verificaciones:
+
+    for verificacion in (verificar_conectividad, verificar_ddl_aplicado):
         try:
             verificacion()
         except FalloVerificacion as exc:
+            logger.error("    FALLO: %s", exc)
+            fallos.append(str(exc))
+
+    # Solo corre la validación certificada si conectividad y DDL están OK;
+    # si esos fallan, correr validar_anios solo produciría el mismo error
+    # de conexión o de tabla inexistente, con menos contexto.
+    if not fallos:
+        try:
+            verificar_validacion_cruzada(args.anios)
+        except ValidacionFallida as exc:
             logger.error("    FALLO: %s", exc)
             fallos.append(str(exc))
 
