@@ -1,27 +1,25 @@
 """
 DAG: sietel_usuarios_cuentas_pipeline
 
-Orquesta la carga del módulo analítico "Usuarios y Cuentas":
-  1. Carga/actualiza las dimensiones versionadas (ISP, PermisoVAgregado)
-     -- SCD Tipo 2, una sola vez por corrida.
-  2. Carga los hechos (VAReporteUsuariosCuentas + geografía) un año a la
-     vez, usando dynamic task mapping para que cada año sea una task
-     independiente, visible y reintentable por separado en la UI de Airflow.
+Orquesta la carga del módulo analítico "Usuarios y Cuentas — Internet Fijo":
+  1. aplicar_esquema    — DDL idempotente contra PostgreSQL analítico.
+  2. cargar_dimensiones — SCD Tipo 2: ISP y PermisoVAgregado.
+  3. obtener_anios_a_cargar — determina qué años cargar en esta corrida.
+  4. cargar_hechos_de_anio  — extracción agregada de dbo.VALineasDedicadas,
+                              un año a la vez (dynamic task mapping).
+  5. validar_carga      — certificación cruzada SQL Server vs PostgreSQL.
 
-Para la carga histórica inicial (2011-2026), correr este DAG una vez con
-todos los años. Para operación regular (periodicidad mensual, ver decisión
-de diseño), el DAG se programa con schedule mensual y se ajusta el rango de
-años a [año_actual] únicamente -- ver variable AIRFLOW_VAR_ANIOS_A_CARGAR.
+VARIABLE DE AIRFLOW "sietel_anios_a_cargar":
+  "historico"  → carga todo el rango ANIO_INICIO_HISTORICO..ANIO_FIN_HISTORICO
+  "2025"       → carga solo ese año específico (útil para pruebas)
+  "2023,2024"  → carga esos años separados por coma
+  ausente/otro → carga únicamente el año en curso (modo mensual regular)
 """
 from datetime import datetime, timedelta
 import logging
 import os
 import sys
 
-# Airflow 3.x: los decoradores @dag/@task y Variable se importan desde
-# airflow.sdk, que es la interfaz pública estable para autores de DAGs.
-# Los import paths legacy (airflow.decorators, airflow.models.Variable)
-# quedaron deprecados y serán removidos en una versión futura.
 from airflow.sdk import dag, task, Variable
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
@@ -29,7 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 logger = logging.getLogger(__name__)
 
 ANIO_INICIO_HISTORICO = 2011
-ANIO_FIN_HISTORICO = 2026
+ANIO_FIN_HISTORICO = 2025  # copia tiene datos hasta 2025; ajustar a 2026 en producción
 
 default_args = {
     "owner": "equipo_analitica_sietel",
@@ -40,7 +38,7 @@ default_args = {
 
 @dag(
     dag_id="sietel_usuarios_cuentas_pipeline",
-    description="Carga SQL Server SIETEL -> PostgreSQL analítico, módulo Usuarios y Cuentas",
+    description="Carga SQL Server SIETEL → PostgreSQL analítico, módulo Usuarios y Cuentas",
     default_args=default_args,
     schedule="@monthly",
     start_date=datetime(2026, 1, 1),
@@ -50,15 +48,9 @@ default_args = {
 def sietel_usuarios_cuentas_pipeline():
     @task
     def aplicar_esquema():
-        """
-        Aplica sql/01_ddl_postgres.sql contra la base analítica (que ya
-        debe existir, ej. "sietel_analitico"). Idempotente: si las tablas
-        ya existen y tienen datos, no las destruye ni las recrea -- las
-        cláusulas IF NOT EXISTS / CREATE OR REPLACE VIEW del propio DDL
-        garantizan esto.
-        """
-        from aplicar_esquema import aplicar_esquema as _aplicar_esquema
-        _aplicar_esquema()
+        """Aplica sql/01_ddl_postgres.sql de forma idempotente."""
+        from aplicar_esquema import aplicar_esquema as _run
+        _run()
 
     @task
     def cargar_dimensiones():
@@ -69,19 +61,31 @@ def sietel_usuarios_cuentas_pipeline():
     @task
     def obtener_anios_a_cargar() -> list[int]:
         """
-        Determina qué años cargar en esta corrida.
+        Determina qué años cargar según la variable "sietel_anios_a_cargar":
 
-        - Variable de Airflow "sietel_anios_a_cargar" = "historico": carga
-          todo el rango 2011-2026 (usar solo para la carga inicial).
-        - Cualquier otro valor (o ausencia de la variable): carga únicamente
-          el año en curso, comportamiento esperado para corridas mensuales
-          regulares.
+          "historico"     → rango completo ANIO_INICIO_HISTORICO..ANIO_FIN_HISTORICO
+          "2025"          → solo ese año
+          "2023,2024,2025"→ lista de años separados por coma
+          ausente / otro  → solo el año en curso (modo mensual regular)
         """
-        modo = Variable.get("sietel_anios_a_cargar", default="mensual")
-        if modo == "historico":
+        valor = Variable.get("sietel_anios_a_cargar", default="mensual")
+
+        if valor.strip().lower() == "historico":
             anios = list(range(ANIO_INICIO_HISTORICO, ANIO_FIN_HISTORICO + 1))
             logger.info("Modo histórico: cargando años %s", anios)
             return anios
+
+        # Intentar interpretar como año(s) numérico(s): "2025" o "2023,2024,2025"
+        try:
+            partes = [p.strip() for p in valor.split(",") if p.strip()]
+            anios = [int(p) for p in partes]
+            if all(2000 <= a <= 2100 for a in anios):
+                logger.info("Modo año(s) específico(s): cargando %s", anios)
+                return anios
+        except ValueError:
+            pass
+
+        # Fallback: año en curso
         anio_actual = datetime.now().year
         logger.info("Modo mensual: cargando solo año %s", anio_actual)
         return [anio_actual]
@@ -93,17 +97,6 @@ def sietel_usuarios_cuentas_pipeline():
 
     @task
     def validar_carga(anios: list[int]):
-        """
-        Última tarea del DAG: compara conteos SQL Server vs PostgreSQL para
-        los años recién cargados, verifica que las dimensiones SCD no
-        tengan versiones vigentes duplicadas, y que la vista de consumo no
-        genere filas duplicadas por el JOIN de vigencia temporal.
-
-        Si encuentra cualquier discrepancia, esta tarea FALLA (la corrida
-        queda roja en la UI de Airflow) en vez de solo loguear una
-        advertencia que nadie revisaría. El resultado se registra también
-        en staging.control_cargas para auditoría histórica.
-        """
         from validar_carga import validar_anios
         validar_anios(anios)
 
