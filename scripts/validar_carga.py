@@ -10,11 +10,28 @@ La clave de comparación es la llave natural del agregado:
 (peva_codigo, par_codigo, periodoNumero, anio, tipoEnlace,
  tipoCliente, nivelComparticion, portador)
 que coincide con la CONSTRAINT uq_resumen_natural definida en el DDL.
+
+CAMBIO (16-jul-2026): certificación mes a mes.
+-----------------------------------------------
+cargar_hechos_anio.SQL_EXTRAER_HECHOS_ANIO cambió su firma de parámetros
+de (anio,) a (anio, periodoNumero) para poder particionar la carga por
+mes (ver cargar_hechos_anio.py). _certificar_contenido_por_anio importaba
+y ejecutaba esa misma consulta con un solo parámetro -- sin este cambio,
+la validación cruzada habría quedado rota (error de parámetros ODBC) la
+próxima vez que corriera, de forma silenciosa hasta que fallara.
+
+Este archivo ahora:
+  1. Recalcula la certificación de contenido iterando los 12 meses,
+     igual que la carga, en vez de un solo WHERE anio = ?.
+  2. Imprime un reporte consolidado al final de validar_anios(), en el
+     mismo estilo que el paso pipeline_validation de samm_pipeline
+     (conteos + ✅/❌ por chequeo), en vez de solo lanzar una excepción
+     con texto concatenado.
 """
 import logging
 from datetime import datetime
 
-from cargar_hechos_anio import SQL_EXTRAER_HECHOS_ANIO, calcular_hash_fila
+from cargar_hechos_anio import SQL_EXTRAER_HECHOS_ANIO, calcular_hash_fila, MESES_DEL_ANIO
 from config import postgres_cursor, sqlserver_cursor
 
 logger = logging.getLogger(__name__)
@@ -29,6 +46,10 @@ def _contar_sqlserver_por_anio(anio: int) -> int:
     Cuenta el número de filas del agregado (no del detalle crudo)
     que SQL Server produciría para el año dado. Equivale a contar
     combinaciones únicas del GROUP BY del SQL_EXTRAER_HECHOS_ANIO.
+
+    Esta consulta es independiente de SQL_EXTRAER_HECHOS_ANIO (tiene su
+    propio texto SQL con WHERE anio = ? solamente) -- no se ve afectada
+    por el cambio de firma a (anio, mes) del punto anterior.
     """
     with sqlserver_cursor() as cur:
         cur.execute(
@@ -76,8 +97,9 @@ def _make_key(fila: dict) -> tuple:
 
 def _certificar_contenido_por_anio(anio: int) -> dict:
     """
-    Recalcula el hash del agregado desde SQL Server y compara contra
-    los hashes almacenados en Postgres al momento de la carga.
+    Recalcula el hash del agregado desde SQL Server -- mes a mes, igual
+    que la carga en cargar_hechos_anio.py -- y compara contra los hashes
+    almacenados en Postgres al momento de la carga.
 
     Detecta tres tipos de discrepancia:
     - filas_con_contenido_distinto: misma llave natural, hash diferente
@@ -87,14 +109,12 @@ def _certificar_contenido_por_anio(anio: int) -> dict:
       (no debería ocurrir si el conteo ya coincidió, pero se verifica
       explícitamente para no asumir)
     """
+    hashes_origen = {}
     with sqlserver_cursor() as cur:
-        cur.execute(SQL_EXTRAER_HECHOS_ANIO, (anio,))
-        filas_origen = cur.fetchall()
-
-    hashes_origen = {
-        _make_key(f): calcular_hash_fila(f)
-        for f in filas_origen
-    }
+        for mes in MESES_DEL_ANIO:
+            cur.execute(SQL_EXTRAER_HECHOS_ANIO, (anio, mes))
+            for f in cur.fetchall():
+                hashes_origen[_make_key(f)] = calcular_hash_fila(f)
 
     with postgres_cursor(commit=False) as cur:
         cur.execute(
@@ -206,27 +226,94 @@ def _registrar_resultado(anio, estado, mensaje_error, fecha_inicio):
         )
 
 
+def _imprimir_reporte(resultados_por_anio: dict, problemas_vigencia: list):
+    """
+    Reporte consolidado al estilo pipeline_validation de samm_pipeline:
+    conteos + ✅/❌ por chequeo, en vez de solo una excepción con texto
+    concatenado. Se imprime siempre (éxito o fallo) para que quede
+    visible en los logs de la tarea de Airflow.
+    """
+    print(f"\n{'=' * 70}")
+    print("📊 REPORTE DE VALIDACIÓN — SIETEL PIPELINE")
+    print(f"{'=' * 70}")
+
+    if problemas_vigencia:
+        print("  Dimensiones SCD (vigencia única)                                 ❌")
+        for p in problemas_vigencia:
+            print(f"    ⚠️  {p}")
+    else:
+        print("  Dimensiones SCD (vigencia única)                                 ✅")
+
+    for anio, r in resultados_por_anio.items():
+        conteo_ok = r["filas_origen"] == r["filas_destino"]
+        contenido_ok = not r["distintas"] and not r["faltantes"]
+        vista_ok = not r["duplicados_vista"]
+
+        print(f"  ── Año {anio} " + "─" * (58 - len(str(anio))))
+        print(
+            f"    Conteo filas agregadas: {r['filas_origen']:,} (SQL Server) / "
+            f"{r['filas_destino']:,} (PostgreSQL)"
+            f"{'  ✅' if conteo_ok else '  ❌'}"
+        )
+        print(
+            f"    Certificación de contenido (hash MD5): "
+            f"{r['certificadas']:,}/{r['filas_origen']:,} idénticas"
+            f"{'  ✅' if contenido_ok else '  ❌'}"
+        )
+        if r["distintas"]:
+            print(f"      ⚠️  {len(r['distintas'])} fila(s) con contenido distinto")
+        if r["faltantes"]:
+            print(f"      ⚠️  {len(r['faltantes'])} fila(s) faltantes en PostgreSQL")
+        print(
+            f"    Vista analítico.v_lineas_dedicadas_resumen sin duplicados"
+            f"{'  ✅' if vista_ok else '  ❌'}"
+        )
+        if r["duplicados_vista"]:
+            print(f"      ⚠️  {len(r['duplicados_vista'])} combinación(es) duplicada(s)")
+
+    print(f"{'=' * 70}")
+    todo_ok = (
+            not problemas_vigencia
+            and all(
+        r["filas_origen"] == r["filas_destino"]
+        and not r["distintas"]
+        and not r["faltantes"]
+        and not r["duplicados_vista"]
+        for r in resultados_por_anio.values()
+    )
+    )
+    if todo_ok:
+        print("✅ ESTADO: Validación cruzada exitosa — datos certificados como consistentes")
+    else:
+        print("❌ ESTADO: Validación cruzada encontró discrepancias — ver detalle arriba")
+    print(f"{'=' * 70}\n")
+
+
 def validar_anios(anios: list[int]):
     """
     Valida, para cada año recién cargado:
       1. Conteo de filas agregadas idéntico entre SQL Server y PostgreSQL.
       2. Hash MD5 de contenido idéntico fila a fila (certificación real de
-         valores, no solo de cantidad).
+         valores, no solo de cantidad), recalculado mes a mes.
       3. Dimensiones SCD Tipo 2 sin versiones vigentes duplicadas.
       4. Vista de consumo sin duplicados por JOIN de vigencia temporal.
 
     Lanza ValidacionFallida si encuentra cualquier discrepancia, haciendo
     que la tarea de Airflow quede roja en la UI en vez de silenciar el error.
     Registra el resultado en staging.control_cargas para auditoría histórica.
+    Imprime siempre el reporte consolidado, haya o no errores.
     """
     inicio = datetime.now()
     errores = []
+    resultados_por_anio = {}
 
     problemas_vigencia = _verificar_unicidad_vigencia()
     if problemas_vigencia:
         errores.extend(problemas_vigencia)
 
     for anio in anios:
+        print(f"\nValidando año {anio}...")
+
         filas_origen = _contar_sqlserver_por_anio(anio)
         filas_destino = _contar_postgres_por_anio(anio)
 
@@ -239,6 +326,7 @@ def validar_anios(anios: list[int]):
         else:
             logger.info("Año %s: %s filas agregadas en ambos lados, OK.", anio, filas_origen)
 
+        print(f"  Certificando contenido mes a mes (12 consultas a SQL Server)...")
         cert = _certificar_contenido_por_anio(anio)
         logger.info(
             "Año %s: %s filas certificadas con contenido idéntico al origen.",
@@ -265,6 +353,17 @@ def validar_anios(anios: list[int]):
                 f"devuelve duplicados en {len(duplicados_vista)} combinación(es) "
                 f"(JOIN de vigencia temporal matchea más de una versión de dimensión)."
             )
+
+        resultados_por_anio[anio] = {
+            "filas_origen": filas_origen,
+            "filas_destino": filas_destino,
+            "certificadas": cert["filas_certificadas"],
+            "distintas": cert["filas_con_contenido_distinto"],
+            "faltantes": cert["filas_faltantes_en_destino"],
+            "duplicados_vista": duplicados_vista,
+        }
+
+    _imprimir_reporte(resultados_por_anio, problemas_vigencia)
 
     if errores:
         mensaje = "; ".join(errores)

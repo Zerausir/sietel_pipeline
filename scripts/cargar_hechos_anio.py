@@ -1,46 +1,48 @@
 """
-Carga de la tabla de hechos staging.va_lineas_dedicadas_resumen, un año
-a la vez (parametrizado por el DAG).
+Extracción y carga de hechos agregados de dbo.VALineasDedicadas hacia
+staging.va_lineas_dedicadas_resumen.
 
-FUENTE: dbo.VALineasDedicadas (SQL Server)
-DESTINO: staging.va_lineas_dedicadas_resumen (PostgreSQL local)
+Agregación GROUP BY ejecutada en SQL Server (no se transfiere detalle
+crudo). Rangos clasificados por downLink/upLink en Kbps:
+  usuarios_dl/ul_sin_datos, menos_1mbps, 1_10mbps, 10_30mbps,
+  30_100mbps, 100mbps_1gbps, 1gbps_o_mas.
 
-ESTRATEGIA — AGREGADO EN ORIGEN:
-La agregación se realiza en SQL Server antes de transferir, reduciendo
-272M filas históricas a ~50K-200K filas por año. El índice compuesto
-IX_VALineasDedicadas_Analitico (anio, periodoNumero, peva_codigo,
-par_codigo) cubre el filtro y el GROUP BY. Reducción de red: 99%+.
-
-CLASIFICACIÓN POR RANGOS DE VELOCIDAD (downLink y upLink en Kbps):
-Rangos definidos a partir de la distribución real del mercado ecuatoriano
-verificada con datos de diciembre 2025 (2.917.304 líneas):
-
-  < 1 Mbps      (< 1.024 Kbps)  → sin banda ancha básica, brecha digital
-  1 - 10 Mbps   (1.024 - 10.239 Kbps) → banda ancha básica (umbral ITU)
-  10 - 30 Mbps  (10.240 - 30.719 Kbps) → banda ancha media (umbral OCDE)
-  30 - 100 Mbps (30.720 - 102.399 Kbps) → banda ancha avanzada (umbral UE)
-  100 Mbps - 1 Gbps (102.400 - 1.048.575 Kbps) → ultra banda ancha
-  ≥ 1 Gbps      (>= 1.048.576 Kbps) → gigabit (segmento premium)
-  Sin datos     (NULL o 0) → no reportado
-
-Distribución diciembre 2025 verificada:
-  < 1 Mbps:        40.436 líneas / 174.060 usuarios
-  1-10 Mbps:       53.729 líneas / 322.022 usuarios
-  10-30 Mbps:     114.084 líneas / 4.459.022 usuarios
-  30-100 Mbps:    316.076 líneas / 4.978.130 usuarios
-  100 Mbps-1 Gbps: 2.223.155 líneas / 14.332.328 usuarios
-  ≥ 1 Gbps:       169.824 líneas / 1.990.096 usuarios
-
-GROUP BY: peva_codigo, par_codigo, periodoNumero, periodoNombre, anio,
-          tipoEnlace, tipoCliente, nivelComparticion, portador
 Cardinalidad verificada enero 2025: tipoEnlace(4), tipoCliente(3),
-nivelComparticion(14), portador(138) → granularidad manejable.
+nivelComparticion(14), portador(138).
 upLink(1.457) y downLink(955) → NO en GROUP BY, se convierten en métricas.
+
+CAMBIO (16-jul-2026): partición mensual + execute_batch.
+--------------------------------------------------------
+La versión anterior traía el año completo con un solo fetchall() y
+después hacía un pg_cur.execute() individual por fila dentro del mismo
+bloque `with postgres_cursor()`. Para 2025 (31.8M filas brutas, agregado
+resultante de decenas de miles de filas) la tarea superaba 26 minutos sin
+completar. El cuello de botella no era el fetchall() de SQL Server (el
+agregado cabe cómodo en memoria) sino el patrón de un round-trip de red
+a Postgres por cada fila — el mismo antipatrón que samm_pipeline ya
+documentó haber eliminado en app/utils/postgres_handler.py
+("Eliminado el patrón SAVEPOINT-por-registro... Reemplazado por
+execute_batch").
+
+Este archivo aplica el mismo fix aquí:
+  1. SQL_EXTRAER_HECHOS_ANIO ahora filtra por anio Y periodoNumero -> se
+     extrae mes a mes, aprovechando el prefijo (anio, periodoNumero, ...)
+     del índice IX_VALineasDedicadas_Analitico.
+  2. La carga a Postgres usa psycopg2.extras.execute_batch en vez de
+     execute() por fila.
+
+IMPORTANTE: validar_carga.py importa SQL_EXTRAER_HECHOS_ANIO y
+calcular_hash_fila desde este módulo. Al cambiar la firma de parámetros
+de la consulta (de (anio,) a (anio, mes)), validar_carga.py fue
+actualizado en el mismo cambio para iterar los 12 meses -- si se
+modifica esta consulta de nuevo, revisar validar_carga.py también.
 """
 import argparse
 import hashlib
 import logging
 from datetime import datetime
+
+from psycopg2.extras import execute_batch
 
 from config import postgres_cursor, sqlserver_cursor
 
@@ -66,6 +68,13 @@ COLUMNAS_HASH = [
     "usuarios_ul_30_100mbps",
     "usuarios_ul_100mbps_1gbps",
     "usuarios_ul_1gbps_o_mas",
+]
+
+MESES_DEL_ANIO = list(range(1, 13))
+
+NOMBRE_MES = [
+    None, "enero", "febrero", "marzo", "abril", "mayo", "junio",
+    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
 ]
 
 
@@ -139,7 +148,7 @@ SQL_EXTRAER_HECHOS_ANIO = """
     LEFT JOIN dbo.Parroquia par  ON par.par_codigo  = ld.par_codigo
     LEFT JOIN dbo.Ciudad    ciu  ON ciu.ciu_codigo  = par.ciu_codigo
     LEFT JOIN dbo.Provincia prov ON prov.pro_codigo = ciu.pro_codigo
-    WHERE ld.anio = ?
+    WHERE ld.anio = ? AND ld.periodoNumero = ?
     GROUP BY
         ld.peva_codigo, ld.par_codigo, ld.periodoNumero,
         ld.periodoNombre, ld.anio, ld.tipoEnlace,
@@ -196,50 +205,116 @@ SQL_UPSERT_HECHOS = """
 """
 
 
+def _fila_a_tupla(fila: dict, hash_fila: str) -> tuple:
+    """
+    Convierte una fila (dict, vía _DictCursorWrapper) a la tupla posicional
+    que espera SQL_UPSERT_HECHOS, en el orden EXACTO de columnas del INSERT.
+    Si se agrega una columna al DDL o al SELECT, hay que agregarla aquí
+    también, en la misma posición.
+    """
+    return (
+        fila["peva_codigo"], fila["par_codigo"],
+        fila["periodoNumero"], fila["periodoNombre"],
+        fila["anio"], fila["tipoEnlace"],
+        fila["tipoCliente"], fila["nivelComparticion"],
+        fila["portador"], fila["regional"],
+        fila["pro_nombre"], fila["ciu_nombre"], fila["par_nombre"],
+        fila["total_lineas"], fila["total_usuarios"],
+        fila["usuarios_dl_sin_datos"],
+        fila["usuarios_dl_menos_1mbps"],
+        fila["usuarios_dl_1_10mbps"],
+        fila["usuarios_dl_10_30mbps"],
+        fila["usuarios_dl_30_100mbps"],
+        fila["usuarios_dl_100mbps_1gbps"],
+        fila["usuarios_dl_1gbps_o_mas"],
+        fila["usuarios_ul_sin_datos"],
+        fila["usuarios_ul_menos_1mbps"],
+        fila["usuarios_ul_1_10mbps"],
+        fila["usuarios_ul_10_30mbps"],
+        fila["usuarios_ul_30_100mbps"],
+        fila["usuarios_ul_100mbps_1gbps"],
+        fila["usuarios_ul_1gbps_o_mas"],
+        hash_fila,
+    )
+
+
+def _cargar_mes(ms_cur, pg_cur, anio: int, mes: int) -> int:
+    """
+    Extrae y carga un único mes (anio, periodoNumero=mes).
+    Usa execute_batch en vez de un execute() por fila: reemplaza N
+    round-trips de red a Postgres por N/page_size round-trips, mismo
+    patrón que samm_pipeline/app/utils/postgres_handler.py.
+
+    Mide por separado el tiempo de extracción (SQL Server) y el tiempo
+    de upsert (Postgres) -- no asumir cuál de los dos domina el tiempo
+    total sin medirlo por separado.
+    """
+    nombre_mes = NOMBRE_MES[mes]
+    print(f"  Mes {mes:>2}/12 ({nombre_mes:<10}) — extrayendo de SQL Server...")
+
+    t_extraccion_inicio = datetime.now()
+    ms_cur.execute(SQL_EXTRAER_HECHOS_ANIO, (anio, mes))
+    filas = ms_cur.fetchall()
+    t_extraccion = (datetime.now() - t_extraccion_inicio).total_seconds()
+
+    if not filas:
+        print(f"  Mes {mes:>2}/12 ({nombre_mes:<10}) — 0 filas (sin datos reportados)")
+        logger.info("Año %s, mes %s: 0 filas agregadas (sin datos reportados).", anio, mes)
+        return 0
+
+    t_upsert_inicio = datetime.now()
+    tuplas = [_fila_a_tupla(fila, calcular_hash_fila(fila)) for fila in filas]
+    execute_batch(pg_cur, SQL_UPSERT_HECHOS, tuplas, page_size=1000)
+    t_upsert = (datetime.now() - t_upsert_inicio).total_seconds()
+
+    print(
+        f"  Mes {mes:>2}/12 ({nombre_mes:<10}) — {len(tuplas):,} filas → upsert OK  "
+        f"[SQL Server: {t_extraccion:.2f}s | Postgres upsert: {t_upsert:.2f}s]"
+    )
+    logger.info(
+        "Año %s, mes %s: %s filas agregadas procesadas (extraccion=%.2fs, upsert=%.2fs).",
+        anio, mes, len(tuplas), t_extraccion, t_upsert,
+    )
+    return len(tuplas)
+
+
 def cargar_hechos_anio(anio: int):
+    """
+    Carga el año completo iterando mes a mes (periodoNumero 1..12).
+
+    Por qué mes a mes y no el año de una sola vez:
+      1. Aprovecha el prefijo (anio, periodoNumero) del índice
+         IX_VALineasDedicadas_Analitico -> cada consulta mensual usa el
+         índice de forma óptima en vez de escanear el año completo.
+      2. Acota el radio de un fallo a un mes, no al año entero -- si un
+         mes específico tiene un dato corrupto, el resto del año no se
+         pierde ni hay que reprocesarlo (el UPSERT es idempotente por mes).
+      3. Reduce el volumen mantenido en memoria por consulta.
+
+    Una sola conexión Postgres para todo el año (un commit al final,
+    vía postgres_cursor()), pero con execute_batch por mes en vez de
+    execute() fila por fila -- las dos causas originales del problema
+    de rendimiento se atacan juntas, no por separado.
+    """
     inicio = datetime.now()
     filas_procesadas = 0
+    print(f"\n{'=' * 60}")
+    print(f"CARGA DE HECHOS — AÑO {anio} (particionado por mes)")
+    print(f"{'=' * 60}")
     try:
         with sqlserver_cursor() as ms_cur, postgres_cursor() as pg_cur:
-            ms_cur.execute(SQL_EXTRAER_HECHOS_ANIO, (anio,))
-            filas = ms_cur.fetchall()
+            for mes in MESES_DEL_ANIO:
+                filas_procesadas += _cargar_mes(ms_cur, pg_cur, anio, mes)
 
-            for fila in filas:
-                hash_fila = calcular_hash_fila(fila)
-                pg_cur.execute(
-                    SQL_UPSERT_HECHOS,
-                    (
-                        fila["peva_codigo"], fila["par_codigo"],
-                        fila["periodoNumero"], fila["periodoNombre"],
-                        fila["anio"], fila["tipoEnlace"],
-                        fila["tipoCliente"], fila["nivelComparticion"],
-                        fila["portador"], fila["regional"],
-                        fila["pro_nombre"], fila["ciu_nombre"],
-                        fila["par_nombre"],
-                        fila["total_lineas"], fila["total_usuarios"],
-                        fila["usuarios_dl_sin_datos"],
-                        fila["usuarios_dl_menos_1mbps"],
-                        fila["usuarios_dl_1_10mbps"],
-                        fila["usuarios_dl_10_30mbps"],
-                        fila["usuarios_dl_30_100mbps"],
-                        fila["usuarios_dl_100mbps_1gbps"],
-                        fila["usuarios_dl_1gbps_o_mas"],
-                        fila["usuarios_ul_sin_datos"],
-                        fila["usuarios_ul_menos_1mbps"],
-                        fila["usuarios_ul_1_10mbps"],
-                        fila["usuarios_ul_10_30mbps"],
-                        fila["usuarios_ul_30_100mbps"],
-                        fila["usuarios_ul_100mbps_1gbps"],
-                        fila["usuarios_ul_1gbps_o_mas"],
-                        hash_fila,
-                    ),
-                )
-                filas_procesadas += 1
-
+        duracion = (datetime.now() - inicio).total_seconds()
+        print(f"{'-' * 60}")
+        print(f"✅ Año {anio} completo: {filas_procesadas:,} filas agregadas en {duracion:.1f}s")
+        print(f"{'=' * 60}\n")
         _registrar_carga("hechos_anual", anio, filas_procesadas, 0, "EXITOSO", None, inicio)
-        logger.info("Año %s: %s filas agregadas procesadas.", anio, filas_procesadas)
+        logger.info("Año %s: %s filas agregadas procesadas (12 meses).", anio, filas_procesadas)
 
     except Exception as exc:
+        print(f"❌ Año {anio} FALLÓ tras {filas_procesadas:,} filas procesadas: {exc}")
         _registrar_carga("hechos_anual", anio, filas_procesadas, 0, "FALLIDO", str(exc), inicio)
         logger.exception("Error cargando hechos del año %s", anio)
         raise
@@ -260,9 +335,26 @@ def _registrar_carga(tipo_carga, anio, insertadas, actualizadas, estado, mensaje
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Carga agregado anual de dbo.VALineasDedicadas hacia "
-                    "staging.va_lineas_dedicadas_resumen."
+        description="Carga agregado anual (particionado por mes) de "
+                    "dbo.VALineasDedicadas hacia staging.va_lineas_dedicadas_resumen."
     )
     parser.add_argument("--anio", type=int, required=True, help="Año a cargar, ej. 2025")
+    parser.add_argument(
+        "--mes", type=int, default=None,
+        help="Mes específico 1-12 para una prueba puntual (ej. smoke test antes del histórico). "
+             "Si se omite, carga los 12 meses del año.",
+    )
     args = parser.parse_args()
-    cargar_hechos_anio(args.anio)
+
+    if args.mes is not None:
+        t0 = datetime.now()
+        with sqlserver_cursor() as ms_cur, postgres_cursor() as pg_cur:
+            n = _cargar_mes(ms_cur, pg_cur, args.anio, args.mes)
+        duracion = (datetime.now() - t0).total_seconds()
+        tasa = n / duracion if duracion > 0 else 0
+        print(
+            f"Año {args.anio}, mes {args.mes}: {n:,} filas agregadas procesadas "
+            f"en {duracion:.2f}s ({tasa:,.0f} filas/s)."
+        )
+    else:
+        cargar_hechos_anio(args.anio)
