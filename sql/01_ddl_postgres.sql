@@ -364,7 +364,12 @@ SELECT
     p.peva_codigo,
     p.nombreComercial,
     p.opera,                                    -- estado administrativo ACTUAL
+    p.Resolucion,
+    p.fechaPermiso,
     isp.isp_nombre,
+    isp.isp_ruc,
+    isp.isp_tipoPersona,
+    isp.regional                    AS isp_regional,
     u.ultimo_anio,
     u.ultimo_periodo_numero,
     u.ultimo_periodo_nombre,
