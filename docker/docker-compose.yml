@@ -10,7 +10,7 @@ x-airflow-common:
     AIRFLOW__CORE__FERNET_KEY: '${AIRFLOW__CORE__FERNET_KEY}'
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: '4'   # limita concurrencia: no saturar SQL Server SIETEL sin indices
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: '2'   # limita concurrencia: no saturar SQL Server SIETEL sin indices
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: '${_AIRFLOW_WWW_USER_USERNAME}:admin'
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-webserver:8080/execution/'
     AIRFLOW__API_AUTH__JWT_SECRET: '${AIRFLOW__API_AUTH__JWT_SECRET}'

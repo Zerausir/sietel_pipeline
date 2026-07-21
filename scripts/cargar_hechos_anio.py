@@ -4,38 +4,40 @@ staging.va_lineas_dedicadas_resumen.
 
 Agregación GROUP BY ejecutada en SQL Server (no se transfiere detalle
 crudo). Rangos clasificados por downLink/upLink en Kbps:
-  usuarios_dl/ul_sin_datos, menos_1mbps, 1_10mbps, 10_30mbps,
+  lineas_dl/ul_sin_datos, menos_1mbps, 1_10mbps, 10_30mbps,
   30_100mbps, 100mbps_1gbps, 1gbps_o_mas.
 
 Cardinalidad verificada enero 2025: tipoEnlace(4), tipoCliente(3),
 nivelComparticion(14), portador(138).
 upLink(1.457) y downLink(955) → NO en GROUP BY, se convierten en métricas.
 
-CAMBIO (16-jul-2026): partición mensual + execute_batch.
---------------------------------------------------------
-La versión anterior traía el año completo con un solo fetchall() y
-después hacía un pg_cur.execute() individual por fila dentro del mismo
-bloque `with postgres_cursor()`. Para 2025 (31.8M filas brutas, agregado
-resultante de decenas de miles de filas) la tarea superaba 26 minutos sin
-completar. El cuello de botella no era el fetchall() de SQL Server (el
-agregado cabe cómodo en memoria) sino el patrón de un round-trip de red
-a Postgres por cada fila — el mismo antipatrón que samm_pipeline ya
-documentó haber eliminado en app/utils/postgres_handler.py
-("Eliminado el patrón SAVEPOINT-por-registro... Reemplazado por
-execute_batch").
+CAMBIO (20-jul-2026): lineas_dl/ul_* reemplaza a usuarios_dl/ul_*.
+-------------------------------------------------------------------
+Las columnas por rango de velocidad medían SUM(numeroUsuarios) -- total de
+usuarios finales en ese rango. El área de Mercados necesita CONTEO DE
+LÍNEAS/CUENTAS en ese rango, no usuarios finales (dos magnitudes distintas:
+una línea compartida puede reportar varios usuarios). Se reemplazaron
+-- no se agregaron -- las columnas: mismo nombre de rango, prefijo
+lineas_ en vez de usuarios_, y la fórmula pasa de SUM(numeroUsuarios) a
+un conteo de filas (SUM(CASE WHEN cond THEN 1 ELSE 0 END)).
+total_lineas y total_usuarios (los totales generales, no por rango) NO
+cambian -- siguen siendo COUNT(*) y SUM(numeroUsuarios) respectivamente,
+tal como se confirmó explícitamente con Iván antes de este cambio.
 
-Este archivo aplica el mismo fix aquí:
-  1. SQL_EXTRAER_HECHOS_ANIO ahora filtra por anio Y periodoNumero -> se
-     extrae mes a mes, aprovechando el prefijo (anio, periodoNumero, ...)
-     del índice IX_VALineasDedicadas_Analitico.
-  2. La carga a Postgres usa psycopg2.extras.execute_batch en vez de
-     execute() por fila.
+No se agrega fechaCreacion en este cambio (decisión explícita: evitar
+tener que reconstruir el índice IX_VALineasDedicadas_Analitico de nuevo).
 
-IMPORTANTE: validar_carga.py importa SQL_EXTRAER_HECHOS_ANIO y
-calcular_hash_fila desde este módulo. Al cambiar la firma de parámetros
-de la consulta (de (anio,) a (anio, mes)), validar_carga.py fue
-actualizado en el mismo cambio para iterar los 12 meses -- si se
-modifica esta consulta de nuevo, revisar validar_carga.py también.
+IMPORTANTE: validar_carga.py importa SQL_EXTRAER_HECHOS_ANIO, COLUMNAS_HASH
+y calcular_hash_fila desde este módulo -- no necesita cambios propios
+porque no referencia nombres de columna de rango directamente, solo
+itera sobre COLUMNAS_HASH genéricamente.
+
+AVISO PARA QUIEN CORRA ESTE CAMBIO: como esto no es un simple rename sino
+un cambio de fórmula, cualquier año ya cargado (ej. 2025 en la copia)
+tiene que volver a cargarse -- el UPSERT es idempotente por llave natural,
+así que volver a correr cargar_hechos_anio(anio) es seguro y sobrescribe
+los valores viejos (que quedarían con el nombre nuevo pero el dato viejo
+de SUM(numeroUsuarios) si no se recarga).
 """
 import argparse
 import hashlib
@@ -52,22 +54,22 @@ COLUMNAS_HASH = [
     "peva_codigo", "par_codigo", "periodoNumero", "anio",
     "tipoEnlace", "tipoCliente", "nivelComparticion", "portador",
     "total_lineas", "total_usuarios",
-    # Rangos downLink
-    "usuarios_dl_sin_datos",
-    "usuarios_dl_menos_1mbps",
-    "usuarios_dl_1_10mbps",
-    "usuarios_dl_10_30mbps",
-    "usuarios_dl_30_100mbps",
-    "usuarios_dl_100mbps_1gbps",
-    "usuarios_dl_1gbps_o_mas",
-    # Rangos upLink
-    "usuarios_ul_sin_datos",
-    "usuarios_ul_menos_1mbps",
-    "usuarios_ul_1_10mbps",
-    "usuarios_ul_10_30mbps",
-    "usuarios_ul_30_100mbps",
-    "usuarios_ul_100mbps_1gbps",
-    "usuarios_ul_1gbps_o_mas",
+    # Rangos downLink (conteo de líneas, no de usuarios)
+    "lineas_dl_sin_datos",
+    "lineas_dl_menos_1mbps",
+    "lineas_dl_1_10mbps",
+    "lineas_dl_10_30mbps",
+    "lineas_dl_30_100mbps",
+    "lineas_dl_100mbps_1gbps",
+    "lineas_dl_1gbps_o_mas",
+    # Rangos upLink (conteo de líneas, no de usuarios)
+    "lineas_ul_sin_datos",
+    "lineas_ul_menos_1mbps",
+    "lineas_ul_1_10mbps",
+    "lineas_ul_10_30mbps",
+    "lineas_ul_30_100mbps",
+    "lineas_ul_100mbps_1gbps",
+    "lineas_ul_1gbps_o_mas",
 ]
 
 MESES_DEL_ANIO = list(range(1, 13))
@@ -101,48 +103,51 @@ SQL_EXTRAER_HECHOS_ANIO = """
         prov.pro_nombre,
         ciu.ciu_nombre,
         par.par_nombre,
-        -- Volumen total
+        -- Volumen total (sin cambios: total_lineas = COUNT(*),
+        -- total_usuarios = SUM(numeroUsuarios))
         COUNT(*)                                                    AS total_lineas,
         SUM(ld.numeroUsuarios)                                      AS total_usuarios,
 
         -- ── Clasificación por downLink (velocidad de bajada) ──────────────
+        -- CONTEO DE LÍNEAS en cada rango, no SUM(numeroUsuarios).
         -- Sin datos: NULL o 0 Kbps — no reportado por el prestador
         SUM(CASE WHEN ld.downLink IS NULL OR ld.downLink = 0
-                 THEN ld.numeroUsuarios ELSE 0 END)                 AS usuarios_dl_sin_datos,
+                 THEN 1 ELSE 0 END)                                 AS lineas_dl_sin_datos,
         -- < 1 Mbps: sin banda ancha básica, brecha digital
         SUM(CASE WHEN ld.downLink > 0 AND ld.downLink < 1024
-                 THEN ld.numeroUsuarios ELSE 0 END)                 AS usuarios_dl_menos_1mbps,
+                 THEN 1 ELSE 0 END)                                 AS lineas_dl_menos_1mbps,
         -- 1 – 10 Mbps: banda ancha básica (umbral mínimo ITU)
         SUM(CASE WHEN ld.downLink >= 1024 AND ld.downLink < 10240
-                 THEN ld.numeroUsuarios ELSE 0 END)                 AS usuarios_dl_1_10mbps,
+                 THEN 1 ELSE 0 END)                                 AS lineas_dl_1_10mbps,
         -- 10 – 30 Mbps: banda ancha media (umbral básico OCDE)
         SUM(CASE WHEN ld.downLink >= 10240 AND ld.downLink < 30720
-                 THEN ld.numeroUsuarios ELSE 0 END)                 AS usuarios_dl_10_30mbps,
+                 THEN 1 ELSE 0 END)                                 AS lineas_dl_10_30mbps,
         -- 30 – 100 Mbps: banda ancha avanzada (umbral UE)
         SUM(CASE WHEN ld.downLink >= 30720 AND ld.downLink < 102400
-                 THEN ld.numeroUsuarios ELSE 0 END)                 AS usuarios_dl_30_100mbps,
+                 THEN 1 ELSE 0 END)                                 AS lineas_dl_30_100mbps,
         -- 100 Mbps – 1 Gbps: ultra banda ancha (segmento dominante en Ecuador)
         SUM(CASE WHEN ld.downLink >= 102400 AND ld.downLink < 1048576
-                 THEN ld.numeroUsuarios ELSE 0 END)                 AS usuarios_dl_100mbps_1gbps,
+                 THEN 1 ELSE 0 END)                                 AS lineas_dl_100mbps_1gbps,
         -- ≥ 1 Gbps: gigabit (segmento premium)
         SUM(CASE WHEN ld.downLink >= 1048576
-                 THEN ld.numeroUsuarios ELSE 0 END)                 AS usuarios_dl_1gbps_o_mas,
+                 THEN 1 ELSE 0 END)                                 AS lineas_dl_1gbps_o_mas,
 
         -- ── Clasificación por upLink (velocidad de subida) ────────────────
+        -- CONTEO DE LÍNEAS en cada rango, no SUM(numeroUsuarios).
         SUM(CASE WHEN ld.upLink IS NULL OR ld.upLink = 0
-                 THEN ld.numeroUsuarios ELSE 0 END)                 AS usuarios_ul_sin_datos,
+                 THEN 1 ELSE 0 END)                                 AS lineas_ul_sin_datos,
         SUM(CASE WHEN ld.upLink > 0 AND ld.upLink < 1024
-                 THEN ld.numeroUsuarios ELSE 0 END)                 AS usuarios_ul_menos_1mbps,
+                 THEN 1 ELSE 0 END)                                 AS lineas_ul_menos_1mbps,
         SUM(CASE WHEN ld.upLink >= 1024 AND ld.upLink < 10240
-                 THEN ld.numeroUsuarios ELSE 0 END)                 AS usuarios_ul_1_10mbps,
+                 THEN 1 ELSE 0 END)                                 AS lineas_ul_1_10mbps,
         SUM(CASE WHEN ld.upLink >= 10240 AND ld.upLink < 30720
-                 THEN ld.numeroUsuarios ELSE 0 END)                 AS usuarios_ul_10_30mbps,
+                 THEN 1 ELSE 0 END)                                 AS lineas_ul_10_30mbps,
         SUM(CASE WHEN ld.upLink >= 30720 AND ld.upLink < 102400
-                 THEN ld.numeroUsuarios ELSE 0 END)                 AS usuarios_ul_30_100mbps,
+                 THEN 1 ELSE 0 END)                                 AS lineas_ul_30_100mbps,
         SUM(CASE WHEN ld.upLink >= 102400 AND ld.upLink < 1048576
-                 THEN ld.numeroUsuarios ELSE 0 END)                 AS usuarios_ul_100mbps_1gbps,
+                 THEN 1 ELSE 0 END)                                 AS lineas_ul_100mbps_1gbps,
         SUM(CASE WHEN ld.upLink >= 1048576
-                 THEN ld.numeroUsuarios ELSE 0 END)                 AS usuarios_ul_1gbps_o_mas
+                 THEN 1 ELSE 0 END)                                 AS lineas_ul_1gbps_o_mas
 
     FROM dbo.VALineasDedicadas ld
     LEFT JOIN dbo.Parroquia par  ON par.par_codigo  = ld.par_codigo
@@ -162,14 +167,14 @@ SQL_UPSERT_HECHOS = """
         tipoEnlace, tipoCliente, nivelComparticion, portador, regional,
         pro_nombre, ciu_nombre, par_nombre,
         total_lineas, total_usuarios,
-        usuarios_dl_sin_datos, usuarios_dl_menos_1mbps,
-        usuarios_dl_1_10mbps, usuarios_dl_10_30mbps,
-        usuarios_dl_30_100mbps, usuarios_dl_100mbps_1gbps,
-        usuarios_dl_1gbps_o_mas,
-        usuarios_ul_sin_datos, usuarios_ul_menos_1mbps,
-        usuarios_ul_1_10mbps, usuarios_ul_10_30mbps,
-        usuarios_ul_30_100mbps, usuarios_ul_100mbps_1gbps,
-        usuarios_ul_1gbps_o_mas,
+        lineas_dl_sin_datos, lineas_dl_menos_1mbps,
+        lineas_dl_1_10mbps, lineas_dl_10_30mbps,
+        lineas_dl_30_100mbps, lineas_dl_100mbps_1gbps,
+        lineas_dl_1gbps_o_mas,
+        lineas_ul_sin_datos, lineas_ul_menos_1mbps,
+        lineas_ul_1_10mbps, lineas_ul_10_30mbps,
+        lineas_ul_30_100mbps, lineas_ul_100mbps_1gbps,
+        lineas_ul_1gbps_o_mas,
         hash_contenido
     ) VALUES (
         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
@@ -186,20 +191,20 @@ SQL_UPSERT_HECHOS = """
         par_nombre                = EXCLUDED.par_nombre,
         total_lineas              = EXCLUDED.total_lineas,
         total_usuarios            = EXCLUDED.total_usuarios,
-        usuarios_dl_sin_datos     = EXCLUDED.usuarios_dl_sin_datos,
-        usuarios_dl_menos_1mbps   = EXCLUDED.usuarios_dl_menos_1mbps,
-        usuarios_dl_1_10mbps      = EXCLUDED.usuarios_dl_1_10mbps,
-        usuarios_dl_10_30mbps     = EXCLUDED.usuarios_dl_10_30mbps,
-        usuarios_dl_30_100mbps    = EXCLUDED.usuarios_dl_30_100mbps,
-        usuarios_dl_100mbps_1gbps = EXCLUDED.usuarios_dl_100mbps_1gbps,
-        usuarios_dl_1gbps_o_mas   = EXCLUDED.usuarios_dl_1gbps_o_mas,
-        usuarios_ul_sin_datos     = EXCLUDED.usuarios_ul_sin_datos,
-        usuarios_ul_menos_1mbps   = EXCLUDED.usuarios_ul_menos_1mbps,
-        usuarios_ul_1_10mbps      = EXCLUDED.usuarios_ul_1_10mbps,
-        usuarios_ul_10_30mbps     = EXCLUDED.usuarios_ul_10_30mbps,
-        usuarios_ul_30_100mbps    = EXCLUDED.usuarios_ul_30_100mbps,
-        usuarios_ul_100mbps_1gbps = EXCLUDED.usuarios_ul_100mbps_1gbps,
-        usuarios_ul_1gbps_o_mas   = EXCLUDED.usuarios_ul_1gbps_o_mas,
+        lineas_dl_sin_datos       = EXCLUDED.lineas_dl_sin_datos,
+        lineas_dl_menos_1mbps     = EXCLUDED.lineas_dl_menos_1mbps,
+        lineas_dl_1_10mbps        = EXCLUDED.lineas_dl_1_10mbps,
+        lineas_dl_10_30mbps       = EXCLUDED.lineas_dl_10_30mbps,
+        lineas_dl_30_100mbps      = EXCLUDED.lineas_dl_30_100mbps,
+        lineas_dl_100mbps_1gbps   = EXCLUDED.lineas_dl_100mbps_1gbps,
+        lineas_dl_1gbps_o_mas     = EXCLUDED.lineas_dl_1gbps_o_mas,
+        lineas_ul_sin_datos       = EXCLUDED.lineas_ul_sin_datos,
+        lineas_ul_menos_1mbps     = EXCLUDED.lineas_ul_menos_1mbps,
+        lineas_ul_1_10mbps        = EXCLUDED.lineas_ul_1_10mbps,
+        lineas_ul_10_30mbps       = EXCLUDED.lineas_ul_10_30mbps,
+        lineas_ul_30_100mbps      = EXCLUDED.lineas_ul_30_100mbps,
+        lineas_ul_100mbps_1gbps   = EXCLUDED.lineas_ul_100mbps_1gbps,
+        lineas_ul_1gbps_o_mas     = EXCLUDED.lineas_ul_1gbps_o_mas,
         hash_contenido            = EXCLUDED.hash_contenido,
         fecha_carga               = now()
 """
@@ -220,20 +225,20 @@ def _fila_a_tupla(fila: dict, hash_fila: str) -> tuple:
         fila["portador"], fila["regional"],
         fila["pro_nombre"], fila["ciu_nombre"], fila["par_nombre"],
         fila["total_lineas"], fila["total_usuarios"],
-        fila["usuarios_dl_sin_datos"],
-        fila["usuarios_dl_menos_1mbps"],
-        fila["usuarios_dl_1_10mbps"],
-        fila["usuarios_dl_10_30mbps"],
-        fila["usuarios_dl_30_100mbps"],
-        fila["usuarios_dl_100mbps_1gbps"],
-        fila["usuarios_dl_1gbps_o_mas"],
-        fila["usuarios_ul_sin_datos"],
-        fila["usuarios_ul_menos_1mbps"],
-        fila["usuarios_ul_1_10mbps"],
-        fila["usuarios_ul_10_30mbps"],
-        fila["usuarios_ul_30_100mbps"],
-        fila["usuarios_ul_100mbps_1gbps"],
-        fila["usuarios_ul_1gbps_o_mas"],
+        fila["lineas_dl_sin_datos"],
+        fila["lineas_dl_menos_1mbps"],
+        fila["lineas_dl_1_10mbps"],
+        fila["lineas_dl_10_30mbps"],
+        fila["lineas_dl_30_100mbps"],
+        fila["lineas_dl_100mbps_1gbps"],
+        fila["lineas_dl_1gbps_o_mas"],
+        fila["lineas_ul_sin_datos"],
+        fila["lineas_ul_menos_1mbps"],
+        fila["lineas_ul_1_10mbps"],
+        fila["lineas_ul_10_30mbps"],
+        fila["lineas_ul_30_100mbps"],
+        fila["lineas_ul_100mbps_1gbps"],
+        fila["lineas_ul_1gbps_o_mas"],
         hash_fila,
     )
 
