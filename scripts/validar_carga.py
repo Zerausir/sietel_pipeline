@@ -27,6 +27,24 @@ Este archivo ahora:
      mismo estilo que el paso pipeline_validation de samm_pipeline
      (conteos + ✅/❌ por chequeo), en vez de solo lanzar una excepción
      con texto concatenado.
+
+CAMBIO (22-jul-2026): GROUP BY incompleto en _verificar_vista_sin_duplicados.
+------------------------------------------------------------------------------
+La verificación de "duplicados" en la vista de consumo agrupaba solo por
+(peva_codigo, par_codigo, periodoNumero, tipoEnlace, tipoCliente) -- un
+subconjunto de la llave natural real de 8 columnas. nivelComparticion
+(14 valores distintos) y portador (138 valores distintos) quedaban fuera
+del GROUP BY, así que filas legítimamente distintas que solo difieren en
+esas dos columnas se contaban como "duplicados" falsos. Confirmado con
+datos reales del año 2011: las 405 "duplicaciones" reportadas eran filas
+válidas con distinto nivelComparticion (ej. 4:1, 5:1, 2:1) para el mismo
+prestador/parroquia/período/tipoEnlace/tipoCliente. No había ningún
+solapamiento real de vigencia en dim_isp / dim_permiso_va_agregado --
+consistente con que esta era la primera carga de dimensiones jamás hecha
+(todas las versiones insertadas en un solo lote, sin ningún cierre de
+vigencia todavía). Corregido agregando nivelComparticion y portador tanto
+al SELECT como al GROUP BY, para que la verificación use la llave natural
+completa de 8 columnas y no reporte falsos positivos.
 """
 import logging
 from datetime import datetime
@@ -196,16 +214,27 @@ def _verificar_vista_sin_duplicados(anio: int):
     de vigencia temporal con las dimensiones SCD Tipo 2.
     Una fila duplicada en la vista indica que el JOIN matchea más de una
     versión de dimensión para el mismo período de hecho.
+
+    IMPORTANTE: el GROUP BY debe usar la llave natural COMPLETA de 8
+    columnas (peva_codigo, par_codigo, periodoNumero, anio, tipoEnlace,
+    tipoCliente, nivelComparticion, portador). anio ya está fijado por el
+    WHERE, así que basta con las 7 restantes. Antes faltaban
+    nivelComparticion y portador -- eso hacía que filas legítimamente
+    distintas (mismo prestador/parroquia/período/tipoEnlace/tipoCliente,
+    pero distinto nivel de compartición o portador) se reportaran como
+    "duplicados" falsos. Confirmado con datos reales de 2011 (ver CAMBIO
+    22-jul-2026 en el docstring del módulo) antes de aplicar esta
+    corrección.
     """
     with postgres_cursor(commit=False) as cur:
         cur.execute(
             """
             SELECT peva_codigo, par_codigo, periodoNumero,
-                   tipoEnlace, tipoCliente, COUNT(*) AS n
+                   tipoEnlace, tipoCliente, nivelComparticion, portador, COUNT(*) AS n
             FROM analitico.v_lineas_dedicadas_resumen
             WHERE anio = %s
             GROUP BY peva_codigo, par_codigo, periodoNumero,
-                     tipoEnlace, tipoCliente
+                     tipoEnlace, tipoCliente, nivelComparticion, portador
             HAVING COUNT(*) > 1
             """,
             (anio,),
