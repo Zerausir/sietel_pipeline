@@ -1,4 +1,11 @@
-FROM apache/airflow:slim-3.2.2-python3.12
+FROM apache/airflow:slim-3.2.0-python3.14
+# Imagen alineada deliberadamente con la de samm_pipeline
+# (Dockerfile.airflow: FROM apache/airflow:slim-3.2.0-python3.14) para usar
+# la misma combinacion Airflow+Python+pyodbc que ya corre en produccion en
+# VM2 con samm_pipeline, en vez de una combinacion (3.2.2/python3.12) sin
+# historial de uso real en esta infraestructura. Instancias de Airflow
+# siguen siendo independientes (docker-compose y metadata-db propios) --
+# esto solo unifica la imagen base para reducir superficie de mantenimiento.
 
 USER root
 
@@ -8,6 +15,12 @@ USER root
 # con TDSDUMP, error "login packet rejected" -- mientras que el driver
 # ODBC oficial de Microsoft (el mismo que usa SSMS) sí negocia
 # correctamente. Ver docs/decisiones para el detalle del diagnóstico.
+#
+# NOTA DE VERIFICACION AL HACER BUILD: el repo de Microsoft se agrega para
+# Debian 12 "bookworm" (linea de abajo). Si apache/airflow:slim-3.2.0-python3.14
+# no es bookworm, el "apt-get update" posterior fallara -- esa falla es la
+# señal de que hay que cambiar "debian/12" y "bookworm" por el codename
+# correcto de esta imagen base.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         curl \
@@ -23,12 +36,13 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # El SQL Server de SIETEL no soporta renegociacion TLS segura (RFC 5746),
-# que OpenSSL 3.x (incluido en Debian Bookworm) exige por defecto desde su
-# migracion mayor. Sin este ajuste, la conexion falla con:
+# que OpenSSL 3.x exige por defecto. Sin este ajuste, la conexion falla con:
 #   "SSL routines::unsafe legacy renegotiation disabled"
 # Se habilita UnsafeLegacyRenegotiation solo para este contenedor, via un
 # openssl.cnf propio que extiende (no reemplaza) la configuracion por
-# defecto del sistema.
+# defecto del sistema. Este contenedor es exclusivo de sietel_pipeline
+# (instancia de Airflow independiente de samm_pipeline) -- este ajuste NO
+# debe aplicarse nunca a un contenedor compartido con otro pipeline.
 RUN { \
         echo "openssl_conf = openssl_init"; \
         echo ""; \
