@@ -26,8 +26,13 @@ x-airflow-common:
     AIRFLOW__CORE__TASK_TIMEOUT: 900
     AIRFLOW__CORE__KILLED_TASK_CLEANUP_TIME: 300
     AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: 300
-    # Pool de conexiones a la BD de metadata de Airflow (VM1)
+    # Pool de conexiones a la BD de metadata de Airflow (VM1) -- valor
+    # compartido por defecto para scheduler/triggerer/dag-processor, que no
+    # sirven la UI y no necesitan un pool grande. airflow-webserver
+    # sobreescribe estos dos valores mas abajo (ver 22-jul-2026: agotamiento
+    # de pool por polling de la UI durante carga historica de 8 anios).
     AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: 10
+    AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW: 10
     AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE: 3600
     AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_PRE_PING: 'true'
     PYTHONPATH: '/opt/airflow'
@@ -54,7 +59,7 @@ x-airflow-common:
       condition: service_completed_successfully
 
 services:
-  # NOTA: ya no se levanta un airflow-metadata-db en Docker. La metadata de
+  # NOTA: no se levanta un airflow-metadata-db en Docker. La metadata de
   # este Airflow vive en el PostgreSQL bare-metal de VM1, igual que la de
   # samm_pipeline (dos bases distintas en la misma instancia bare-metal:
   # revisar que "airflow_metadata_sietel" -- o el nombre que definas -- ya
@@ -62,6 +67,19 @@ services:
 
   airflow-webserver:
     <<: *airflow-common
+    environment:
+      <<: *airflow-common-env
+      # Pool ampliado solo aqui: es el unico componente que sirve la UI/API
+      # HTTP y valida el token contra la metadata db en cada request. Con
+      # polling activo de la UI durante una carga historica larga (8 anios
+      # en serie), 10+10 se agotaba (TimeoutError, QueuePool limit
+      # reached). scheduler/triggerer/dag-processor no sirven trafico HTTP
+      # y se quedan en el valor compartido de arriba (10/10) -- no
+      # necesitan el mismo margen, y subir los 4 componentes por igual
+      # arriesgaria el max_connections=100 compartido con samm_pipeline en
+      # la misma instancia de VM1 (verificado 22-jul-2026: 22/100 en uso).
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: 20
+      AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW: 30
     command: api-server
     ports:
       - "${AIRFLOW_WEBSERVER_PORT:-8081}:8080"   # 8080 ya esta en uso por samm_pipeline en VM2
