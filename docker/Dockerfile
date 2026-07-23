@@ -1,11 +1,24 @@
-FROM apache/airflow:slim-3.2.0-python3.14
-# Imagen alineada deliberadamente con la de samm_pipeline
-# (Dockerfile.airflow: FROM apache/airflow:slim-3.2.0-python3.14) para usar
-# la misma combinacion Airflow+Python+pyodbc que ya corre en produccion en
-# VM2 con samm_pipeline, en vez de una combinacion (3.2.2/python3.12) sin
-# historial de uso real en esta infraestructura. Instancias de Airflow
-# siguen siendo independientes (docker-compose y metadata-db propios) --
-# esto solo unifica la imagen base para reducir superficie de mantenimiento.
+FROM apache/airflow:slim-3.3.0-python3.14
+# Subido de 3.2.0 a 3.3.0 (23-jul-2026). Motivo: la UI se colgaba con
+# sqlalchemy.exc.TimeoutError: QueuePool limit reached durante cargas
+# historicas largas con el Grid abierto -- el pool ampliado (20+30) tambien
+# se agoto, indicando una fuga de conexiones (no falta de tamano de pool),
+# consistente con bugs de sesion/auth documentados en el changelog oficial
+# de Airflow:
+#   - 3.2.1: "Fix FAB auth_manager load_user causing PendingRollbackError"
+#   - 3.2.1: "Fix OAuth session race condition causing false 401 errors during login"
+#   - Discusion oficial de Airflow: bug identico (PendingRollbackError
+#     envenenando el pool) confirmado arreglado en 3.1.5
+# Ivan confirmo que en su entorno local (3.2.2) nunca vio este problema,
+# consistente con que el fix ya estaba presente ahi. No hay una entrada de
+# changelog que mencione el bug exacto (RevokedToken/QueuePool) por su
+# nombre, asi que esto no esta garantizado al 100% -- monitorear tras el
+# cambio antes de darlo por resuelto.
+#
+# Imagen alineada deliberadamente con la de samm_pipeline (mismo cambio
+# aplicado ahi el mismo dia) para mantener ambas instancias en la misma
+# version, evitando el problema de mantenimiento que motivo la alineacion
+# original (3.2.0/python3.14 para ambas).
 
 USER root
 
@@ -17,7 +30,7 @@ USER root
 # correctamente. Ver docs/decisiones para el detalle del diagnóstico.
 #
 # NOTA DE VERIFICACION AL HACER BUILD: el repo de Microsoft se agrega para
-# Debian 12 "bookworm" (linea de abajo). Si apache/airflow:slim-3.2.0-python3.14
+# Debian 12 "bookworm" (linea de abajo). Si apache/airflow:slim-3.3.0-python3.14
 # no es bookworm, el "apt-get update" posterior fallara -- esa falla es la
 # señal de que hay que cambiar "debian/12" y "bookworm" por el codename
 # correcto de esta imagen base.
