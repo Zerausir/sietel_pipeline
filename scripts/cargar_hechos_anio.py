@@ -1,36 +1,43 @@
 """
-Extracción y carga de hechos agregados de dbo.VALineasDedicadas hacia
-staging.va_lineas_dedicadas_resumen.
+cargar_hechos_anio.py — Extracción agregada de dbo.VALineasDedicadas y
+carga (UPSERT) hacia staging.va_lineas_dedicadas_resumen.
 
-Agregación GROUP BY ejecutada en SQL Server (no se transfiere detalle
-crudo). Rangos clasificados por downLink/upLink en Kbps:
-  lineas_dl/ul_sin_datos, menos_1mbps, 1_10mbps, 10_30mbps,
-  30_100mbps, 100mbps_1gbps, 1gbps_o_mas.
+El GROUP BY se ejecuta en SQL Server, no en Postgres: transferir el
+detalle crudo (272M+ filas históricas) es inviable por red; el agregado
+reduce cada año a ~50K-200K filas (ver README para el detalle de la
+decisión arquitectónica).
 
-Cardinalidad verificada enero 2025: tipoEnlace(4), tipoCliente(3),
-nivelComparticion(14), portador(138).
-upLink(1.457) y downLink(955) → NO en GROUP BY, se convierten en métricas.
+CAMBIO (16-jul-2026): particionamiento mensual.
+------------------------------------------------
+La extracción cambió de "todo el año en una sola consulta" a "un mes a la
+vez" (WHERE anio = ? AND periodoNumero = ?), iterando los 12 meses dentro
+de la misma tarea. Motivo: el fetchall() de un año completo (hasta 31M+
+filas brutas antes del GROUP BY) agotaba la memoria/tiempo del task de
+Airflow. El índice IX_VALineasDedicadas_Analitico tiene (anio,
+periodoNumero, ...) como prefijo, así que cada consulta mensual lo
+aprovecha de forma óptima.
 
-CAMBIO (20-jul-2026): lineas_dl/ul_* reemplaza a usuarios_dl/ul_*.
--------------------------------------------------------------------
-Las columnas por rango de velocidad medían SUM(numeroUsuarios) -- total de
-usuarios finales en ese rango. El área de Mercados necesita CONTEO DE
-LÍNEAS/CUENTAS en ese rango, no usuarios finales (dos magnitudes distintas:
-una línea compartida puede reportar varios usuarios). Se reemplazaron
--- no se agregaron -- las columnas: mismo nombre de rango, prefijo
-lineas_ en vez de usuarios_, y la fórmula pasa de SUM(numeroUsuarios) a
-un conteo de filas (SUM(CASE WHEN cond THEN 1 ELSE 0 END)).
-total_lineas y total_usuarios (los totales generales, no por rango) NO
-cambian -- siguen siendo COUNT(*) y SUM(numeroUsuarios) respectivamente,
-tal como se confirmó explícitamente con Iván antes de este cambio.
+CAMBIO (22-jul-2026): codigos administrativos para cruce con INEC.
+--------------------------------------------------------------------
+Se agregan codigo_provincia, codigo_ciudad y codigo_parroquia al SELECT
+(vía los mismos LEFT JOIN ya existentes contra Provincia/Ciudad/Parroquia,
+sin JOINs nuevos), tomados de las columnas `codigo`, `codigoCiudad` y
+`codigoParroquia` en SQL Server (las tres nvarchar(50) -- confirmado en
+script.sql). Se guardan como VARCHAR en Postgres, no INTEGER, para no
+perder ceros a la izquierda (ej. "01", "0801"), que son necesarios para
+que el cruce con las tablas del INEC funcione.
 
-No se agrega fechaCreacion en este cambio (decisión explícita: evitar
-tener que reconstruir el índice IX_VALineasDedicadas_Analitico de nuevo).
+Al ser columnas no agregadas del SELECT, se agregan también al GROUP BY
+-- son funcionalmente dependientes de par_codigo (jerarquía administrativa
+fija), así que no alteran la cardinalidad real del agregado, pero SQL
+Server igual exige que estén ahí.
 
-IMPORTANTE: validar_carga.py importa SQL_EXTRAER_HECHOS_ANIO, COLUMNAS_HASH
-y calcular_hash_fila desde este módulo -- no necesita cambios propios
-porque no referencia nombres de columna de rango directamente, solo
-itera sobre COLUMNAS_HASH genéricamente.
+NO se agregan a COLUMNAS_HASH: mismo criterio ya establecido para
+pro_nombre/ciu_nombre/par_nombre (atributos descriptivos de tablas de
+lookup, no parte de la llave natural ni de las métricas medidas). El hash
+certifica que la migración preservó el valor de lo que se mide; el código
+administrativo es metadata derivada de par_codigo, que sí está protegido
+por el hash.
 
 AVISO PARA QUIEN CORRA ESTE CAMBIO: como esto no es un simple rename sino
 un cambio de fórmula, cualquier año ya cargado (ej. 2025 en la copia)
@@ -70,6 +77,8 @@ COLUMNAS_HASH = [
     "lineas_ul_30_100mbps",
     "lineas_ul_100mbps_1gbps",
     "lineas_ul_1gbps_o_mas",
+    # NOTA: codigo_provincia/codigo_ciudad/codigo_parroquia NO van aquí --
+    # ver docstring del módulo, CAMBIO 22-jul-2026.
 ]
 
 MESES_DEL_ANIO = list(range(1, 13))
@@ -103,6 +112,9 @@ SQL_EXTRAER_HECHOS_ANIO = """
         prov.pro_nombre,
         ciu.ciu_nombre,
         par.par_nombre,
+        prov.codigo          AS codigo_provincia,
+        ciu.codigoCiudad     AS codigo_ciudad,
+        par.codigoParroquia  AS codigo_parroquia,
         -- Volumen total (sin cambios: total_lineas = COUNT(*),
         -- total_usuarios = SUM(numeroUsuarios))
         COUNT(*)                                                    AS total_lineas,
@@ -153,12 +165,14 @@ SQL_EXTRAER_HECHOS_ANIO = """
     LEFT JOIN dbo.Parroquia par  ON par.par_codigo  = ld.par_codigo
     LEFT JOIN dbo.Ciudad    ciu  ON ciu.ciu_codigo  = par.ciu_codigo
     LEFT JOIN dbo.Provincia prov ON prov.pro_codigo = ciu.pro_codigo
-    WHERE ld.anio = ? AND ld.periodoNumero = ?
+    WHERE ld.anio = ?
+    AND ld.periodoNumero = ?
     GROUP BY
         ld.peva_codigo, ld.par_codigo, ld.periodoNumero,
         ld.periodoNombre, ld.anio, ld.tipoEnlace,
         ld.tipoCliente, ld.nivelComparticion, ld.portador,
-        ld.regional, prov.pro_nombre, ciu.ciu_nombre, par.par_nombre
+        ld.regional, prov.pro_nombre, ciu.ciu_nombre, par.par_nombre,
+        prov.codigo, ciu.codigoCiudad, par.codigoParroquia
 """
 
 SQL_UPSERT_HECHOS = """
@@ -166,6 +180,7 @@ SQL_UPSERT_HECHOS = """
         peva_codigo, par_codigo, periodoNumero, periodoNombre, anio,
         tipoEnlace, tipoCliente, nivelComparticion, portador, regional,
         pro_nombre, ciu_nombre, par_nombre,
+        codigo_provincia, codigo_ciudad, codigo_parroquia,
         total_lineas, total_usuarios,
         lineas_dl_sin_datos, lineas_dl_menos_1mbps,
         lineas_dl_1_10mbps, lineas_dl_10_30mbps,
@@ -178,8 +193,10 @@ SQL_UPSERT_HECHOS = """
         hash_contenido
     ) VALUES (
         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        %s, %s, %s,
+        %s, %s, %s,
+        %s, %s, %s, %s, %s, %s, %s, %s, %s,
+        %s, %s, %s, %s, %s, %s, %s
     )
     ON CONFLICT (peva_codigo, par_codigo, periodoNumero, anio,
                  tipoEnlace, tipoCliente, nivelComparticion, portador)
@@ -189,6 +206,9 @@ SQL_UPSERT_HECHOS = """
         pro_nombre                = EXCLUDED.pro_nombre,
         ciu_nombre                = EXCLUDED.ciu_nombre,
         par_nombre                = EXCLUDED.par_nombre,
+        codigo_provincia          = EXCLUDED.codigo_provincia,
+        codigo_ciudad             = EXCLUDED.codigo_ciudad,
+        codigo_parroquia          = EXCLUDED.codigo_parroquia,
         total_lineas              = EXCLUDED.total_lineas,
         total_usuarios            = EXCLUDED.total_usuarios,
         lineas_dl_sin_datos       = EXCLUDED.lineas_dl_sin_datos,
@@ -224,6 +244,7 @@ def _fila_a_tupla(fila: dict, hash_fila: str) -> tuple:
         fila["tipoCliente"], fila["nivelComparticion"],
         fila["portador"], fila["regional"],
         fila["pro_nombre"], fila["ciu_nombre"], fila["par_nombre"],
+        fila["codigo_provincia"], fila["codigo_ciudad"], fila["codigo_parroquia"],
         fila["total_lineas"], fila["total_usuarios"],
         fila["lineas_dl_sin_datos"],
         fila["lineas_dl_menos_1mbps"],
