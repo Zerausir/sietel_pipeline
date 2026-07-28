@@ -177,7 +177,7 @@ def _sentencias_construccion() -> list[str]:
             (r.peva_codigo IS NOT NULL) AS es_reportado
         FROM spine sp
         LEFT JOIN reportado r
-          ON {" AND ".join(f"r.{c} IS NOT DISTINCT FROM sp.{c}" for c in LLAVE_NATURAL)}
+          ON {" AND ".join(f"COALESCE(r.{c}, '§SIN_VALOR§') = COALESCE(sp.{c}, '§SIN_VALOR§')" for c in LLAVE_NATURAL)}
          AND r.periodo = sp.periodo
     ),
     agrupado AS (
