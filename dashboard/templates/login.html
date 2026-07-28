@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Ingreso — Dashboard SIETEL</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {
+            font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+            background: #0f1b2d;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .card {
+            background: #ffffff;
+            border-radius: 10px;
+            padding: 2.5rem 2.5rem 2rem;
+            width: 100%;
+            max-width: 360px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+        }
+        .brand { font-weight: 700; font-size: 1.1rem; color: #0f1b2d; }
+        .subtitle { color: #6b7280; font-size: 0.85rem; margin-bottom: 1.5rem; }
+        label { display: block; font-size: 0.85rem; margin-bottom: 0.25rem; color: #374151; }
+        input {
+            width: 100%;
+            padding: 0.6rem 0.7rem;
+            margin-bottom: 1rem;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            box-sizing: border-box;
+            font-size: 0.95rem;
+        }
+        button {
+            width: 100%;
+            padding: 0.65rem;
+            background: #0f1b2d;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.95rem;
+            cursor: pointer;
+        }
+        button:hover { background: #1c3050; }
+        .error {
+            background: #fef2f2;
+            color: #b91c1c;
+            padding: 0.6rem 0.8rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            margin-bottom: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <form class="card" method="POST" action="{{ url_for('auth.login') }}">
+        <div class="brand">SIETEL Analítico</div>
+        <div class="subtitle">Dirección de Mercados — ARCOTEL</div>
+
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+
+        <label for="username">Usuario</label>
+        <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+
+        <label for="password">Contraseña</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" required>
+
+        <button type="submit">Ingresar</button>
+    </form>
+</body>
+</html>
