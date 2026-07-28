@@ -152,11 +152,24 @@ def _es_legado(opera: str | None) -> bool:
 
 
 def clasificar(par: dict, coexisten: bool) -> dict:
-    mismo_nombre = (par["isp_nombre_a"] or "").strip().lower() == (par["isp_nombre_b"] or "").strip().lower()
+    nombre_a = (par["isp_nombre_a"] or "").strip().lower()
+    nombre_b = (par["isp_nombre_b"] or "").strip().lower()
+    mismo_nombre_exacto = nombre_a == nombre_b
+    # Señal adicional, deliberadamente más amplia que la igualdad exacta de
+    # texto: si cualquiera de los dos nombres trae la marca "cancelad..."
+    # (ej. "ARROYO VERA JORGE BYRON - CANCELADO", "SKYWEB cancelado 2011"),
+    # es evidencia explícita de que ese registro es un permiso cerrado del
+    # MISMO titular, aunque el texto completo no sea idéntico al del PEVA
+    # vigente. Confirmado con los casos reales de Skyweb y Arroyo Vera
+    # (28-jul-2026) -- la igualdad exacta de texto los clasificaba
+    # incorrectamente como Grupo C (nombres distintos).
+    marca_cancelacion_en_nombre = "cancelad" in nombre_a or "cancelad" in nombre_b
+    mismo_titular = mismo_nombre_exacto or marca_cancelacion_en_nombre
+
     legado_a = _es_legado(par["opera_a"])
     legado_b = _es_legado(par["opera_b"])
 
-    if mismo_nombre and (legado_a != legado_b):
+    if mismo_nombre_exacto and (legado_a != legado_b):
         categoria = "A_DUPLICADO_MIGRACION_CODIFICACION"
         peva_legado = par["peva_a"] if legado_a else par["peva_b"]
         return {
@@ -173,7 +186,7 @@ def clasificar(par: dict, coexisten: bool) -> dict:
             "fecha_revision_inicial": date.today(),
         }
 
-    if mismo_nombre:
+    if mismo_titular:
         categoria = "B_SECUENCIA_MISMO_TITULAR"
         if coexisten:
             accion = "REVISION_MANUAL_SIETEL"
@@ -188,7 +201,8 @@ def clasificar(par: dict, coexisten: bool) -> dict:
             "estado_revision_inicial": estado_inicial,
             "revisado_por_inicial": "sistema" if not coexisten else None,
             "notas_revision_inicial": (
-                "Mismo isp_nombre, fechas de permiso distintas, nunca coexisten "
+                "Mismo titular (nombre igual o con marca de cancelación explícita), fechas de permiso distintas, "
+                "nunca coexisten "
                 "reportando en el mismo período -- no hay conflicto real que resolver."
                 if not coexisten
                 else None
@@ -209,11 +223,13 @@ def clasificar(par: dict, coexisten: bool) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true", help="Solo reporta, no escribe en calidad.conflictos_ruc_peva")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Solo reporta, no escribe en calidad.conflictos_ruc_peva")
     args = parser.parse_args()
 
     engine = _engine()
-    resumen = {"A_DUPLICADO_MIGRACION_CODIFICACION": 0, "B_SECUENCIA_MISMO_TITULAR": 0, "C_NOMBRES_DISTINTOS_MISMO_RUC": 0}
+    resumen = {"A_DUPLICADO_MIGRACION_CODIFICACION": 0, "B_SECUENCIA_MISMO_TITULAR": 0,
+               "C_NOMBRES_DISTINTOS_MISMO_RUC": 0}
 
     with engine.connect() as conn:
         pares = conn.execute(text(SQL_PARES_CANDIDATOS)).mappings().all()
