@@ -129,10 +129,10 @@ def _sentencias_construccion() -> list[str]:
         SELECT
             v.peva_codigo,
             v.par_codigo,
-            v.tipoEnlace AS tipoenlace,
-            v.tipoCliente AS tipocliente,
-            v.nivelComparticion AS nivelcomparticion,
-            v.portador,
+            BTRIM(v.tipoEnlace) AS tipoenlace,
+            BTRIM(v.tipoCliente) AS tipocliente,
+            BTRIM(v.nivelComparticion) AS nivelcomparticion,
+            BTRIM(v.portador) AS portador,
             MAKE_DATE(v.anio::int, v.periodoNumero::int, 1) AS periodo,
             v.isp_ruc, v.isp_nombre, v.nombreComercial AS nombrecomercial,
             v.opera, v.fechaPermiso AS fechapermiso,
@@ -233,10 +233,15 @@ def _sentencias_construccion() -> list[str]:
 
 def _sql_conteo_dry_run() -> str:
     llave_sql = ", ".join(LLAVE_NATURAL)
+    llave_select = (
+        "v.peva_codigo, v.par_codigo, "
+        "BTRIM(v.tipoenlace) AS tipoenlace, BTRIM(v.tipocliente) AS tipocliente, "
+        "BTRIM(v.nivelcomparticion) AS nivelcomparticion, BTRIM(v.portador) AS portador"
+    )
     return f"""
     WITH reportado AS (
         SELECT
-            {llave_sql},
+            {llave_select},
             MAKE_DATE(v.anio::int, v.periodoNumero::int, 1) AS periodo
         FROM analitico.v_lineas_dedicadas_resumen v
         WHERE v.peva_codigo NOT IN (SELECT peva_codigo FROM calidad.vw_pevas_excluidos)
