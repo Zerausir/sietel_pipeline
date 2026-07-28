@@ -154,10 +154,27 @@ def _sentencias_construccion() -> list[str]:
         FROM reportado
         GROUP BY {llave_sql}
     ),
+    -- Calendario FIJO y pequeño (0 a 240 meses = 20 años de margen), en vez
+    -- de un generate_series() correlacionado por fila (LATERAL). Con
+    -- límites literales, Postgres estima su cardinalidad con precisión
+    -- (~241 filas, sabido de antemano) -- con el LATERAL anterior, el
+    -- planificador asumía 1000 filas por cada una de las ~94,000
+    -- combinaciones (43 millones), cuando el promedio real es ~24. Esa
+    -- mala estimación forzaba un Sort gigantesco antes del Merge Join.
+    calendario AS (
+        SELECT gs AS indice_mes
+        FROM generate_series(0, 240) AS gs
+    ),
     spine AS (
-        SELECT s.{", s.".join(LLAVE_NATURAL)}, gs.periodo::date AS periodo
+        SELECT
+            s.{", s.".join(LLAVE_NATURAL)},
+            (s.periodo_min + (c.indice_mes || ' months')::interval)::date AS periodo
         FROM series s
-        CROSS JOIN LATERAL generate_series(s.periodo_min, s.periodo_max, interval '1 month') AS gs(periodo)
+        JOIN calendario c
+          ON c.indice_mes <= (
+                (DATE_PART('year', s.periodo_max) - DATE_PART('year', s.periodo_min)) * 12
+                + (DATE_PART('month', s.periodo_max) - DATE_PART('month', s.periodo_min))
+             )
     ),
     combinado AS (
         SELECT
