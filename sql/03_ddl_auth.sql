@@ -9,7 +9,31 @@
 -- permisos amplía la superficie de ataque en las dos direcciones. Con dos
 -- roles separados, comprometer la sesión de lectura analítica no da acceso
 -- a usuarios, y viceversa.
+--
+-- ESTE ARCHIVO YA NO CREA ROLES. La creación de dashboard_lector y
+-- dashboard_auth (CREATE ROLE + contraseña) se hace por línea de comandos,
+-- directamente en la VM -- documentado en
+-- "Creación de roles y usuarios de PostgreSQL — sietel_pipeline.docx".
+-- Este archivo asume que ambos roles YA EXISTEN, y falla con un error claro
+-- si no es así, en vez de crearlos silenciosamente con una contraseña
+-- provisional.
+--
+-- Requiere que mart_user ya exista (por el ALTER DEFAULT PRIVILEGES de
+-- abajo) y que sql/00_roles_mart.sql ya se haya corrido.
 -- ============================================================================
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dashboard_lector') THEN
+        RAISE EXCEPTION 'El rol dashboard_lector no existe. Créalo primero por línea de comandos -- ver Creación de roles y usuarios de PostgreSQL.docx';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dashboard_auth') THEN
+        RAISE EXCEPTION 'El rol dashboard_auth no existe. Créalo primero por línea de comandos -- ver Creación de roles y usuarios de PostgreSQL.docx';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mart_user') THEN
+        RAISE EXCEPTION 'El rol mart_user no existe. Corre sql/00_roles_mart.sql primero.';
+    END IF;
+END $$;
 
 CREATE SCHEMA IF NOT EXISTS auth;
 
@@ -31,40 +55,23 @@ CREATE INDEX IF NOT EXISTS ix_usuarios_dashboard_activo
     ON auth.usuarios_dashboard (activo);
 
 -- ============================================================================
--- ROLES DE POSTGRESQL PARA EL CONTENEDOR DEL DASHBOARD
+-- PERMISOS DE LOS ROLES DEL DASHBOARD (los roles ya deben existir)
 -- ============================================================================
--- Ejecutar una sola vez como superusuario. Las contraseñas se generan aparte
--- y se guardan en el .env del contenedor de VM2 -- NUNCA en este archivo ni
--- en Git.
 
 -- 1) Lector analítico: SELECT únicamente sobre mart.* (Capa 2/3).
 --    No toca staging/analitico (eso es exclusivo de sietel_pipeline) ni auth.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dashboard_lector') THEN
-        CREATE ROLE dashboard_lector LOGIN PASSWORD 'CAMBIAR_ANTES_DE_APLICAR';
-    END IF;
-END $$;
-
 GRANT USAGE ON SCHEMA mart TO dashboard_lector;
 GRANT SELECT ON ALL TABLES IN SCHEMA mart TO dashboard_lector;
-ALTER DEFAULT PRIVILEGES FOR ROLE mart_owner IN SCHEMA mart
+ALTER DEFAULT PRIVILEGES FOR ROLE mart_user IN SCHEMA mart
     GRANT SELECT ON TABLES TO dashboard_lector;
--- NOTA: reemplazar "mart_owner" por el rol que efectivamente cree/refresque
--- los objetos de mart (el mismo patrón de ALTER DEFAULT PRIVILEGES que ya
--- se usó para mgonzalez en el esquema analitico -- ver Instrucciones del
--- Proyecto, sección de PostgreSQL). Sin esto, un refresco de mart vuelve a
--- dejar a dashboard_lector sin acceso a las vistas recién recreadas.
+-- mart_user es el rol dueño de mart (ver sql/00_roles_mart.sql). Mismo
+-- patrón de ALTER DEFAULT PRIVILEGES que ya se usó para mgonzalez en el
+-- esquema analitico: sin esto, cada vez que mart/aplicar_capa3.py haga
+-- DROP SCHEMA mart CASCADE + CREATE, las vistas recién recreadas quedarían
+-- de nuevo sin acceso para dashboard_lector.
 
 -- 2) Escritor de autenticación: SELECT/INSERT/UPDATE únicamente sobre la
 --    tabla de usuarios. Sin acceso a mart, staging ni analitico.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dashboard_auth') THEN
-        CREATE ROLE dashboard_auth LOGIN PASSWORD 'CAMBIAR_ANTES_DE_APLICAR';
-    END IF;
-END $$;
-
 GRANT USAGE ON SCHEMA auth TO dashboard_auth;
 GRANT SELECT, INSERT, UPDATE ON auth.usuarios_dashboard TO dashboard_auth;
 GRANT USAGE, SELECT ON SEQUENCE auth.usuarios_dashboard_id_seq TO dashboard_auth;

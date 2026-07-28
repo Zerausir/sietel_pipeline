@@ -17,7 +17,27 @@
 -- vez que aparece un par -- nunca se sobreescriben en corridas posteriores.
 -- Así, una decisión humana no se pierde ni se resetea cuando vuelve a correr
 -- el detector.
+--
+-- ESTE ARCHIVO YA NO CREA ROLES. La creación de calidad_lector y
+-- calidad_revisor (CREATE ROLE + contraseña) se hace por línea de comandos,
+-- directamente en la VM -- documentado en
+-- "Creación de roles y usuarios de PostgreSQL — sietel_pipeline.docx".
+-- Este archivo asume que ambos roles YA EXISTEN, y falla con un error claro
+-- si no es así.
 -- ============================================================================
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'calidad_lector') THEN
+        RAISE EXCEPTION 'El rol calidad_lector no existe. Créalo primero por línea de comandos -- ver Creación de roles y usuarios de PostgreSQL.docx';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'calidad_revisor') THEN
+        RAISE EXCEPTION 'El rol calidad_revisor no existe. Créalo primero por línea de comandos -- ver Creación de roles y usuarios de PostgreSQL.docx';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mart_user') THEN
+        RAISE EXCEPTION 'El rol mart_user no existe. Corre sql/00_roles_mart.sql primero.';
+    END IF;
+END $$;
 
 CREATE SCHEMA IF NOT EXISTS calidad;
 
@@ -121,17 +141,10 @@ WHERE categoria = 'A_DUPLICADO_MIGRACION_CODIFICACION'
   AND peva_legado_descartado IS NOT NULL;
 
 -- ============================================================================
--- ROLES para el dashboard de consistencia de datos
+-- PERMISOS de los roles del dashboard de consistencia (ya deben existir)
 -- ============================================================================
 
 -- Lector: ve todo, para las gráficas/tablas del dashboard de consistencia.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'calidad_lector') THEN
-        CREATE ROLE calidad_lector LOGIN PASSWORD 'CAMBIAR_ANTES_DE_APLICAR';
-    END IF;
-END $$;
-
 GRANT USAGE ON SCHEMA calidad TO calidad_lector;
 GRANT SELECT ON ALL TABLES IN SCHEMA calidad TO calidad_lector;
 ALTER DEFAULT PRIVILEGES FOR ROLE mart_user IN SCHEMA calidad
@@ -140,13 +153,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE mart_user IN SCHEMA calidad
 -- Revisor: lee todo, pero SOLO puede escribir las columnas de workflow --
 -- no puede tocar categoria, accion_recomendada ni ningún campo derivado de
 -- los datos de origen. Privilegio a nivel de columna, no de tabla completa.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'calidad_revisor') THEN
-        CREATE ROLE calidad_revisor LOGIN PASSWORD 'CAMBIAR_ANTES_DE_APLICAR';
-    END IF;
-END $$;
-
 GRANT USAGE ON SCHEMA calidad TO calidad_revisor;
 GRANT SELECT ON ALL TABLES IN SCHEMA calidad TO calidad_revisor;
 GRANT UPDATE (estado_revision, revisado_por, notas_revision, fecha_revision)
