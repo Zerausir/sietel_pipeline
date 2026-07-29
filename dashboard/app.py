@@ -80,6 +80,23 @@ def serve_layout() -> html.Div:
         className="app-shell",
         children=[
             navigation(),
+            # Vive FUERA de dash.page_container -- Dash Pages solo reemplaza
+            # el contenido de page_container al cambiar de pestaña, así que
+            # este Store nunca se destruye ni se reinicia entre Evolución y
+            # Concentración. Es lo que permite que el filtro geográfico
+            # (Nivel/Provincia/Cantón/Parroquia) se mantenga sincronizado
+            # entre ambas páginas -- ver components/territory_filters.py.
+            dcc.Store(
+                id="shared-territory",
+                storage_type="memory",
+                data={
+                    "level": "NACIONAL",
+                    "province": None,
+                    "canton": None,
+                    "parish": None,
+                    "territory_id": "NACIONAL|ECUADOR",
+                },
+            ),
             html.Main(dash.page_container, className="page-container"),
             html.Footer(
                 "Fuente: vistas analíticas del esquema mart en PostgreSQL.",

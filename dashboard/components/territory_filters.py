@@ -3,10 +3,17 @@
 Se usa en ambas páginas (Evolución, Concentración) con un prefijo distinto
 por página (evo-, con-) para que los IDs de componentes no choquen -- Dash
 exige IDs únicos en toda la app, incluidas todas las páginas registradas.
+
+SINCRONIZACIÓN ENTRE PÁGINAS: la selección (Nivel/Provincia/Cantón/Parroquia)
+se restaura desde -- y se guarda en -- el dcc.Store "shared-territory" que
+vive en app.py, fuera de dash.page_container. Como ese Store nunca se
+destruye al cambiar de pestaña, elegir una provincia en Evolución y luego
+entrar a Concentración mantiene la misma selección, sin que el usuario
+tenga que volver a elegirla.
 """
 from __future__ import annotations
 
-from dash import Input, Output, State, callback, dcc, html, no_update
+from dash import Input, Output, State, callback, dcc, html
 
 from services.queries import get_territory_options
 
@@ -62,17 +69,30 @@ def territory_filter_layout(prefix: str) -> html.Div:
 
 def register_territory_callbacks(prefix: str) -> None:
     @callback(
+        Output(f"{prefix}-level", "value"),
+        Input("shared-territory", "data"),
+    )
+    def restore_level(shared_data):
+        # Se dispara al montar la página, con el valor YA presente en el
+        # store compartido (si otra página lo dejó en "PROVINCIA", por
+        # ejemplo, esto es lo que hace que arranque ahí en vez de "NACIONAL").
+        return (shared_data or {}).get("level", "NACIONAL")
+
+    @callback(
         Output(f"{prefix}-province", "options"),
         Output(f"{prefix}-province", "value"),
         Output(f"{prefix}-province", "disabled"),
         Input(f"{prefix}-level", "value"),
+        State("shared-territory", "data"),
     )
-    def update_provinces(level: str):
+    def update_provinces(level: str, shared_data):
         enabled = level in {"PROVINCIA", "CANTON", "PARROQUIA"}
         if not enabled:
             return [], None, True
         options = get_territory_options("PROVINCIA")
-        value = options[0]["value"] if options else None
+        deseada = (shared_data or {}).get("province")
+        valores_validos = {o["value"] for o in options}
+        value = deseada if deseada in valores_validos else (options[0]["value"] if options else None)
         return options, value, False
 
     @callback(
@@ -81,13 +101,16 @@ def register_territory_callbacks(prefix: str) -> None:
         Output(f"{prefix}-canton", "disabled"),
         Input(f"{prefix}-level", "value"),
         Input(f"{prefix}-province", "value"),
+        State("shared-territory", "data"),
     )
-    def update_cantons(level: str, province: str | None):
+    def update_cantons(level: str, province: str | None, shared_data):
         enabled = level in {"CANTON", "PARROQUIA"} and bool(province)
         if not enabled:
             return [], None, True
         options = get_territory_options("CANTON", province_code=province)
-        value = options[0]["value"] if options else None
+        deseada = (shared_data or {}).get("canton")
+        valores_validos = {o["value"] for o in options}
+        value = deseada if deseada in valores_validos else (options[0]["value"] if options else None)
         return options, value, False
 
     @callback(
@@ -97,36 +120,55 @@ def register_territory_callbacks(prefix: str) -> None:
         Input(f"{prefix}-level", "value"),
         Input(f"{prefix}-province", "value"),
         Input(f"{prefix}-canton", "value"),
+        State("shared-territory", "data"),
     )
-    def update_parishes(level: str, province: str | None, canton: str | None):
+    def update_parishes(level: str, province: str | None, canton: str | None, shared_data):
         enabled = level == "PARROQUIA" and bool(province) and bool(canton)
         if not enabled:
             return [], None, True
         options = get_territory_options("PARROQUIA", province_code=province, canton_code=canton)
-        value = options[0]["value"] if options else None
+        deseada = (shared_data or {}).get("parish")
+        valores_validos = {o["value"] for o in options}
+        value = deseada if deseada in valores_validos else (options[0]["value"] if options else None)
         return options, value, False
 
     @callback(
         Output(f"{prefix}-territory-id", "data"),
+        Output("shared-territory", "data", allow_duplicate=True),
         Input(f"{prefix}-level", "value"),
         Input(f"{prefix}-province", "value"),
         Input(f"{prefix}-canton", "value"),
         Input(f"{prefix}-parish", "value"),
         State(f"{prefix}-territory-id", "data"),
+        prevent_initial_call=True,
+        # allow_duplicate=True porque tanto Evolución como Concentración
+        # registran esta misma salida hacia "shared-territory" -- solo la
+        # página actualmente visible tiene sus Inputs "vivos" en el DOM, así
+        # que en la práctica nunca compiten entre sí.
     )
     def resolve_territory(
-        level: str,
-        province: str | None,
-        canton: str | None,
-        parish: str | None,
-        current: str,
+            level: str,
+            province: str | None,
+            canton: str | None,
+            parish: str | None,
+            current: str,
     ):
         if level == "NACIONAL":
-            return "NACIONAL|ECUADOR"
-        if level == "PROVINCIA" and province:
-            return f"PROVINCIA|{province}"
-        if level == "CANTON" and province and canton:
-            return f"CANTON|{province}|{canton}"
-        if level == "PARROQUIA" and province and canton and parish:
-            return f"PARROQUIA|{province}|{canton}|{parish}"
-        return current or no_update
+            territorio_id = "NACIONAL|ECUADOR"
+        elif level == "PROVINCIA" and province:
+            territorio_id = f"PROVINCIA|{province}"
+        elif level == "CANTON" and province and canton:
+            territorio_id = f"CANTON|{province}|{canton}"
+        elif level == "PARROQUIA" and province and canton and parish:
+            territorio_id = f"PARROQUIA|{province}|{canton}|{parish}"
+        else:
+            territorio_id = current or "NACIONAL|ECUADOR"
+
+        compartido = {
+            "level": level,
+            "province": province,
+            "canton": canton,
+            "parish": parish,
+            "territory_id": territorio_id,
+        }
+        return territorio_id, compartido
