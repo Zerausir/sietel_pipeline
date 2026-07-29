@@ -27,11 +27,39 @@ def get_periods() -> pd.DataFrame:
     )
 
 
+def resolve_period_id(date_value: str | None) -> int | None:
+    """
+    Convierte una fecha elegida en un selector de calendario (dcc.DatePickerSingle)
+    al periodo_id mensual correspondiente en mart.dim_periodo. Los datos son
+    mensuales -- se usa el año/mes de la fecha elegida, sin importar el día.
+    Si la fecha cae fuera del rango disponible, se ajusta al extremo más cercano
+    (el propio DatePickerSingle ya restringe min_date_allowed/max_date_allowed,
+    esto es una segunda defensa, no la única).
+    """
+    if not date_value:
+        return None
+    periods = get_periods()
+    if periods.empty:
+        return None
+
+    fecha = pd.to_datetime(date_value)
+    coincidencia = periods[(periods["anio"] == fecha.year) & (periods["mes"] == fecha.month)]
+    if not coincidencia.empty:
+        return int(coincidencia.iloc[0]["periodo_id"])
+
+    periods_ordenado = periods.sort_values("periodo_id")
+    primero = periods_ordenado.iloc[0]
+    ultimo = periods_ordenado.iloc[-1]
+    if fecha < pd.to_datetime(primero["periodo"]):
+        return int(primero["periodo_id"])
+    return int(ultimo["periodo_id"])
+
+
 @cache.memoize(timeout=900)
 def get_territory_options(
-    level: str,
-    province_code: str | None = None,
-    canton_code: str | None = None,
+        level: str,
+        province_code: str | None = None,
+        canton_code: str | None = None,
 ) -> list[dict[str, str]]:
     """
     Opciones para el filtro geográfico en cascada
@@ -139,10 +167,10 @@ def get_participation(territory_id: str, period_id: int) -> pd.DataFrame:
 
 @cache.memoize(timeout=300)
 def get_provider_history(
-    territory_id: str,
-    provider_id: str,
-    start_period: int,
-    end_period: int,
+        territory_id: str,
+        provider_id: str,
+        start_period: int,
+        end_period: int,
 ) -> pd.DataFrame:
     return _read(
         """

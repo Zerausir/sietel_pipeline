@@ -18,7 +18,7 @@ from components.ui import (
     page_header,
     style_figure,
 )
-from services.queries import get_evolution, get_periods, get_velocities
+from services.queries import get_evolution, get_periods, get_velocities, resolve_period_id
 
 register_page(__name__, path="/", name="Evolución", order=0)
 PREFIX = "evo"
@@ -28,13 +28,16 @@ def _period_configuration():
     periods = get_periods()
     if periods.empty:
         raise RuntimeError("mart.dim_periodo no contiene registros.")
-    options = [{"label": row.anio_mes, "value": int(row.periodo_id)} for row in periods.itertuples()]
-    return options, int(periods.periodo_id.min()), int(periods.periodo_id.max())
+    min_row = periods.loc[periods["periodo_id"].idxmin()]
+    max_row = periods.loc[periods["periodo_id"].idxmax()]
+    min_date = str(pd.Timestamp(min_row["periodo"]).date())
+    max_date = str(pd.Timestamp(max_row["periodo"]).date())
+    return min_date, max_date
 
 
 def layout():
     try:
-        period_options, min_period, max_period = _period_configuration()
+        min_date, max_date = _period_configuration()
     except Exception as exc:
         return html.Div([page_header("Evolución del mercado", ""), error_panel(str(exc))])
 
@@ -55,9 +58,14 @@ def layout():
                                 className="filter-field",
                                 children=[
                                     html.Label("Desde"),
-                                    dcc.Dropdown(
-                                        id="evo-start-period", options=period_options,
-                                        value=min_period, clearable=False,
+                                    dcc.DatePickerSingle(
+                                        id="evo-start-period",
+                                        min_date_allowed=min_date,
+                                        max_date_allowed=max_date,
+                                        initial_visible_month=min_date,
+                                        date=min_date,
+                                        display_format="YYYY-MM",
+                                        clearable=False,
                                     ),
                                 ],
                             ),
@@ -65,9 +73,14 @@ def layout():
                                 className="filter-field",
                                 children=[
                                     html.Label("Hasta"),
-                                    dcc.Dropdown(
-                                        id="evo-end-period", options=period_options,
-                                        value=max_period, clearable=False,
+                                    dcc.DatePickerSingle(
+                                        id="evo-end-period",
+                                        min_date_allowed=min_date,
+                                        max_date_allowed=max_date,
+                                        initial_visible_month=max_date,
+                                        date=max_date,
+                                        display_format="YYYY-MM",
+                                        clearable=False,
                                     ),
                                 ],
                             ),
@@ -104,10 +117,14 @@ def layout():
             html.Section(
                 className="chart-grid two",
                 children=[
-                    chart_card("Evolución de líneas", "evo-lines-chart", "Total de líneas y proporción reportada/imputada."),
-                    chart_card("Evolución de prestadores", "evo-providers-chart", "Prestadores presentes y prestadores con líneas positivas."),
-                    chart_card("Composición por velocidad", "evo-speed-composition-chart", "Distribución mensual por rango de velocidad."),
-                    chart_card("Diferencia mensual por velocidad", "evo-speed-difference-chart", "Cambio absoluto frente al mes anterior para el último período visible."),
+                    chart_card("Evolución de líneas", "evo-lines-chart",
+                               "Total de líneas y proporción reportada/imputada."),
+                    chart_card("Evolución de prestadores", "evo-providers-chart",
+                               "Prestadores presentes y prestadores con líneas positivas."),
+                    chart_card("Composición por velocidad", "evo-speed-composition-chart",
+                               "Distribución mensual por rango de velocidad."),
+                    chart_card("Diferencia mensual por velocidad", "evo-speed-difference-chart",
+                               "Cambio absoluto frente al mes anterior para el último período visible."),
                 ],
             ),
         ]
@@ -132,11 +149,14 @@ register_territory_callbacks(PREFIX)
     Output("evo-speed-difference-chart", "figure"),
     Output("evo-message", "children"),
     Input("evo-territory-id", "data"),
-    Input("evo-start-period", "value"),
-    Input("evo-end-period", "value"),
+    Input("evo-start-period", "date"),
+    Input("evo-end-period", "date"),
     Input("evo-speed-type", "value"),
 )
-def update_evolution(territory_id: str, start_period: int, end_period: int, speed_type: str):
+def update_evolution(territory_id: str, start_date: str, end_date: str, speed_type: str):
+    start_period = resolve_period_id(start_date)
+    end_period = resolve_period_id(end_date)
+
     if not territory_id or start_period is None or end_period is None:
         figures = [empty_figure("Seleccione todos los filtros") for _ in range(4)]
         return ("—", "", "—", "", "—", "", "—", "", *figures, "")

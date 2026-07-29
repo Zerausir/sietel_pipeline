@@ -18,7 +18,7 @@ from components.ui import (
     page_header,
     style_figure,
 )
-from services.queries import get_ihh, get_participation, get_periods, get_provider_history
+from services.queries import get_ihh, get_participation, get_periods, get_provider_history, resolve_period_id
 
 register_page(__name__, path="/concentracion", name="IHH y participación", order=1)
 PREFIX = "con"
@@ -29,12 +29,16 @@ def _period_configuration():
     if periods.empty:
         raise RuntimeError("mart.dim_periodo no contiene registros.")
     options = [{"label": row.anio_mes, "value": int(row.periodo_id)} for row in periods.itertuples()]
-    return options, int(periods.periodo_id.min()), int(periods.periodo_id.max())
+    min_row = periods.loc[periods["periodo_id"].idxmin()]
+    max_row = periods.loc[periods["periodo_id"].idxmax()]
+    min_date = str(pd.Timestamp(min_row["periodo"]).date())
+    max_date = str(pd.Timestamp(max_row["periodo"]).date())
+    return options, min_date, max_date, int(periods.periodo_id.max())
 
 
 def layout():
     try:
-        period_options, min_period, max_period = _period_configuration()
+        period_options, min_date, max_date, max_period = _period_configuration()
     except Exception as exc:
         return html.Div([page_header("Concentración de mercado", ""), error_panel(str(exc))])
 
@@ -55,21 +59,38 @@ def layout():
                                 className="filter-field",
                                 children=[
                                     html.Label("Historia desde"),
-                                    dcc.Dropdown(id="con-start-period", options=period_options, value=min_period, clearable=False),
+                                    dcc.DatePickerSingle(
+                                        id="con-start-period",
+                                        min_date_allowed=min_date,
+                                        max_date_allowed=max_date,
+                                        initial_visible_month=min_date,
+                                        date=min_date,
+                                        display_format="YYYY-MM",
+                                        clearable=False,
+                                    ),
                                 ],
                             ),
                             html.Div(
                                 className="filter-field",
                                 children=[
                                     html.Label("Historia hasta"),
-                                    dcc.Dropdown(id="con-end-period", options=period_options, value=max_period, clearable=False),
+                                    dcc.DatePickerSingle(
+                                        id="con-end-period",
+                                        min_date_allowed=min_date,
+                                        max_date_allowed=max_date,
+                                        initial_visible_month=max_date,
+                                        date=max_date,
+                                        display_format="YYYY-MM",
+                                        clearable=False,
+                                    ),
                                 ],
                             ),
                             html.Div(
                                 className="filter-field",
                                 children=[
                                     html.Label("Período de participación"),
-                                    dcc.Dropdown(id="con-current-period", options=period_options, value=max_period, clearable=False),
+                                    dcc.Dropdown(id="con-current-period", options=period_options, value=max_period,
+                                                 clearable=False),
                                 ],
                             ),
                             html.Div(
@@ -101,10 +122,14 @@ def layout():
             html.Section(
                 className="chart-grid two",
                 children=[
-                    chart_card("Evolución histórica del IHH", "con-ihh-chart", "Índice calculado sobre prestadores con líneas positivas."),
-                    chart_card("Participación por prestador", "con-participation-chart", "Principales prestadores del período seleccionado."),
-                    chart_card("Aporte individual al IHH", "con-contribution-chart", "Contribución de cada prestador al índice del mercado."),
-                    chart_card("Evolución del prestador seleccionado", "con-provider-history-chart", "Participación y líneas dentro del territorio seleccionado."),
+                    chart_card("Evolución histórica del IHH", "con-ihh-chart",
+                               "Índice calculado sobre prestadores con líneas positivas."),
+                    chart_card("Participación por prestador", "con-participation-chart",
+                               "Principales prestadores del período seleccionado."),
+                    chart_card("Aporte individual al IHH", "con-contribution-chart",
+                               "Contribución de cada prestador al índice del mercado."),
+                    chart_card("Evolución del prestador seleccionado", "con-provider-history-chart",
+                               "Participación y líneas dentro del territorio seleccionado."),
                 ],
             ),
             html.Section(
@@ -114,7 +139,8 @@ def layout():
                         className="chart-header",
                         children=[
                             html.H3("Detalle de participación", className="chart-title"),
-                            html.P("Incluye prestadores con líneas positivas, cero y sin dato.", className="chart-subtitle"),
+                            html.P("Incluye prestadores con líneas positivas, cero y sin dato.",
+                                   className="chart-subtitle"),
                         ],
                     ),
                     dag.AgGrid(
@@ -124,18 +150,23 @@ def layout():
                             {"field": "isp_nombre", "headerName": "Prestador", "minWidth": 260, "flex": 2},
                             {"field": "ruc_limpio", "headerName": "RUC", "minWidth": 150},
                             {"field": "cantidad_peva", "headerName": "PEVA", "width": 95},
-                            {"field": "total_lineas_prestador", "headerName": "Líneas", "type": "numericColumn", "minWidth": 130},
-                            {"field": "participacion_porcentaje", "headerName": "Participación %", "type": "numericColumn", "minWidth": 150},
-                            {"field": "aporte_ihh", "headerName": "Aporte IHH", "type": "numericColumn", "minWidth": 135},
+                            {"field": "total_lineas_prestador", "headerName": "Líneas", "type": "numericColumn",
+                             "minWidth": 130},
+                            {"field": "participacion_porcentaje", "headerName": "Participación %",
+                             "type": "numericColumn", "minWidth": 150},
+                            {"field": "aporte_ihh", "headerName": "Aporte IHH", "type": "numericColumn",
+                             "minWidth": 135},
                             {"field": "estado_lineas", "headerName": "Estado", "minWidth": 120},
-                            {"field": "porcentaje_imputado_prestador", "headerName": "Imputado %", "type": "numericColumn", "minWidth": 135},
+                            {"field": "porcentaje_imputado_prestador", "headerName": "Imputado %",
+                             "type": "numericColumn", "minWidth": 135},
                         ],
                         rowData=[],
                         defaultColDef={"sortable": True, "filter": True, "resizable": True},
                         # theme + columnSize explícitos -- requerido por AGENTS.md para toda
                         # instancia de AgGrid (el proyecto original usaba className="ag-theme-quartz"
                         # sin esto, desviación ya señalada en la revisión profesional del 28-jul-2026).
-                        dashGridOptions={"theme": "themeBalham", "pagination": True, "paginationPageSize": 20, "animateRows": True},
+                        dashGridOptions={"theme": "themeBalham", "pagination": True, "paginationPageSize": 20,
+                                         "animateRows": True},
                         columnSize="responsiveSizeToFit",
                         style={"height": "560px", "width": "100%"},
                     ),
@@ -191,11 +222,14 @@ def update_provider_options(territory_id: str, period_id: int):
     Output("con-participation-grid", "rowData"),
     Output("con-message", "children"),
     Input("con-territory-id", "data"),
-    Input("con-start-period", "value"),
-    Input("con-end-period", "value"),
+    Input("con-start-period", "date"),
+    Input("con-end-period", "date"),
     Input("con-current-period", "value"),
 )
-def update_concentration(territory_id: str, start_period: int, end_period: int, current_period: int):
+def update_concentration(territory_id: str, start_date: str, end_date: str, current_period: int):
+    start_period = resolve_period_id(start_date)
+    end_period = resolve_period_id(end_date)
+
     empty_figures = [empty_figure() for _ in range(3)]
     empty_return = ("—", "", "—", "", "—", "", "—", "", "—", "", "—", "", *empty_figures, [], "")
     if not territory_id or None in (start_period, end_period, current_period):
@@ -333,10 +367,13 @@ def update_concentration(territory_id: str, start_period: int, end_period: int, 
     Output("con-provider-history-chart", "figure"),
     Input("con-territory-id", "data"),
     Input("con-provider", "value"),
-    Input("con-start-period", "value"),
-    Input("con-end-period", "value"),
+    Input("con-start-period", "date"),
+    Input("con-end-period", "date"),
 )
-def update_provider_history(territory_id: str, provider_id: str | None, start_period: int, end_period: int):
+def update_provider_history(territory_id: str, provider_id: str | None, start_date: str, end_date: str):
+    start_period = resolve_period_id(start_date)
+    end_period = resolve_period_id(end_date)
+
     if not territory_id or not provider_id or start_period is None or end_period is None:
         return empty_figure("Seleccione un prestador")
 
