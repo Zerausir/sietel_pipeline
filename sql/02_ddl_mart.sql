@@ -1962,6 +1962,31 @@ ANALYZE mart.fact_velocidad_mercado_mes;
 ANALYZE mart.fact_participacion_mercado;
 ANALYZE mart.fact_ihh_geografico;
 
+-- ============================================================
+-- 18. RE-OTORGAR ACCESO A dashboard_lector -- sobrevive a la reconstrucción
+-- ============================================================
+-- CRÍTICO: el DROP SCHEMA mart CASCADE del inicio de este archivo borra
+-- TODOS los privilegios existentes sobre el esquema -- incluido el
+-- GRANT USAGE y el ALTER DEFAULT PRIVILEGES que sql/03_ddl_auth.sql le
+-- otorgó a dashboard_lector. Sin este bloque, CADA refresco de mart
+-- (manual o vía dags/sietel_mart_pipeline.py) deja al dashboard sin
+-- acceso de lectura hasta que alguien recuerde volver a correr
+-- 03_ddl_auth.sql a mano -- confirmado como falla real en producción
+-- (29-jul-2026, tras el primer refresco automatizado vía Airflow).
+--
+-- Condicionado a que el rol ya exista: en una instalación nueva donde
+-- 02_ddl_mart.sql corre ANTES de que exista dashboard_lector, este bloque
+-- simplemente no hace nada -- no rompe la construcción de mart por eso.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dashboard_lector') THEN
+        GRANT USAGE ON SCHEMA mart TO dashboard_lector;
+        GRANT SELECT ON ALL TABLES IN SCHEMA mart TO dashboard_lector;
+        ALTER DEFAULT PRIVILEGES FOR ROLE mart_user IN SCHEMA mart
+            GRANT SELECT ON TABLES TO dashboard_lector;
+    END IF;
+END $$;
+
 COMMIT;
 
 -- ============================================================
@@ -2070,4 +2095,3 @@ WHERE total_lineas IS NOT NULL
   );
 
 -- Resultado esperado: cero filas.
-
