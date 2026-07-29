@@ -94,9 +94,11 @@ def _engine():
 # natural, pero pueden variar de una carga a otra -- ej. isp_nombre tras un
 # cambio de razón social).
 COLUMNAS_ATRIBUTOS = [
-    "isp_ruc", "isp_nombre", "nombrecomercial", "opera", "fechapermiso",
+    "isp_codigo", "isp_ruc", "isp_nombre", "isp_tipopersona", "isp_regional",
+    "nombrecomercial", "opera", "resolucion", "fechapermiso",
     "codigo_provincia", "codigo_ciudad", "codigo_parroquia",
-    "pro_nombre", "ciu_nombre", "par_nombre",
+    "pro_nombre", "ciu_nombre", "par_nombre", "regional_reporte",
+    "opera_actual", "es_cancelado_actual",
 ]
 
 # Columnas de MÉTRICAS -- mismo principio de snapshot atómico (nunca
@@ -125,7 +127,21 @@ def _sentencias_construccion() -> list[str]:
 
     crear_tabla_next = f"""
     CREATE TABLE capa2._lineas_dedicadas_consolidado_next AS
-    WITH reportado AS (
+    WITH opera_actual_por_peva AS (
+        -- Estado ACTUAL del PEVA (distinto de v.opera, que es el estado
+        -- histórico capturado en cada reporte mensual). Se toma de
+        -- v_ultimo_periodo_reportado_detalle, que tiene múltiples filas
+        -- por peva_codigo (una por geografía/tipo de enlace del último
+        -- período) -- se colapsa a una fila por PEVA antes de usarla,
+        -- mismo patrón ya validado en detectar_conflictos_peva.py.
+        SELECT DISTINCT ON (u.peva_codigo)
+            u.peva_codigo,
+            u.opera AS opera_actual
+        FROM analitico.v_ultimo_periodo_reportado_detalle u
+        WHERE u.peva_codigo IS NOT NULL
+        ORDER BY u.peva_codigo, u.ultimo_anio DESC NULLS LAST, u.ultimo_periodo_numero DESC NULLS LAST
+    ),
+    reportado AS (
         SELECT
             v.peva_codigo,
             v.par_codigo,
@@ -134,10 +150,19 @@ def _sentencias_construccion() -> list[str]:
             BTRIM(v.nivelComparticion) AS nivelcomparticion,
             BTRIM(v.portador) AS portador,
             MAKE_DATE(v.anio::int, v.periodoNumero::int, 1) AS periodo,
-            v.isp_ruc, v.isp_nombre, v.nombreComercial AS nombrecomercial,
-            v.opera, v.fechaPermiso AS fechapermiso,
+            v.isp_codigo, v.isp_ruc, v.isp_nombre, v.isp_tipoPersona AS isp_tipopersona,
+            v.isp_regional, v.nombreComercial AS nombrecomercial,
+            v.opera, v.Resolucion AS resolucion, v.fechaPermiso AS fechapermiso,
             v.codigo_provincia, v.codigo_ciudad, v.codigo_parroquia,
-            v.pro_nombre, v.ciu_nombre, v.par_nombre,
+            v.pro_nombre, v.ciu_nombre, v.par_nombre, v.regional_reporte,
+            oa.opera_actual,
+            -- Limitación deliberada: solo reconoce la marca explícita de
+            -- cancelación en el texto categórico actual. NO intenta
+            -- interpretar los códigos heredados SI/NO/- de opera (ver
+            -- hallazgo ya documentado en sietel_pipeline) -- esos casos
+            -- quedan como es_cancelado_actual = false, no como una
+            -- adivinanza.
+            (oa.opera_actual ILIKE '%cancelac%') AS es_cancelado_actual,
             v.total_lineas, v.total_usuarios,
             v.lineas_dl_sin_datos, v.lineas_dl_menos_1mbps, v.lineas_dl_1_10mbps,
             v.lineas_dl_10_30mbps, v.lineas_dl_30_100mbps, v.lineas_dl_100mbps_1gbps,
@@ -147,6 +172,7 @@ def _sentencias_construccion() -> list[str]:
             v.lineas_ul_1gbps_o_mas,
             v.lineas_dl_banda_ancha, v.lineas_dl_ultra_banda_ancha
         FROM analitico.v_lineas_dedicadas_resumen v
+        LEFT JOIN opera_actual_por_peva oa ON oa.peva_codigo = v.peva_codigo
         WHERE v.peva_codigo NOT IN (SELECT peva_codigo FROM calidad.vw_pevas_excluidos)
     ),
     series AS (
@@ -180,9 +206,11 @@ def _sentencias_construccion() -> list[str]:
         SELECT
             sp.{", sp.".join(LLAVE_NATURAL)},
             sp.periodo,
-            r.isp_ruc, r.isp_nombre, r.nombrecomercial, r.opera, r.fechapermiso,
+            r.isp_codigo, r.isp_ruc, r.isp_nombre, r.isp_tipopersona, r.isp_regional,
+            r.nombrecomercial, r.opera, r.resolucion, r.fechapermiso,
             r.codigo_provincia, r.codigo_ciudad, r.codigo_parroquia,
-            r.pro_nombre, r.ciu_nombre, r.par_nombre,
+            r.pro_nombre, r.ciu_nombre, r.par_nombre, r.regional_reporte,
+            r.opera_actual, r.es_cancelado_actual,
             r.total_lineas, r.total_usuarios,
             r.lineas_dl_sin_datos, r.lineas_dl_menos_1mbps, r.lineas_dl_1_10mbps,
             r.lineas_dl_10_30mbps, r.lineas_dl_30_100mbps, r.lineas_dl_100mbps_1gbps,
