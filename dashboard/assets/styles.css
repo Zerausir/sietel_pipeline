@@ -226,6 +226,10 @@ body {
     grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.kpi-grid.five {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
 .kpi-grid.six {
     grid-template-columns: repeat(6, minmax(0, 1fr));
 }
@@ -319,6 +323,10 @@ body {
         grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
+    .kpi-grid.five {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
     .territory-grid,
     .period-grid.four-periods {
         grid-template-columns: repeat(2, minmax(180px, 1fr));
@@ -340,6 +348,7 @@ body {
     .period-grid,
     .period-grid.four-periods,
     .kpi-grid.four,
+    .kpi-grid.five,
     .kpi-grid.six,
     .chart-grid.two {
         grid-template-columns: 1fr;

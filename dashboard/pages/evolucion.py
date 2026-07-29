@@ -18,7 +18,7 @@ from components.ui import (
     page_header,
     style_figure,
 )
-from services.queries import get_evolution, get_periods, get_velocities, resolve_period_id
+from services.queries import get_evolution, get_participation, get_periods, get_velocities, resolve_period_id
 
 register_page(__name__, path="/", name="Evolución", order=0)
 PREFIX = "evo"
@@ -106,12 +106,13 @@ def layout():
             ),
             html.Div(id="evo-message", className="data-message"),
             html.Section(
-                className="kpi-grid four",
+                className="kpi-grid five",
                 children=[
                     kpi_card("Líneas en el último período", "evo-kpi-lines", "evo-kpi-lines-note"),
                     kpi_card("Prestadores presentes", "evo-kpi-providers", "evo-kpi-providers-note"),
                     kpi_card("Cambio mensual de líneas", "evo-kpi-change", "evo-kpi-change-note"),
                     kpi_card("Información imputada", "evo-kpi-imputed", "evo-kpi-imputed-note"),
+                    kpi_card("Dejaron de reportar este mes", "evo-kpi-churn", "evo-kpi-churn-note"),
                 ],
             ),
             html.Section(
@@ -143,6 +144,8 @@ register_territory_callbacks(PREFIX)
     Output("evo-kpi-change-note", "children"),
     Output("evo-kpi-imputed", "children"),
     Output("evo-kpi-imputed-note", "children"),
+    Output("evo-kpi-churn", "children"),
+    Output("evo-kpi-churn-note", "children"),
     Output("evo-lines-chart", "figure"),
     Output("evo-providers-chart", "figure"),
     Output("evo-speed-composition-chart", "figure"),
@@ -159,7 +162,7 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
 
     if not territory_id or start_period is None or end_period is None:
         figures = [empty_figure("Seleccione todos los filtros") for _ in range(4)]
-        return ("—", "", "—", "", "—", "", "—", "", *figures, "")
+        return ("—", "", "—", "", "—", "", "—", "", "—", "", *figures, "")
 
     start_period, end_period = sorted((int(start_period), int(end_period)))
 
@@ -168,11 +171,12 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
         velocities = get_velocities(territory_id, start_period, end_period, speed_type)
     except Exception as exc:
         figures = [empty_figure("Error al consultar PostgreSQL") for _ in range(4)]
-        return ("—", "", "—", "", "—", "", "—", "", *figures, str(exc))
+        return ("—", "", "—", "", "—", "", "—", "", "—", "", *figures, str(exc))
 
     if evolution.empty:
         figures = [empty_figure() for _ in range(4)]
-        return ("—", "", "—", "", "—", "", "—", "", *figures, "No existen datos para este territorio y período.")
+        return ("—", "", "—", "", "—", "", "—", "", "—", "", *figures,
+                "No existen datos para este territorio y período.")
 
     evolution = evolution.copy()
     evolution["periodo"] = pd.to_datetime(evolution["periodo"])
@@ -202,6 +206,33 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
         if pd.notna(latest.get("porcentaje_imputado")) else "—"
     )
     imputed_note = f"{format_number(latest.get('lineas_imputadas'))} líneas imputadas"
+
+    # "Dejaron de reportar este mes": prestadores con líneas positivas en el
+    # período anterior que ya NO aparecen en el último -- este caso no lo
+    # captura "% de datos imputados" (que por diseño siempre da 0% en el
+    # borde más reciente de los datos, ver discusión con el usuario
+    # 29-jul-2026): un prestador que dejó de reportar simplemente desaparece
+    # de su serie, no queda marcado como imputado.
+    churn_value, churn_note = "—", ""
+    try:
+        periodo_actual_id = int(latest["periodo_id"])
+        periodo_anterior_id = periodo_actual_id - 1
+        actuales = get_participation(territory_id, periodo_actual_id)
+        anteriores = get_participation(territory_id, periodo_anterior_id)
+        if not actuales.empty and not anteriores.empty:
+            activos_anterior = set(
+                anteriores.loc[
+                    pd.to_numeric(anteriores["total_lineas_prestador"], errors="coerce").fillna(0) > 0, "prestador_id"]
+            )
+            activos_actual = set(
+                actuales.loc[
+                    pd.to_numeric(actuales["total_lineas_prestador"], errors="coerce").fillna(0) > 0, "prestador_id"]
+            )
+            desaparecieron = activos_anterior - activos_actual
+            churn_value = format_number(len(desaparecieron))
+            churn_note = f"De {format_number(len(activos_anterior))} activos en el mes anterior"
+    except Exception:
+        churn_value, churn_note = "—", "No se pudo calcular"
 
     lines_fig = go.Figure()
     lines_fig.add_trace(
@@ -285,6 +316,7 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
         providers_value, providers_note,
         change_value, change_note,
         imputed_value, imputed_note,
+        churn_value, churn_note,
         lines_fig, providers_fig, speed_comp_fig, speed_diff_fig,
         message,
     )

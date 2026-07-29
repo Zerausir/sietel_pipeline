@@ -797,6 +797,17 @@ SELECT
     s.peva_codigo_limpio AS peva_codigo,
     s.geografia_id,
     SUM(s.total_lineas::numeric) AS total_lineas,
+    -- CORRECCIÓN (revisión profesional, 29-jul-2026): sumas condicionadas
+    -- POR FILA, no un booleano BOOL_OR/BOOL_AND aplicado después a la suma
+    -- completa. Un prestador con 10 combinaciones de tipoEnlace/tipoCliente
+    -- en una geografía, donde 9 fueron reportadas de verdad y 1 fue
+    -- rellenada por LOCF, debe repartir el total en 90%/10% -- no
+    -- clasificar el 100% como "imputado" solo porque *alguna* fila lo fue
+    -- (que era exactamente lo que hacía tiene_imputacion más abajo, usado
+    -- en fact_resumen_mercado_mes -- confirmado con datos reales de
+    -- diciembre 2013: 93% "imputado" en el dashboard vs. ~67% real en capa2).
+    SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.total_lineas::numeric ELSE 0 END) AS lineas_reportadas,
+    SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.total_lineas::numeric ELSE 0 END) AS lineas_imputadas,
         SUM(s.total_usuarios::numeric) AS total_usuarios,
         SUM(s.lineas_dl_sin_datos::numeric) AS lineas_dl_sin_datos,
         SUM(s.lineas_dl_menos_1mbps::numeric) AS lineas_dl_menos_1mbps,
@@ -814,6 +825,40 @@ SELECT
         SUM(s.lineas_ul_1gbps_o_mas::numeric) AS lineas_ul_1gbps_o_mas,
         SUM(s.lineas_dl_banda_ancha::numeric) AS lineas_dl_banda_ancha,
         SUM(s.lineas_dl_ultra_banda_ancha::numeric) AS lineas_dl_ultra_banda_ancha,
+    -- CORRECCIÓN (auditoría completa, 29-jul-2026): mismas sumas
+    -- condicionadas por fila, ahora para cada rango de velocidad --
+    -- necesarias para que fact_lineas_velocidad_mes clasifique
+    -- reportado/imputado POR RANGO, no con un solo booleano aplicado
+    -- a los 14 rangos por igual (ver bug confirmado con datos reales
+    -- de diciembre 2013: 93% imputado mostrado vs ~67% real).
+        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_dl_sin_datos::numeric ELSE 0 END) AS lineas_dl_sin_datos_reportado,
+        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_dl_sin_datos::numeric ELSE 0 END) AS lineas_dl_sin_datos_imputado,
+        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_dl_menos_1mbps::numeric ELSE 0 END) AS lineas_dl_menos_1mbps_reportado,
+        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_dl_menos_1mbps::numeric ELSE 0 END) AS lineas_dl_menos_1mbps_imputado,
+        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_dl_1_10mbps::numeric ELSE 0 END) AS lineas_dl_1_10mbps_reportado,
+        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_dl_1_10mbps::numeric ELSE 0 END) AS lineas_dl_1_10mbps_imputado,
+        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_dl_10_30mbps::numeric ELSE 0 END) AS lineas_dl_10_30mbps_reportado,
+        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_dl_10_30mbps::numeric ELSE 0 END) AS lineas_dl_10_30mbps_imputado,
+        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_dl_30_100mbps::numeric ELSE 0 END) AS lineas_dl_30_100mbps_reportado,
+        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_dl_30_100mbps::numeric ELSE 0 END) AS lineas_dl_30_100mbps_imputado,
+        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_dl_100mbps_1gbps::numeric ELSE 0 END) AS lineas_dl_100mbps_1gbps_reportado,
+        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_dl_100mbps_1gbps::numeric ELSE 0 END) AS lineas_dl_100mbps_1gbps_imputado,
+        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_dl_1gbps_o_mas::numeric ELSE 0 END) AS lineas_dl_1gbps_o_mas_reportado,
+        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_dl_1gbps_o_mas::numeric ELSE 0 END) AS lineas_dl_1gbps_o_mas_imputado,
+        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_ul_sin_datos::numeric ELSE 0 END) AS lineas_ul_sin_datos_reportado,
+        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_ul_sin_datos::numeric ELSE 0 END) AS lineas_ul_sin_datos_imputado,
+        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_ul_menos_1mbps::numeric ELSE 0 END) AS lineas_ul_menos_1mbps_reportado,
+        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_ul_menos_1mbps::numeric ELSE 0 END) AS lineas_ul_menos_1mbps_imputado,
+        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_ul_1_10mbps::numeric ELSE 0 END) AS lineas_ul_1_10mbps_reportado,
+        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_ul_1_10mbps::numeric ELSE 0 END) AS lineas_ul_1_10mbps_imputado,
+        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_ul_10_30mbps::numeric ELSE 0 END) AS lineas_ul_10_30mbps_reportado,
+        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_ul_10_30mbps::numeric ELSE 0 END) AS lineas_ul_10_30mbps_imputado,
+        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_ul_30_100mbps::numeric ELSE 0 END) AS lineas_ul_30_100mbps_reportado,
+        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_ul_30_100mbps::numeric ELSE 0 END) AS lineas_ul_30_100mbps_imputado,
+        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_ul_100mbps_1gbps::numeric ELSE 0 END) AS lineas_ul_100mbps_1gbps_reportado,
+        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_ul_100mbps_1gbps::numeric ELSE 0 END) AS lineas_ul_100mbps_1gbps_imputado,
+        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_ul_1gbps_o_mas::numeric ELSE 0 END) AS lineas_ul_1gbps_o_mas_reportado,
+        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_ul_1gbps_o_mas::numeric ELSE 0 END) AS lineas_ul_1gbps_o_mas_imputado,
     BOOL_OR(
         COALESCE(s.es_reportado, FALSE)
     ) AS tiene_reportado,
@@ -909,6 +954,15 @@ WITH agregados AS (
             AS valores_distintos_total_lineas,
         MAX(p.total_lineas) AS max_total_lineas,
         SUM(p.total_lineas) AS sum_total_lineas,
+        -- Propaga las sumas condicionadas por fila que ya vienen correctas
+        -- desde stg_lineas_por_peva_geografia_mes -- misma decisión
+        -- MAX-vs-SUM que total_lineas (ver estado_resolucion_peva más abajo),
+        -- para mantener la invariante lineas_reportadas + lineas_imputadas =
+        -- total_lineas también en este nivel de resolución por PEVA.
+        MAX(p.lineas_reportadas) AS max_lineas_reportadas,
+        SUM(p.lineas_reportadas) AS sum_lineas_reportadas,
+        MAX(p.lineas_imputadas) AS max_lineas_imputadas,
+        SUM(p.lineas_imputadas) AS sum_lineas_imputadas,
         MAX(p.total_usuarios) AS max_total_usuarios,
         SUM(p.total_usuarios) AS sum_total_usuarios,
         MAX(p.lineas_dl_sin_datos) AS max_lineas_dl_sin_datos,
@@ -943,6 +997,62 @@ WITH agregados AS (
         SUM(p.lineas_dl_banda_ancha) AS sum_lineas_dl_banda_ancha,
         MAX(p.lineas_dl_ultra_banda_ancha) AS max_lineas_dl_ultra_banda_ancha,
         SUM(p.lineas_dl_ultra_banda_ancha) AS sum_lineas_dl_ultra_banda_ancha,
+        MAX(p.lineas_dl_sin_datos_reportado) AS max_lineas_dl_sin_datos_reportado,
+        SUM(p.lineas_dl_sin_datos_reportado) AS sum_lineas_dl_sin_datos_reportado,
+        MAX(p.lineas_dl_sin_datos_imputado) AS max_lineas_dl_sin_datos_imputado,
+        SUM(p.lineas_dl_sin_datos_imputado) AS sum_lineas_dl_sin_datos_imputado,
+        MAX(p.lineas_dl_menos_1mbps_reportado) AS max_lineas_dl_menos_1mbps_reportado,
+        SUM(p.lineas_dl_menos_1mbps_reportado) AS sum_lineas_dl_menos_1mbps_reportado,
+        MAX(p.lineas_dl_menos_1mbps_imputado) AS max_lineas_dl_menos_1mbps_imputado,
+        SUM(p.lineas_dl_menos_1mbps_imputado) AS sum_lineas_dl_menos_1mbps_imputado,
+        MAX(p.lineas_dl_1_10mbps_reportado) AS max_lineas_dl_1_10mbps_reportado,
+        SUM(p.lineas_dl_1_10mbps_reportado) AS sum_lineas_dl_1_10mbps_reportado,
+        MAX(p.lineas_dl_1_10mbps_imputado) AS max_lineas_dl_1_10mbps_imputado,
+        SUM(p.lineas_dl_1_10mbps_imputado) AS sum_lineas_dl_1_10mbps_imputado,
+        MAX(p.lineas_dl_10_30mbps_reportado) AS max_lineas_dl_10_30mbps_reportado,
+        SUM(p.lineas_dl_10_30mbps_reportado) AS sum_lineas_dl_10_30mbps_reportado,
+        MAX(p.lineas_dl_10_30mbps_imputado) AS max_lineas_dl_10_30mbps_imputado,
+        SUM(p.lineas_dl_10_30mbps_imputado) AS sum_lineas_dl_10_30mbps_imputado,
+        MAX(p.lineas_dl_30_100mbps_reportado) AS max_lineas_dl_30_100mbps_reportado,
+        SUM(p.lineas_dl_30_100mbps_reportado) AS sum_lineas_dl_30_100mbps_reportado,
+        MAX(p.lineas_dl_30_100mbps_imputado) AS max_lineas_dl_30_100mbps_imputado,
+        SUM(p.lineas_dl_30_100mbps_imputado) AS sum_lineas_dl_30_100mbps_imputado,
+        MAX(p.lineas_dl_100mbps_1gbps_reportado) AS max_lineas_dl_100mbps_1gbps_reportado,
+        SUM(p.lineas_dl_100mbps_1gbps_reportado) AS sum_lineas_dl_100mbps_1gbps_reportado,
+        MAX(p.lineas_dl_100mbps_1gbps_imputado) AS max_lineas_dl_100mbps_1gbps_imputado,
+        SUM(p.lineas_dl_100mbps_1gbps_imputado) AS sum_lineas_dl_100mbps_1gbps_imputado,
+        MAX(p.lineas_dl_1gbps_o_mas_reportado) AS max_lineas_dl_1gbps_o_mas_reportado,
+        SUM(p.lineas_dl_1gbps_o_mas_reportado) AS sum_lineas_dl_1gbps_o_mas_reportado,
+        MAX(p.lineas_dl_1gbps_o_mas_imputado) AS max_lineas_dl_1gbps_o_mas_imputado,
+        SUM(p.lineas_dl_1gbps_o_mas_imputado) AS sum_lineas_dl_1gbps_o_mas_imputado,
+        MAX(p.lineas_ul_sin_datos_reportado) AS max_lineas_ul_sin_datos_reportado,
+        SUM(p.lineas_ul_sin_datos_reportado) AS sum_lineas_ul_sin_datos_reportado,
+        MAX(p.lineas_ul_sin_datos_imputado) AS max_lineas_ul_sin_datos_imputado,
+        SUM(p.lineas_ul_sin_datos_imputado) AS sum_lineas_ul_sin_datos_imputado,
+        MAX(p.lineas_ul_menos_1mbps_reportado) AS max_lineas_ul_menos_1mbps_reportado,
+        SUM(p.lineas_ul_menos_1mbps_reportado) AS sum_lineas_ul_menos_1mbps_reportado,
+        MAX(p.lineas_ul_menos_1mbps_imputado) AS max_lineas_ul_menos_1mbps_imputado,
+        SUM(p.lineas_ul_menos_1mbps_imputado) AS sum_lineas_ul_menos_1mbps_imputado,
+        MAX(p.lineas_ul_1_10mbps_reportado) AS max_lineas_ul_1_10mbps_reportado,
+        SUM(p.lineas_ul_1_10mbps_reportado) AS sum_lineas_ul_1_10mbps_reportado,
+        MAX(p.lineas_ul_1_10mbps_imputado) AS max_lineas_ul_1_10mbps_imputado,
+        SUM(p.lineas_ul_1_10mbps_imputado) AS sum_lineas_ul_1_10mbps_imputado,
+        MAX(p.lineas_ul_10_30mbps_reportado) AS max_lineas_ul_10_30mbps_reportado,
+        SUM(p.lineas_ul_10_30mbps_reportado) AS sum_lineas_ul_10_30mbps_reportado,
+        MAX(p.lineas_ul_10_30mbps_imputado) AS max_lineas_ul_10_30mbps_imputado,
+        SUM(p.lineas_ul_10_30mbps_imputado) AS sum_lineas_ul_10_30mbps_imputado,
+        MAX(p.lineas_ul_30_100mbps_reportado) AS max_lineas_ul_30_100mbps_reportado,
+        SUM(p.lineas_ul_30_100mbps_reportado) AS sum_lineas_ul_30_100mbps_reportado,
+        MAX(p.lineas_ul_30_100mbps_imputado) AS max_lineas_ul_30_100mbps_imputado,
+        SUM(p.lineas_ul_30_100mbps_imputado) AS sum_lineas_ul_30_100mbps_imputado,
+        MAX(p.lineas_ul_100mbps_1gbps_reportado) AS max_lineas_ul_100mbps_1gbps_reportado,
+        SUM(p.lineas_ul_100mbps_1gbps_reportado) AS sum_lineas_ul_100mbps_1gbps_reportado,
+        MAX(p.lineas_ul_100mbps_1gbps_imputado) AS max_lineas_ul_100mbps_1gbps_imputado,
+        SUM(p.lineas_ul_100mbps_1gbps_imputado) AS sum_lineas_ul_100mbps_1gbps_imputado,
+        MAX(p.lineas_ul_1gbps_o_mas_reportado) AS max_lineas_ul_1gbps_o_mas_reportado,
+        SUM(p.lineas_ul_1gbps_o_mas_reportado) AS sum_lineas_ul_1gbps_o_mas_reportado,
+        MAX(p.lineas_ul_1gbps_o_mas_imputado) AS max_lineas_ul_1gbps_o_mas_imputado,
+        SUM(p.lineas_ul_1gbps_o_mas_imputado) AS sum_lineas_ul_1gbps_o_mas_imputado,
         BOOL_OR(p.tiene_reportado) AS tiene_reportado,
         BOOL_OR(p.tiene_imputacion) AS tiene_imputacion,
         BOOL_AND(p.es_totalmente_reportado) AS es_totalmente_reportado,
@@ -985,6 +1095,16 @@ SELECT
         WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_total_lineas
         ELSE a.max_total_lineas
     END AS total_lineas,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_reportadas
+        ELSE a.max_lineas_reportadas
+    END AS lineas_reportadas,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_imputadas
+        ELSE a.max_lineas_imputadas
+    END AS lineas_imputadas,
     CASE
         WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
         WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_total_usuarios
@@ -1070,6 +1190,146 @@ SELECT
         WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_ultra_banda_ancha
         ELSE a.max_lineas_dl_ultra_banda_ancha
     END AS lineas_dl_ultra_banda_ancha,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_sin_datos_reportado
+        ELSE a.max_lineas_dl_sin_datos_reportado
+    END AS lineas_dl_sin_datos_reportado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_sin_datos_imputado
+        ELSE a.max_lineas_dl_sin_datos_imputado
+    END AS lineas_dl_sin_datos_imputado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_menos_1mbps_reportado
+        ELSE a.max_lineas_dl_menos_1mbps_reportado
+    END AS lineas_dl_menos_1mbps_reportado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_menos_1mbps_imputado
+        ELSE a.max_lineas_dl_menos_1mbps_imputado
+    END AS lineas_dl_menos_1mbps_imputado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_1_10mbps_reportado
+        ELSE a.max_lineas_dl_1_10mbps_reportado
+    END AS lineas_dl_1_10mbps_reportado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_1_10mbps_imputado
+        ELSE a.max_lineas_dl_1_10mbps_imputado
+    END AS lineas_dl_1_10mbps_imputado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_10_30mbps_reportado
+        ELSE a.max_lineas_dl_10_30mbps_reportado
+    END AS lineas_dl_10_30mbps_reportado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_10_30mbps_imputado
+        ELSE a.max_lineas_dl_10_30mbps_imputado
+    END AS lineas_dl_10_30mbps_imputado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_30_100mbps_reportado
+        ELSE a.max_lineas_dl_30_100mbps_reportado
+    END AS lineas_dl_30_100mbps_reportado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_30_100mbps_imputado
+        ELSE a.max_lineas_dl_30_100mbps_imputado
+    END AS lineas_dl_30_100mbps_imputado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_100mbps_1gbps_reportado
+        ELSE a.max_lineas_dl_100mbps_1gbps_reportado
+    END AS lineas_dl_100mbps_1gbps_reportado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_100mbps_1gbps_imputado
+        ELSE a.max_lineas_dl_100mbps_1gbps_imputado
+    END AS lineas_dl_100mbps_1gbps_imputado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_1gbps_o_mas_reportado
+        ELSE a.max_lineas_dl_1gbps_o_mas_reportado
+    END AS lineas_dl_1gbps_o_mas_reportado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_1gbps_o_mas_imputado
+        ELSE a.max_lineas_dl_1gbps_o_mas_imputado
+    END AS lineas_dl_1gbps_o_mas_imputado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_sin_datos_reportado
+        ELSE a.max_lineas_ul_sin_datos_reportado
+    END AS lineas_ul_sin_datos_reportado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_sin_datos_imputado
+        ELSE a.max_lineas_ul_sin_datos_imputado
+    END AS lineas_ul_sin_datos_imputado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_menos_1mbps_reportado
+        ELSE a.max_lineas_ul_menos_1mbps_reportado
+    END AS lineas_ul_menos_1mbps_reportado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_menos_1mbps_imputado
+        ELSE a.max_lineas_ul_menos_1mbps_imputado
+    END AS lineas_ul_menos_1mbps_imputado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_1_10mbps_reportado
+        ELSE a.max_lineas_ul_1_10mbps_reportado
+    END AS lineas_ul_1_10mbps_reportado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_1_10mbps_imputado
+        ELSE a.max_lineas_ul_1_10mbps_imputado
+    END AS lineas_ul_1_10mbps_imputado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_10_30mbps_reportado
+        ELSE a.max_lineas_ul_10_30mbps_reportado
+    END AS lineas_ul_10_30mbps_reportado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_10_30mbps_imputado
+        ELSE a.max_lineas_ul_10_30mbps_imputado
+    END AS lineas_ul_10_30mbps_imputado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_30_100mbps_reportado
+        ELSE a.max_lineas_ul_30_100mbps_reportado
+    END AS lineas_ul_30_100mbps_reportado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_30_100mbps_imputado
+        ELSE a.max_lineas_ul_30_100mbps_imputado
+    END AS lineas_ul_30_100mbps_imputado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_100mbps_1gbps_reportado
+        ELSE a.max_lineas_ul_100mbps_1gbps_reportado
+    END AS lineas_ul_100mbps_1gbps_reportado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_100mbps_1gbps_imputado
+        ELSE a.max_lineas_ul_100mbps_1gbps_imputado
+    END AS lineas_ul_100mbps_1gbps_imputado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_1gbps_o_mas_reportado
+        ELSE a.max_lineas_ul_1gbps_o_mas_reportado
+    END AS lineas_ul_1gbps_o_mas_reportado,
+    CASE
+        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
+        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_1gbps_o_mas_imputado
+        ELSE a.max_lineas_ul_1gbps_o_mas_imputado
+    END AS lineas_ul_1gbps_o_mas_imputado,
     a.tiene_reportado,
     a.tiene_imputacion,
     a.es_totalmente_reportado,
@@ -1124,16 +1384,13 @@ SELECT
     v.orden_rango,
     v.rango_velocidad,
     v.total_lineas_velocidad,
-    CASE
-        WHEN f.es_totalmente_reportado
-        THEN v.total_lineas_velocidad
-        ELSE 0::numeric
-    END AS lineas_reportadas,
-    CASE
-        WHEN f.tiene_imputacion
-        THEN v.total_lineas_velocidad
-        ELSE 0::numeric
-    END AS lineas_imputadas,
+    -- CORRECCIÓN (auditoría completa, 29-jul-2026): antes se usaba
+    -- es_totalmente_reportado/tiene_imputacion (dos booleanos NO
+    -- complementarios) para clasificar CADA valor de rango como 100%
+    -- reportado o 100% imputado. Ahora se usan directamente los valores
+    -- ya resueltos por rango desde fact_lineas_geografia_mes.
+    v.lineas_reportadas,
+    v.lineas_imputadas,
     f.tiene_imputacion,
     f.estado_resolucion_peva
 FROM mart.fact_lineas_geografia_mes f
@@ -1143,91 +1400,121 @@ CROSS JOIN LATERAL (
             'DESCARGA',
             1,
             'Sin datos',
-            f.lineas_dl_sin_datos
+            f.lineas_dl_sin_datos,
+            f.lineas_dl_sin_datos_reportado,
+            f.lineas_dl_sin_datos_imputado
         ),
         (
             'DESCARGA',
             2,
             'Menos de 1 Mbps',
-            f.lineas_dl_menos_1mbps
+            f.lineas_dl_menos_1mbps,
+            f.lineas_dl_menos_1mbps_reportado,
+            f.lineas_dl_menos_1mbps_imputado
         ),
         (
             'DESCARGA',
             3,
             '1 a 10 Mbps',
-            f.lineas_dl_1_10mbps
+            f.lineas_dl_1_10mbps,
+            f.lineas_dl_1_10mbps_reportado,
+            f.lineas_dl_1_10mbps_imputado
         ),
         (
             'DESCARGA',
             4,
             '10 a 30 Mbps',
-            f.lineas_dl_10_30mbps
+            f.lineas_dl_10_30mbps,
+            f.lineas_dl_10_30mbps_reportado,
+            f.lineas_dl_10_30mbps_imputado
         ),
         (
             'DESCARGA',
             5,
             '30 a 100 Mbps',
-            f.lineas_dl_30_100mbps
+            f.lineas_dl_30_100mbps,
+            f.lineas_dl_30_100mbps_reportado,
+            f.lineas_dl_30_100mbps_imputado
         ),
         (
             'DESCARGA',
             6,
             '100 Mbps a 1 Gbps',
-            f.lineas_dl_100mbps_1gbps
+            f.lineas_dl_100mbps_1gbps,
+            f.lineas_dl_100mbps_1gbps_reportado,
+            f.lineas_dl_100mbps_1gbps_imputado
         ),
         (
             'DESCARGA',
             7,
             '1 Gbps o más',
-            f.lineas_dl_1gbps_o_mas
+            f.lineas_dl_1gbps_o_mas,
+            f.lineas_dl_1gbps_o_mas_reportado,
+            f.lineas_dl_1gbps_o_mas_imputado
         ),
         (
             'SUBIDA',
             1,
             'Sin datos',
-            f.lineas_ul_sin_datos
+            f.lineas_ul_sin_datos,
+            f.lineas_ul_sin_datos_reportado,
+            f.lineas_ul_sin_datos_imputado
         ),
         (
             'SUBIDA',
             2,
             'Menos de 1 Mbps',
-            f.lineas_ul_menos_1mbps
+            f.lineas_ul_menos_1mbps,
+            f.lineas_ul_menos_1mbps_reportado,
+            f.lineas_ul_menos_1mbps_imputado
         ),
         (
             'SUBIDA',
             3,
             '1 a 10 Mbps',
-            f.lineas_ul_1_10mbps
+            f.lineas_ul_1_10mbps,
+            f.lineas_ul_1_10mbps_reportado,
+            f.lineas_ul_1_10mbps_imputado
         ),
         (
             'SUBIDA',
             4,
             '10 a 30 Mbps',
-            f.lineas_ul_10_30mbps
+            f.lineas_ul_10_30mbps,
+            f.lineas_ul_10_30mbps_reportado,
+            f.lineas_ul_10_30mbps_imputado
         ),
         (
             'SUBIDA',
             5,
             '30 a 100 Mbps',
-            f.lineas_ul_30_100mbps
+            f.lineas_ul_30_100mbps,
+            f.lineas_ul_30_100mbps_reportado,
+            f.lineas_ul_30_100mbps_imputado
         ),
         (
             'SUBIDA',
             6,
             '100 Mbps a 1 Gbps',
-            f.lineas_ul_100mbps_1gbps
+            f.lineas_ul_100mbps_1gbps,
+            f.lineas_ul_100mbps_1gbps_reportado,
+            f.lineas_ul_100mbps_1gbps_imputado
         ),
         (
             'SUBIDA',
             7,
             '1 Gbps o más',
-            f.lineas_ul_1gbps_o_mas
+            f.lineas_ul_1gbps_o_mas,
+            f.lineas_ul_1gbps_o_mas_reportado,
+            f.lineas_ul_1gbps_o_mas_imputado
         )
 ) AS v(
     tipo_velocidad,
     orden_rango,
     rango_velocidad,
-    total_lineas_velocidad
+    total_lineas_velocidad,
+    lineas_reportadas,
+    lineas_imputadas
 );
 
 CREATE UNIQUE INDEX uq_fact_lineas_velocidad_mes
@@ -1257,20 +1544,18 @@ WITH prestador_territorio AS (
         f.prestador_id,
         SUM(f.total_lineas) AS total_lineas_prestador,
         SUM(f.total_usuarios) AS total_usuarios_prestador,
-        SUM(
-            CASE
-                WHEN f.tiene_imputacion
-                THEN 0
-                ELSE COALESCE(f.total_lineas, 0)
-            END
-        ) AS lineas_reportadas_prestador,
-        SUM(
-            CASE
-                WHEN f.tiene_imputacion
-                THEN COALESCE(f.total_lineas, 0)
-                ELSE 0
-            END
-        ) AS lineas_imputadas_prestador,
+        -- CORRECCIÓN (revisión profesional, 29-jul-2026): antes se usaba
+        -- CASE WHEN f.tiene_imputacion (un booleano "¿ALGO se imputó?")
+        -- para clasificar el total_lineas COMPLETO de cada prestador como
+        -- 100% reportado o 100% imputado. Un prestador con 9 de 10
+        -- combinaciones reportadas y solo 1 imputada caía entero en
+        -- "imputado". Ahora se suman directamente lineas_reportadas/
+        -- lineas_imputadas, que ya vienen resueltas correctamente por fila
+        -- desde stg_lineas_por_peva_geografia_mes -- la invariante
+        -- lineas_reportadas + lineas_imputadas = total_lineas se mantiene
+        -- de principio a fin de la cadena.
+        SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas_prestador,
+        SUM(COALESCE(f.lineas_imputadas, 0)) AS lineas_imputadas_prestador,
         BOOL_OR(f.tiene_imputacion)
             AS tiene_imputacion
     FROM mart.fact_lineas_geografia_mes f
@@ -1514,20 +1799,14 @@ WITH prestador_territorio AS (
         f.prestador_id,
         SUM(f.total_lineas)
             AS total_lineas_prestador,
-        SUM(
-            CASE
-                WHEN f.tiene_imputacion
-                THEN 0
-                ELSE COALESCE(f.total_lineas, 0)
-            END
-        ) AS lineas_reportadas,
-        SUM(
-            CASE
-                WHEN f.tiene_imputacion
-                THEN COALESCE(f.total_lineas, 0)
-                ELSE 0
-            END
-        ) AS lineas_imputadas,
+        -- CORRECCIÓN (auditoría completa, 29-jul-2026): mismo defecto que
+        -- ya se corrigió en fact_resumen_mercado_mes -- CASE WHEN
+        -- f.tiene_imputacion (booleano "¿ALGO se imputó?") clasificaba el
+        -- total_lineas COMPLETO como 100% reportado o 100% imputado. Ahora
+        -- se suman directamente las columnas ya resueltas correctamente
+        -- por fila desde fact_lineas_geografia_mes.
+        SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas,
+        SUM(COALESCE(f.lineas_imputadas, 0)) AS lineas_imputadas,
         BOOL_OR(f.tiene_imputacion)
             AS tiene_imputacion
     FROM mart.fact_lineas_geografia_mes f
@@ -2095,3 +2374,63 @@ WHERE total_lineas IS NOT NULL
   );
 
 -- Resultado esperado: cero filas.
+
+-- 17.9. NUEVA (auditoría completa, 29-jul-2026).
+-- lineas_reportadas + lineas_imputadas debe ser igual a total_lineas en
+-- fact_lineas_geografia_mes -- esta es la invariante que el bug de
+-- clasificación por booleano (BOOL_OR/BOOL_AND sobre un grupo mixto)
+-- podía romper. Con la corrección de las secciones 7 y 9 (sumas
+-- condicionadas por fila en vez de un booleano sobre el total agregado),
+-- esta consulta debe devolver siempre cero filas.
+SELECT
+    periodo_id,
+    prestador_id,
+    geografia_id,
+    estado_resolucion_peva,
+    total_lineas,
+    lineas_reportadas,
+    lineas_imputadas,
+    (COALESCE(lineas_reportadas, 0) + COALESCE(lineas_imputadas, 0)) AS suma_reportado_imputado
+FROM mart.fact_lineas_geografia_mes
+WHERE total_lineas IS NOT NULL
+  AND total_lineas <> (COALESCE(lineas_reportadas, 0) + COALESCE(lineas_imputadas, 0));
+
+-- Resultado esperado: cero filas.
+
+-- 17.10. NUEVA (auditoría completa, 29-jul-2026).
+-- Misma invariante que 17.9, pero POR RANGO DE VELOCIDAD, en
+-- fact_lineas_velocidad_mes -- este era el caso más grave encontrado
+-- (es_totalmente_reportado/tiene_imputacion no eran complementarios).
+SELECT
+    periodo_id,
+    prestador_id,
+    geografia_id,
+    tipo_velocidad,
+    rango_velocidad,
+    total_lineas_velocidad,
+    lineas_reportadas,
+    lineas_imputadas
+FROM mart.fact_lineas_velocidad_mes
+WHERE total_lineas_velocidad IS NOT NULL
+  AND total_lineas_velocidad <> (COALESCE(lineas_reportadas, 0) + COALESCE(lineas_imputadas, 0));
+
+-- Resultado esperado: cero filas.
+
+-- 17.11. NUEVA (auditoría completa, 29-jul-2026) -- verificación puntual
+-- del hallazgo original que motivó esta auditoría: diciembre 2013 mostraba
+-- 93.76% imputado antes de la corrección (ver sección 11, lineas_reportadas
+-- = 141233 / lineas_imputadas = 2121874 en fact_resumen_mercado_mes).
+-- Después de la corrección, debe acercarse al ~66.7% observado directamente
+-- en capa2.lineas_dedicadas_consolidado para ese mismo mes
+-- (751979 reportadas / 1511154 imputadas, calculado a mano el 29-jul-2026).
+SELECT
+    periodo,
+    total_lineas,
+    lineas_reportadas,
+    lineas_imputadas,
+    porcentaje_imputado
+FROM mart.vw_dashboard_evolucion
+WHERE territorio_id = 'NACIONAL|ECUADOR'
+  AND periodo = '2013-12-01';
+
+-- Resultado esperado: porcentaje_imputado cercano a 66-67, NO 93.76.
