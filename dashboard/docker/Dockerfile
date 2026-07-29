@@ -2,7 +2,7 @@
 # (el servidor de desarrollo de Flask/Dash no está pensado para producción:
 # sin manejo real de concurrencia, y con el modo debug activo sería un
 # riesgo de seguridad serio junto a Flask-Login -- ver dashboard/config.py).
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 
