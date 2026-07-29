@@ -291,15 +291,14 @@ def _sql_conteo_dry_run() -> str:
     """
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Solo cuenta filas, no crea ni reemplaza capa2.lineas_dedicadas_consolidado")
-    args = parser.parse_args()
-
+def construir_capa2(dry_run: bool = False) -> None:
+    """
+    Función invocable directamente (sin CLI/argparse) -- la que importa
+    dags/sietel_mart_pipeline.py.
+    """
     engine = _engine()
 
-    if args.dry_run:
+    if dry_run:
         with engine.connect() as conn:
             fila = conn.execute(text(_sql_conteo_dry_run())).mappings().one()
         reales = fila["filas_reales_totales"]
@@ -314,7 +313,7 @@ def main() -> int:
             logger.error(
                 "INCONSISTENCIA: el total tras relleno es MENOR que las filas reales -- no debería pasar nunca. No confíes en este resultado, avisa antes de continuar.")
         logger.info("--dry-run: no se escribió nada.")
-        return 0
+        return
 
     with engine.begin() as conn:
         for sentencia in _sentencias_construccion():
@@ -330,6 +329,15 @@ def main() -> int:
                 total, imputadas, 100 * imputadas / total if total else 0)
     logger.info(
         "Tabla anterior conservada en capa2.lineas_dedicadas_consolidado_prev por si hay que comparar o revertir.")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Solo cuenta filas, no crea ni reemplaza capa2.lineas_dedicadas_consolidado")
+    args = parser.parse_args(argv)
+
+    construir_capa2(dry_run=args.dry_run)
     return 0
 
 

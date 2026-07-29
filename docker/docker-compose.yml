@@ -47,10 +47,18 @@ x-airflow-common:
     ANALITICO_PG_USER: ${ANALITICO_PG_USER}
     ANALITICO_PG_PASSWORD: ${ANALITICO_PG_PASSWORD}
     ANALITICO_PG_DATABASE: ${ANALITICO_PG_DATABASE}
+    # Credenciales de mart_user -- dueño de capa2/mart/calidad, usadas por
+    # dags/sietel_mart_pipeline.py (detectar_conflictos_peva.py,
+    # construir_capa2.py, aplicar_capa3.py). Distintas de ANALITICO_PG_*
+    # de arriba (esas son de sietel_user, dueño de staging/analitico) --
+    # dos pipelines, dos roles, sin compartir credenciales.
+    MART_USER_USER: ${MART_USER_USER}
+    MART_USER_PASSWORD: ${MART_USER_PASSWORD}
   volumes:
     - ../dags:/opt/airflow/dags
     - ../scripts:/opt/airflow/scripts
     - ../sql:/opt/airflow/sql
+    - ../mart:/opt/airflow/mart
     - airflow_logs:/opt/airflow/logs
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:

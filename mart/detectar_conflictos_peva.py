@@ -221,12 +221,14 @@ def clasificar(par: dict, coexisten: bool) -> dict:
     }
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Solo reporta, no escribe en calidad.conflictos_ruc_peva")
-    args = parser.parse_args()
+def detectar_conflictos_peva(dry_run: bool = False) -> dict[str, int]:
+    """
+    Función invocable directamente (sin CLI/argparse) -- la que importa
+    dags/sietel_mart_pipeline.py, igual que scripts/cargar_hechos_anio.py
+    expone cargar_hechos_anio(anio) para su propio DAG.
 
+    Devuelve el resumen de clasificación {categoria: cantidad}.
+    """
     engine = _engine()
     resumen = {"A_DUPLICADO_MIGRACION_CODIFICACION": 0, "B_SECUENCIA_MISMO_TITULAR": 0,
                "C_NOMBRES_DISTINTOS_MISMO_RUC": 0}
@@ -267,9 +269,9 @@ def main() -> int:
         resumen["C_NOMBRES_DISTINTOS_MISMO_RUC"],
     )
 
-    if args.dry_run:
+    if dry_run:
         logger.info("--dry-run: no se escribió nada en calidad.conflictos_ruc_peva.")
-        return 0
+        return resumen
 
     with engine.begin() as conn:
         for fila in filas_a_escribir:
@@ -280,6 +282,16 @@ def main() -> int:
         "Los PEVA del Grupo A confirmados quedan disponibles en calidad.vw_pevas_excluidos "
         "para que construir_capa2.py los excluya antes de agregar."
     )
+    return resumen
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Solo reporta, no escribe en calidad.conflictos_ruc_peva")
+    args = parser.parse_args(argv)
+
+    detectar_conflictos_peva(dry_run=args.dry_run)
     return 0
 
 
