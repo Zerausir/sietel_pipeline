@@ -1,0 +1,16 @@
+services:
+  dashboard:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: sietel_dashboard
+    restart: unless-stopped
+    ports:
+      # Puerto propio -- no choca con samm_pipeline (8080) ni sietel_pipeline
+      # (8081) en VM2, mismo criterio que ya se usó para evitar ese
+      # conflicto en docker/docker-compose.yml del pipeline.
+      - "8050:8050"
+    env_file:
+      - ../.env
+    # Sin volúmenes de datos: el dashboard no persiste nada localmente,
+    # todo vive en PostgreSQL (VM1). Un restart limpio no pierde información.

@@ -1,0 +1,47 @@
+body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    background: #f5f6f8;
+}
+
+.topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #0f1b2d;
+    color: white;
+    padding: 0.75rem 1.5rem;
+}
+
+.brand { display: flex; align-items: center; gap: 0.75rem; }
+.brand-mark {
+    background: #2563eb;
+    color: white;
+    font-weight: 700;
+    border-radius: 6px;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.brand-title { font-weight: 600; font-size: 0.95rem; }
+.brand-subtitle { font-size: 0.75rem; color: #9ca3af; }
+
+.nav-links { display: flex; gap: 1.25rem; }
+.nav-link { color: #e5e7eb; text-decoration: none; font-size: 0.9rem; }
+.nav-link:hover { color: white; }
+
+.nav-user { display: flex; align-items: center; gap: 1rem; }
+.nav-user-name { font-size: 0.85rem; color: #cbd5e1; }
+.nav-logout { color: #f87171; }
+
+.page-container { padding: 2rem; max-width: 1200px; margin: 0 auto; }
+.footer { text-align: center; padding: 1rem; color: #9ca3af; font-size: 0.8rem; }
+
+.placeholder-page {
+    background: white;
+    border-radius: 10px;
+    padding: 2rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
