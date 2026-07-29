@@ -77,4 +77,16 @@ RUN pip install --no-cache-dir \
     "pyodbc==5.3.0" \
     "psycopg2-binary==2.9.12"
 
+# Dependencias de mart/ (dags/sietel_mart_pipeline.py) -- deliberadamente
+# psycopg v3 (no psycopg2 de arriba) porque mart/*.py usa SQLAlchemy con el
+# driver "postgresql+psycopg", igual que corre en VM2 para estos mismos
+# scripts. Sin esto el DAG falla con ModuleNotFoundError apenas intenta
+# importar detectar_conflictos_peva.py / construir_capa2.py / aplicar_capa3.py
+# (confirmado 29-jul-2026: el volumen mart/ estaba montado pero las
+# librerías nunca se instalaron en esta imagen).
+RUN pip install --no-cache-dir \
+    "SQLAlchemy==2.0.51" \
+    "psycopg[binary]==3.3.4" \
+    "python-dotenv==1.2.2"
+
 ENTRYPOINT ["/usr/bin/dumb-init", "--", "/entrypoint"]
