@@ -213,12 +213,24 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
     # borde más reciente de los datos, ver discusión con el usuario
     # 29-jul-2026): un prestador que dejó de reportar simplemente desaparece
     # de su serie, no queda marcado como imputado.
+    #
+    # CORRECCIÓN (auditoría completa, 29-jul-2026): periodo_id se codifica
+    # como anio*100+mes (ej. diciembre 2013 = 201312, enero 2014 = 201401)
+    # -- NO es una secuencia simple que sube de 1 en 1. Restar 1 directo
+    # (periodo_actual_id - 1) se rompe exactamente en enero de cualquier
+    # año (201401 - 1 = 201400, que no corresponde a ningún período real;
+    # debería dar 201312). El propio sql/02_ddl_mart.sql ya resuelve esto
+    # correctamente en fact_resumen_mercado_mes restando un INTERVAL de
+    # fecha real, no aritmética sobre el entero codificado -- se replica
+    # el mismo patrón aquí, vía resolve_period_id sobre la fecha real.
     churn_value, churn_note = "—", ""
     try:
         periodo_actual_id = int(latest["periodo_id"])
-        periodo_anterior_id = periodo_actual_id - 1
+        fecha_mes_anterior = (latest["periodo"] - pd.DateOffset(months=1)).date().isoformat()
+        periodo_anterior_id = resolve_period_id(fecha_mes_anterior)
         actuales = get_participation(territory_id, periodo_actual_id)
-        anteriores = get_participation(territory_id, periodo_anterior_id)
+        anteriores = get_participation(territory_id,
+                                       periodo_anterior_id) if periodo_anterior_id is not None else pd.DataFrame()
         if not actuales.empty and not anteriores.empty:
             activos_anterior = set(
                 anteriores.loc[
