@@ -228,7 +228,7 @@ def get_evolution_filtrado(
     }
     if opera_estados:
         clauses.append(
-            "EXISTS (SELECT 1 FROM unnest(:opera_estados::text[]) AS estado "
+            "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
             "WHERE p.opera_actual ILIKE '%' || estado || '%')"
         )
         params["opera_estados"] = list(opera_estados)
@@ -295,7 +295,7 @@ def get_velocities(
     }
     if opera_estados:
         clauses.append(
-            "EXISTS (SELECT 1 FROM unnest(:opera_estados::text[]) AS estado "
+            "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
             "WHERE p.opera_actual ILIKE '%' || estado || '%')"
         )
         params["opera_estados"] = list(opera_estados)

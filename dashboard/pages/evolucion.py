@@ -320,14 +320,12 @@ def update_evolution(
     style_figure(lines_fig, hovermode="x unified")
     lines_fig.update_yaxes(title="Líneas reportadas", tickformat=",")
 
-    providers_fig = go.Figure()
-    providers_fig.add_trace(
-        go.Scatter(
-            x=evolution["periodo"], y=evolution["numero_prestadores"], mode="lines+markers",
-            name="Prestadores que reportaron", line={"color": PALETTE["blue"], "width": 3},
-        )
+    providers_fig = px.bar(
+        evolution, x="periodo", y="numero_prestadores",
+        labels={"numero_prestadores": "Prestadores que reportaron", "periodo": "Período"},
     )
-    style_figure(providers_fig)
+    providers_fig.update_traces(marker_color=PALETTE["blue"])
+    style_figure(providers_fig, hovermode="x unified")
     providers_fig.update_yaxes(title="Prestadores", rangemode="tozero")
 
     if velocities.empty:
