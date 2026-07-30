@@ -18,8 +18,16 @@ from components.ui import (
     page_header,
     style_figure,
 )
-from services.queries import get_evolution, get_participation, get_periods, get_provider_count_in_range, get_velocities, \
-    resolve_period_id
+from services.queries import (
+    get_evolution_filtrado,
+    get_operation_states,
+    get_participation,
+    get_periods,
+    get_provider_count_in_range,
+    get_provider_options,
+    get_velocities,
+    resolve_period_id,
+)
 
 register_page(__name__, path="/", name="Evolución", order=0)
 PREFIX = "evo"
@@ -42,18 +50,20 @@ def layout():
     except Exception as exc:
         return html.Div([page_header("Evolución del mercado", ""), error_panel(str(exc))])
 
+    estados_operacion = get_operation_states()
+
     return html.Div(
         children=[
             page_header(
                 "Evolución del mercado",
-                "Líneas, prestadores y cambios en la composición por velocidad.",
+                "Líneas reportadas, prestadores y cambios en la composición por velocidad.",
             ),
             html.Section(
                 className="filter-panel",
                 children=[
                     territory_filter_layout(PREFIX),
                     html.Div(
-                        className="period-grid",
+                        className="period-grid four-periods",
                         children=[
                             html.Div(
                                 className="filter-field",
@@ -88,18 +98,45 @@ def layout():
                             html.Div(
                                 className="filter-field",
                                 children=[
-                                    html.Label("Velocidad"),
-                                    dcc.RadioItems(
-                                        id="evo-speed-type",
-                                        options=[
-                                            {"label": "Descarga", "value": "DESCARGA"},
-                                            {"label": "Subida", "value": "SUBIDA"},
-                                        ],
-                                        value="DESCARGA",
-                                        inline=True,
-                                        className="radio-group",
+                                    html.Label("Estado de operación"),
+                                    dcc.Dropdown(
+                                        id="evo-opera-estado",
+                                        options=estados_operacion,
+                                        value=None,
+                                        placeholder="Todos",
+                                        clearable=True,
                                     ),
                                 ],
+                            ),
+                            html.Div(
+                                className="filter-field",
+                                children=[
+                                    html.Label("Prestador"),
+                                    dcc.Dropdown(
+                                        id="evo-isp-nombre",
+                                        options=[],
+                                        value=None,
+                                        placeholder="Todos",
+                                        clearable=True,
+                                    ),
+                                ],
+                            ),
+                        ],
+                    ),
+                    html.Div(
+                        className="filter-field",
+                        style={"marginTop": "14px", "maxWidth": "260px"},
+                        children=[
+                            html.Label("Velocidad"),
+                            dcc.RadioItems(
+                                id="evo-speed-type",
+                                options=[
+                                    {"label": "Descarga", "value": "DESCARGA"},
+                                    {"label": "Subida", "value": "SUBIDA"},
+                                ],
+                                value="DESCARGA",
+                                inline=True,
+                                className="radio-group",
                             ),
                         ],
                     ),
@@ -110,10 +147,10 @@ def layout():
             html.Section(
                 className="kpi-grid five",
                 children=[
-                    kpi_card("Líneas en el último período", "evo-kpi-lines", "evo-kpi-lines-note"),
+                    kpi_card("Líneas reportadas (último período)", "evo-kpi-lines", "evo-kpi-lines-note"),
                     kpi_card("Prestadores presentes", "evo-kpi-providers", "evo-kpi-providers-note"),
-                    kpi_card("Cambio mensual de líneas", "evo-kpi-change", "evo-kpi-change-note"),
-                    kpi_card("Información imputada", "evo-kpi-imputed", "evo-kpi-imputed-note"),
+                    kpi_card("Cambio mensual (reportadas)", "evo-kpi-change", "evo-kpi-change-note"),
+                    kpi_card("% de prestadores que reportaron", "evo-kpi-completitud", "evo-kpi-completitud-note"),
                     kpi_card("Dejaron de reportar este mes", "evo-kpi-churn", "evo-kpi-churn-note"),
                 ],
             ),
@@ -128,8 +165,8 @@ def layout():
             html.Section(
                 className="chart-grid two",
                 children=[
-                    chart_card("Evolución de líneas", "evo-lines-chart",
-                               "Total de líneas y proporción reportada/imputada."),
+                    chart_card("Líneas reportadas por mes", "evo-lines-chart",
+                               "Solo datos reales (reportados) -- no incluye relleno interior (imputado)."),
                     chart_card("Evolución de prestadores", "evo-providers-chart",
                                "Prestadores presentes y prestadores con líneas positivas."),
                     chart_card("Composición por velocidad", "evo-speed-composition-chart",
@@ -146,14 +183,24 @@ register_territory_callbacks(PREFIX)
 
 
 @callback(
+    Output("evo-isp-nombre", "options"),
+    Input("evo-territory-id", "data"),
+)
+def update_provider_filter_options(territory_id: str):
+    if not territory_id:
+        return []
+    return get_provider_options(territory_id)
+
+
+@callback(
     Output("evo-kpi-lines", "children"),
     Output("evo-kpi-lines-note", "children"),
     Output("evo-kpi-providers", "children"),
     Output("evo-kpi-providers-note", "children"),
     Output("evo-kpi-change", "children"),
     Output("evo-kpi-change-note", "children"),
-    Output("evo-kpi-imputed", "children"),
-    Output("evo-kpi-imputed-note", "children"),
+    Output("evo-kpi-completitud", "children"),
+    Output("evo-kpi-completitud-note", "children"),
     Output("evo-kpi-churn", "children"),
     Output("evo-kpi-churn-note", "children"),
     Output("evo-lines-chart", "figure"),
@@ -169,8 +216,17 @@ register_territory_callbacks(PREFIX)
     Input("evo-start-period", "date"),
     Input("evo-end-period", "date"),
     Input("evo-speed-type", "value"),
+    Input("evo-opera-estado", "value"),
+    Input("evo-isp-nombre", "value"),
 )
-def update_evolution(territory_id: str, start_date: str, end_date: str, speed_type: str):
+def update_evolution(
+        territory_id: str,
+        start_date: str,
+        end_date: str,
+        speed_type: str,
+        opera_estado: str | None,
+        isp_nombre: str | None,
+):
     start_period = resolve_period_id(start_date)
     end_period = resolve_period_id(end_date)
 
@@ -182,7 +238,7 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
     start_period, end_period = sorted((int(start_period), int(end_period)))
 
     try:
-        evolution = get_evolution(territory_id, start_period, end_period)
+        evolution = get_evolution_filtrado(territory_id, start_period, end_period, opera_estado, isp_nombre)
         velocities = get_velocities(territory_id, start_period, end_period, speed_type)
     except Exception as exc:
         figures = [empty_figure("Error al consultar PostgreSQL") for _ in range(4)]
@@ -192,7 +248,7 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
     if evolution.empty:
         figures = [empty_figure() for _ in range(4)]
         return ("—", "", "—", "", "—", "", "—", "", "—", "", *figures,
-                "No existen datos para este territorio y período.",
+                "No existen datos para este territorio, período y filtros seleccionados.",
                 "Estado actual", "Resumen del rango seleccionado", "—", "")
 
     evolution = evolution.copy()
@@ -200,7 +256,9 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
     numeric_columns = [
         "total_lineas", "lineas_reportadas", "lineas_imputadas",
         "numero_prestadores", "numero_prestadores_con_lineas", "numero_prestadores_sin_dato",
-        "diferencia_mensual_lineas", "variacion_mensual_porcentaje", "porcentaje_imputado",
+        "numero_prestadores_reportaron",
+        "diferencia_mensual_lineas", "variacion_mensual_porcentaje",
+        "porcentaje_imputado", "porcentaje_reportaron",
     ]
     for column in numeric_columns:
         if column in evolution:
@@ -209,7 +267,7 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
     latest = evolution.sort_values("periodo_id").iloc[-1]
     latest_label = str(latest.get("anio_mes", ""))
 
-    lines_value = format_number(latest.get("total_lineas"))
+    lines_value = format_number(latest.get("lineas_reportadas"))
     lines_note = f"Período {latest_label}"
     providers_value = format_number(latest.get("numero_prestadores"))
     providers_note = (
@@ -217,29 +275,20 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
         f"{format_number(latest.get('numero_prestadores_sin_dato'))} sin dato"
     )
     change_value = format_signed(latest.get("diferencia_mensual_lineas"))
-    change_note = f"{format_signed(latest.get('variacion_mensual_porcentaje'), 2, '%')} respecto al mes anterior"
-    imputed_value = (
-        f"{format_number(latest.get('porcentaje_imputado'), 2)}%"
-        if pd.notna(latest.get("porcentaje_imputado")) else "—"
+    change_note = f"{format_signed(latest.get('variacion_mensual_porcentaje'), 2, '%')} respecto al mes anterior (sobre reportadas)"
+
+    completitud_pct = latest.get("porcentaje_reportaron")
+    completitud_value = f"{format_number(completitud_pct, 1)}%" if pd.notna(completitud_pct) else "—"
+    completitud_note = (
+        f"{format_number(latest.get('numero_prestadores_reportaron'))} de "
+        f"{format_number(latest.get('numero_prestadores'))} prestadores reportaron este mes"
     )
-    imputed_note = f"{format_number(latest.get('lineas_imputadas'))} líneas imputadas"
 
     # "Dejaron de reportar este mes": prestadores con líneas positivas en el
-    # período anterior que ya NO aparecen en el último -- este caso no lo
-    # captura "% de datos imputados" (que por diseño siempre da 0% en el
-    # borde más reciente de los datos, ver discusión con el usuario
-    # 29-jul-2026): un prestador que dejó de reportar simplemente desaparece
-    # de su serie, no queda marcado como imputado.
-    #
-    # CORRECCIÓN (auditoría completa, 29-jul-2026): periodo_id se codifica
-    # como anio*100+mes (ej. diciembre 2013 = 201312, enero 2014 = 201401)
-    # -- NO es una secuencia simple que sube de 1 en 1. Restar 1 directo
-    # (periodo_actual_id - 1) se rompe exactamente en enero de cualquier
-    # año (201401 - 1 = 201400, que no corresponde a ningún período real;
-    # debería dar 201312). El propio sql/02_ddl_mart.sql ya resuelve esto
-    # correctamente en fact_resumen_mercado_mes restando un INTERVAL de
-    # fecha real, no aritmética sobre el entero codificado -- se replica
-    # el mismo patrón aquí, vía resolve_period_id sobre la fecha real.
+    # período anterior que ya NO aparecen en el último. periodo_id se
+    # codifica como anio*100+mes -- se usa aritmética de fecha real
+    # (no periodo_id - 1) para hallar el mes anterior correctamente en
+    # cualquier enero (ver auditoría completa, 29-jul-2026).
     churn_value, churn_note = "—", ""
     try:
         periodo_actual_id = int(latest["periodo_id"])
@@ -263,29 +312,21 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
     except Exception:
         churn_value, churn_note = "—", "No se pudo calcular"
 
-    lines_fig = go.Figure()
-    lines_fig.add_trace(
-        go.Scatter(
-            x=evolution["periodo"], y=evolution["total_lineas"], mode="lines+markers",
-            name="Total de líneas", line={"color": PALETTE["blue"], "width": 3},
-        )
+    # Gráfico de barras -- SOLO reportadas (dato real). Se dejó de mostrar
+    # el total mezclado con imputados y la serie de "imputadas" por sí
+    # misma: cuando un prestador grande deja de reportar, el LOCF disfraza
+    # el total de continuo, y mostrar "imputadas" por separado sugiere una
+    # falsa precisión sobre algo que en realidad no se sabe. La caída en
+    # la barra de "reportadas" es la señal honesta -- se explica con el
+    # KPI "% de prestadores que reportaron" al lado (ver discusión con el
+    # usuario, 30-jul-2026).
+    lines_fig = px.bar(
+        evolution, x="periodo", y="lineas_reportadas",
+        labels={"lineas_reportadas": "Líneas reportadas", "periodo": "Período"},
     )
-    if "lineas_reportadas" in evolution:
-        lines_fig.add_trace(
-            go.Scatter(
-                x=evolution["periodo"], y=evolution["lineas_reportadas"], mode="lines",
-                name="Reportadas", line={"color": PALETTE["teal"], "width": 2, "dash": "dot"},
-            )
-        )
-    if "lineas_imputadas" in evolution:
-        lines_fig.add_trace(
-            go.Scatter(
-                x=evolution["periodo"], y=evolution["lineas_imputadas"], mode="lines",
-                name="Imputadas", line={"color": PALETTE["orange"], "width": 2, "dash": "dash"},
-            )
-        )
-    style_figure(lines_fig)
-    lines_fig.update_yaxes(title="Número de líneas", tickformat=",")
+    lines_fig.update_traces(marker_color=PALETTE["blue"])
+    style_figure(lines_fig, hovermode="x unified")
+    lines_fig.update_yaxes(title="Líneas reportadas", tickformat=",")
 
     providers_fig = go.Figure()
     providers_fig.add_trace(
@@ -338,7 +379,13 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
         speed_diff_fig.update_xaxes(tickangle=-25)
         speed_diff_fig.update_yaxes(title="Diferencia mensual", tickformat=",")
 
-    message = f"Territorio: {latest.get('nombre_geografico', territory_id)} · Último período visible: {latest_label}"
+    filtros_txt = []
+    if opera_estado:
+        filtros_txt.append(f"Estado: {opera_estado}")
+    if isp_nombre:
+        filtros_txt.append(f"Prestador: {isp_nombre}")
+    filtros_sufijo = f" · Filtros: {', '.join(filtros_txt)}" if filtros_txt else ""
+    message = f"Territorio: {territory_id} · Último período visible: {latest_label}{filtros_sufijo}"
 
     titulo_estado_actual = f"Estado actual — {latest_label}"
 
@@ -351,8 +398,8 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
         cantidad_rango = get_provider_count_in_range(territory_id, start_period, end_period)
         rango_prestadores_value = format_number(cantidad_rango)
         rango_prestadores_note = (
-            f"Con al menos un reporte real entre {rango_desde_label} y {rango_hasta_label} "
-            "-- incluye prestadores que ya no reportan en el último mes."
+            f"Con al menos un reporte real entre {rango_desde_label} y {rango_hasta_label}. "
+            "No equivale a título habilitante vigente -- solo indica actividad reportada."
         )
     except Exception:
         rango_prestadores_value, rango_prestadores_note = "—", "No se pudo calcular"
@@ -361,7 +408,7 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
         lines_value, lines_note,
         providers_value, providers_note,
         change_value, change_note,
-        imputed_value, imputed_note,
+        completitud_value, completitud_note,
         churn_value, churn_note,
         lines_fig, providers_fig, speed_comp_fig, speed_diff_fig,
         message,
