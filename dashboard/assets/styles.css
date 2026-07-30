@@ -234,6 +234,20 @@ body {
     grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
+.kpi-grid.one {
+    grid-template-columns: minmax(0, 1fr);
+    max-width: 420px;
+}
+
+h3[id^="evo-titulo-"] {
+    margin: 24px 0 10px;
+    font-size: 15px;
+    font-weight: 750;
+    color: var(--navy);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+}
+
 .kpi-card {
     padding: 17px 18px;
     min-height: 126px;

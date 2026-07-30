@@ -104,6 +104,32 @@ def get_territory_options(
 
 
 @cache.memoize(timeout=300)
+def get_provider_count_in_range(territory_id: str, start_period: int, end_period: int) -> int:
+    """
+    Cuenta prestadores DISTINTOS con al menos un reporte real dentro de
+    TODO el rango Desde-Hasta -- a diferencia de "numero_prestadores" en
+    vw_dashboard_evolucion, que es una fotografía de un solo mes. Responde
+    la pregunta "¿cuántos prestadores tuvieron actividad en algún punto de
+    este rango?", equivalente al conteo histórico que muestra Power BI
+    (ver discusión con el usuario, 29-jul-2026).
+    """
+    df = _read(
+        """
+        SELECT COUNT(DISTINCT f.prestador_id) AS cantidad
+        FROM mart.fact_lineas_geografia_mes f
+        JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
+        WHERE b.territorio_id = :territory_id
+          AND f.periodo_id BETWEEN :start_period AND :end_period
+          AND f.total_lineas IS NOT NULL
+        """,
+        {"territory_id": territory_id, "start_period": start_period, "end_period": end_period},
+    )
+    if df.empty:
+        return 0
+    return int(df.iloc[0]["cantidad"])
+
+
+@cache.memoize(timeout=300)
 def get_evolution(territory_id: str, start_period: int, end_period: int) -> pd.DataFrame:
     return _read(
         """

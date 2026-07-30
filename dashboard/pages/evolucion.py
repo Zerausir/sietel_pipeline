@@ -18,7 +18,8 @@ from components.ui import (
     page_header,
     style_figure,
 )
-from services.queries import get_evolution, get_participation, get_periods, get_velocities, resolve_period_id
+from services.queries import get_evolution, get_participation, get_periods, get_provider_count_in_range, get_velocities, \
+    resolve_period_id
 
 register_page(__name__, path="/", name="Evolución", order=0)
 PREFIX = "evo"
@@ -105,6 +106,7 @@ def layout():
                 ],
             ),
             html.Div(id="evo-message", className="data-message"),
+            html.H3(id="evo-titulo-estado-actual", children="Estado actual"),
             html.Section(
                 className="kpi-grid five",
                 children=[
@@ -113,6 +115,14 @@ def layout():
                     kpi_card("Cambio mensual de líneas", "evo-kpi-change", "evo-kpi-change-note"),
                     kpi_card("Información imputada", "evo-kpi-imputed", "evo-kpi-imputed-note"),
                     kpi_card("Dejaron de reportar este mes", "evo-kpi-churn", "evo-kpi-churn-note"),
+                ],
+            ),
+            html.H3(id="evo-titulo-resumen-rango", children="Resumen del rango seleccionado"),
+            html.Section(
+                className="kpi-grid one",
+                children=[
+                    kpi_card("Prestadores con actividad en el rango", "evo-kpi-rango-prestadores",
+                             "evo-kpi-rango-prestadores-note"),
                 ],
             ),
             html.Section(
@@ -151,6 +161,10 @@ register_territory_callbacks(PREFIX)
     Output("evo-speed-composition-chart", "figure"),
     Output("evo-speed-difference-chart", "figure"),
     Output("evo-message", "children"),
+    Output("evo-titulo-estado-actual", "children"),
+    Output("evo-titulo-resumen-rango", "children"),
+    Output("evo-kpi-rango-prestadores", "children"),
+    Output("evo-kpi-rango-prestadores-note", "children"),
     Input("evo-territory-id", "data"),
     Input("evo-start-period", "date"),
     Input("evo-end-period", "date"),
@@ -162,7 +176,8 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
 
     if not territory_id or start_period is None or end_period is None:
         figures = [empty_figure("Seleccione todos los filtros") for _ in range(4)]
-        return ("—", "", "—", "", "—", "", "—", "", "—", "", *figures, "")
+        return ("—", "", "—", "", "—", "", "—", "", "—", "", *figures, "", "Estado actual",
+                "Resumen del rango seleccionado", "—", "")
 
     start_period, end_period = sorted((int(start_period), int(end_period)))
 
@@ -171,12 +186,14 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
         velocities = get_velocities(territory_id, start_period, end_period, speed_type)
     except Exception as exc:
         figures = [empty_figure("Error al consultar PostgreSQL") for _ in range(4)]
-        return ("—", "", "—", "", "—", "", "—", "", "—", "", *figures, str(exc))
+        return ("—", "", "—", "", "—", "", "—", "", "—", "", *figures, str(exc), "Estado actual",
+                "Resumen del rango seleccionado", "—", "")
 
     if evolution.empty:
         figures = [empty_figure() for _ in range(4)]
         return ("—", "", "—", "", "—", "", "—", "", "—", "", *figures,
-                "No existen datos para este territorio y período.")
+                "No existen datos para este territorio y período.",
+                "Estado actual", "Resumen del rango seleccionado", "—", "")
 
     evolution = evolution.copy()
     evolution["periodo"] = pd.to_datetime(evolution["periodo"])
@@ -323,6 +340,23 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
 
     message = f"Territorio: {latest.get('nombre_geografico', territory_id)} · Último período visible: {latest_label}"
 
+    titulo_estado_actual = f"Estado actual — {latest_label}"
+
+    primero = evolution.sort_values("periodo_id").iloc[0]
+    rango_desde_label = str(primero.get("anio_mes", ""))
+    rango_hasta_label = latest_label
+    titulo_resumen_rango = f"Resumen del rango seleccionado — {rango_desde_label} a {rango_hasta_label}"
+
+    try:
+        cantidad_rango = get_provider_count_in_range(territory_id, start_period, end_period)
+        rango_prestadores_value = format_number(cantidad_rango)
+        rango_prestadores_note = (
+            f"Con al menos un reporte real entre {rango_desde_label} y {rango_hasta_label} "
+            "-- incluye prestadores que ya no reportan en el último mes."
+        )
+    except Exception:
+        rango_prestadores_value, rango_prestadores_note = "—", "No se pudo calcular"
+
     return (
         lines_value, lines_note,
         providers_value, providers_note,
@@ -331,4 +365,6 @@ def update_evolution(territory_id: str, start_date: str, end_date: str, speed_ty
         churn_value, churn_note,
         lines_fig, providers_fig, speed_comp_fig, speed_diff_fig,
         message,
+        titulo_estado_actual, titulo_resumen_rango,
+        rango_prestadores_value, rango_prestadores_note,
     )
