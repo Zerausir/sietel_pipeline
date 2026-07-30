@@ -102,9 +102,9 @@ def layout():
                                     dcc.Dropdown(
                                         id="evo-opera-estado",
                                         options=estados_operacion,
-                                        value=None,
+                                        value=[],
+                                        multi=True,
                                         placeholder="Todos",
-                                        clearable=True,
                                     ),
                                 ],
                             ),
@@ -115,9 +115,9 @@ def layout():
                                     dcc.Dropdown(
                                         id="evo-isp-nombre",
                                         options=[],
-                                        value=None,
+                                        value=[],
+                                        multi=True,
                                         placeholder="Todos",
-                                        clearable=True,
                                     ),
                                 ],
                             ),
@@ -145,12 +145,11 @@ def layout():
             html.Div(id="evo-message", className="data-message"),
             html.H3(id="evo-titulo-estado-actual", children="Estado actual"),
             html.Section(
-                className="kpi-grid five",
+                className="kpi-grid four",
                 children=[
                     kpi_card("Líneas reportadas (último período)", "evo-kpi-lines", "evo-kpi-lines-note"),
-                    kpi_card("Prestadores presentes", "evo-kpi-providers", "evo-kpi-providers-note"),
+                    kpi_card("Prestadores que reportaron", "evo-kpi-providers", "evo-kpi-providers-note"),
                     kpi_card("Cambio mensual (reportadas)", "evo-kpi-change", "evo-kpi-change-note"),
-                    kpi_card("% de prestadores que reportaron", "evo-kpi-completitud", "evo-kpi-completitud-note"),
                     kpi_card("Dejaron de reportar este mes", "evo-kpi-churn", "evo-kpi-churn-note"),
                 ],
             ),
@@ -167,8 +166,8 @@ def layout():
                 children=[
                     chart_card("Líneas reportadas por mes", "evo-lines-chart",
                                "Solo datos reales (reportados) -- no incluye relleno interior (imputado)."),
-                    chart_card("Evolución de prestadores", "evo-providers-chart",
-                               "Prestadores presentes y prestadores con líneas positivas."),
+                    chart_card("Prestadores que reportaron", "evo-providers-chart",
+                               "Cantidad de prestadores con al menos un reporte real cada mes."),
                     chart_card("Composición por velocidad", "evo-speed-composition-chart",
                                "Distribución mensual por rango de velocidad."),
                     chart_card("Diferencia mensual por velocidad", "evo-speed-difference-chart",
@@ -199,8 +198,6 @@ def update_provider_filter_options(territory_id: str):
     Output("evo-kpi-providers-note", "children"),
     Output("evo-kpi-change", "children"),
     Output("evo-kpi-change-note", "children"),
-    Output("evo-kpi-completitud", "children"),
-    Output("evo-kpi-completitud-note", "children"),
     Output("evo-kpi-churn", "children"),
     Output("evo-kpi-churn-note", "children"),
     Output("evo-lines-chart", "figure"),
@@ -224,41 +221,40 @@ def update_evolution(
         start_date: str,
         end_date: str,
         speed_type: str,
-        opera_estado: str | None,
-        isp_nombre: str | None,
+        opera_estados: list[str] | None,
+        isp_nombres: list[str] | None,
 ):
     start_period = resolve_period_id(start_date)
     end_period = resolve_period_id(end_date)
+    opera_estados = opera_estados or []
+    isp_nombres = isp_nombres or []
 
     if not territory_id or start_period is None or end_period is None:
         figures = [empty_figure("Seleccione todos los filtros") for _ in range(4)]
-        return ("—", "", "—", "", "—", "", "—", "", "—", "", *figures, "", "Estado actual",
+        return ("—", "", "—", "", "—", "", "—", "", *figures, "", "Estado actual",
                 "Resumen del rango seleccionado", "—", "")
 
     start_period, end_period = sorted((int(start_period), int(end_period)))
 
     try:
-        evolution = get_evolution_filtrado(territory_id, start_period, end_period, opera_estado, isp_nombre)
-        velocities = get_velocities(territory_id, start_period, end_period, speed_type)
+        evolution = get_evolution_filtrado(territory_id, start_period, end_period, opera_estados, isp_nombres)
+        velocities = get_velocities(territory_id, start_period, end_period, speed_type, opera_estados, isp_nombres)
     except Exception as exc:
         figures = [empty_figure("Error al consultar PostgreSQL") for _ in range(4)]
-        return ("—", "", "—", "", "—", "", "—", "", "—", "", *figures, str(exc), "Estado actual",
+        return ("—", "", "—", "", "—", "", "—", "", *figures, str(exc), "Estado actual",
                 "Resumen del rango seleccionado", "—", "")
 
     if evolution.empty:
         figures = [empty_figure() for _ in range(4)]
-        return ("—", "", "—", "", "—", "", "—", "", "—", "", *figures,
+        return ("—", "", "—", "", "—", "", "—", "", *figures,
                 "No existen datos para este territorio, período y filtros seleccionados.",
                 "Estado actual", "Resumen del rango seleccionado", "—", "")
 
     evolution = evolution.copy()
     evolution["periodo"] = pd.to_datetime(evolution["periodo"])
     numeric_columns = [
-        "total_lineas", "lineas_reportadas", "lineas_imputadas",
-        "numero_prestadores", "numero_prestadores_con_lineas", "numero_prestadores_sin_dato",
-        "numero_prestadores_reportaron",
+        "total_lineas", "lineas_reportadas", "numero_prestadores",
         "diferencia_mensual_lineas", "variacion_mensual_porcentaje",
-        "porcentaje_imputado", "porcentaje_reportaron",
     ]
     for column in numeric_columns:
         if column in evolution:
@@ -269,20 +265,19 @@ def update_evolution(
 
     lines_value = format_number(latest.get("lineas_reportadas"))
     lines_note = f"Período {latest_label}"
+
+    # "Prestadores que reportaron" -- CORRECCIÓN (30-jul-2026, tras
+    # discusión con el usuario): antes existían dos números que parecían
+    # contradecirse ("246 con líneas" vs "238 reportaron"), porque "con
+    # líneas" incluía prestadores 100% imputados (con total_lineas > 0
+    # heredado por LOCF, pero sin ningún reporte real ese mes). Ahora solo
+    # existe UN conteo de prestadores: los que reportaron de verdad. Nada
+    # de imputados, ni como categoría de desglose.
     providers_value = format_number(latest.get("numero_prestadores"))
-    providers_note = (
-        f"{format_number(latest.get('numero_prestadores_con_lineas'))} con líneas · "
-        f"{format_number(latest.get('numero_prestadores_sin_dato'))} sin dato"
-    )
+    providers_note = f"Con reporte real en {latest_label}"
+
     change_value = format_signed(latest.get("diferencia_mensual_lineas"))
     change_note = f"{format_signed(latest.get('variacion_mensual_porcentaje'), 2, '%')} respecto al mes anterior (sobre reportadas)"
-
-    completitud_pct = latest.get("porcentaje_reportaron")
-    completitud_value = f"{format_number(completitud_pct, 1)}%" if pd.notna(completitud_pct) else "—"
-    completitud_note = (
-        f"{format_number(latest.get('numero_prestadores_reportaron'))} de "
-        f"{format_number(latest.get('numero_prestadores'))} prestadores reportaron este mes"
-    )
 
     # "Dejaron de reportar este mes": prestadores con líneas positivas en el
     # período anterior que ya NO aparecen en el último. periodo_id se
@@ -312,14 +307,11 @@ def update_evolution(
     except Exception:
         churn_value, churn_note = "—", "No se pudo calcular"
 
-    # Gráfico de barras -- SOLO reportadas (dato real). Se dejó de mostrar
-    # el total mezclado con imputados y la serie de "imputadas" por sí
-    # misma: cuando un prestador grande deja de reportar, el LOCF disfraza
-    # el total de continuo, y mostrar "imputadas" por separado sugiere una
-    # falsa precisión sobre algo que en realidad no se sabe. La caída en
-    # la barra de "reportadas" es la señal honesta -- se explica con el
-    # KPI "% de prestadores que reportaron" al lado (ver discusión con el
-    # usuario, 30-jul-2026).
+    # Gráfico de barras -- SOLO reportadas (dato real). No se muestra el
+    # total mezclado con imputados ni una serie de "imputadas" por
+    # separado: cuando un prestador grande deja de reportar, mostrar un
+    # numero "imputado" sugiere una falsa precisión sobre algo que en
+    # realidad no se sabe. La caída en la barra es la señal honesta.
     lines_fig = px.bar(
         evolution, x="periodo", y="lineas_reportadas",
         labels={"lineas_reportadas": "Líneas reportadas", "periodo": "Período"},
@@ -332,13 +324,7 @@ def update_evolution(
     providers_fig.add_trace(
         go.Scatter(
             x=evolution["periodo"], y=evolution["numero_prestadores"], mode="lines+markers",
-            name="Prestadores presentes", line={"color": PALETTE["blue"], "width": 3},
-        )
-    )
-    providers_fig.add_trace(
-        go.Scatter(
-            x=evolution["periodo"], y=evolution["numero_prestadores_con_lineas"], mode="lines+markers",
-            name="Con líneas positivas", line={"color": PALETTE["cyan"], "width": 2},
+            name="Prestadores que reportaron", line={"color": PALETTE["blue"], "width": 3},
         )
     )
     style_figure(providers_fig)
@@ -380,11 +366,11 @@ def update_evolution(
         speed_diff_fig.update_yaxes(title="Diferencia mensual", tickformat=",")
 
     filtros_txt = []
-    if opera_estado:
-        filtros_txt.append(f"Estado: {opera_estado}")
-    if isp_nombre:
-        filtros_txt.append(f"Prestador: {isp_nombre}")
-    filtros_sufijo = f" · Filtros: {', '.join(filtros_txt)}" if filtros_txt else ""
+    if opera_estados:
+        filtros_txt.append(f"Estado: {', '.join(opera_estados)}")
+    if isp_nombres:
+        filtros_txt.append(f"Prestador: {', '.join(isp_nombres)}")
+    filtros_sufijo = f" · Filtros: {'; '.join(filtros_txt)}" if filtros_txt else ""
     message = f"Territorio: {territory_id} · Último período visible: {latest_label}{filtros_sufijo}"
 
     titulo_estado_actual = f"Estado actual — {latest_label}"
@@ -399,7 +385,9 @@ def update_evolution(
         rango_prestadores_value = format_number(cantidad_rango)
         rango_prestadores_note = (
             f"Con al menos un reporte real entre {rango_desde_label} y {rango_hasta_label}. "
-            "No equivale a título habilitante vigente -- solo indica actividad reportada."
+            "En rangos amplios (varios años), este número tiende a coincidir con el total de "
+            "prestadores presentes -- casi todos tienen al menos un reporte real en algún punto. "
+            "No equivale a título habilitante vigente."
         )
     except Exception:
         rango_prestadores_value, rango_prestadores_note = "—", "No se pudo calcular"
@@ -408,7 +396,6 @@ def update_evolution(
         lines_value, lines_note,
         providers_value, providers_note,
         change_value, change_note,
-        completitud_value, completitud_note,
         churn_value, churn_note,
         lines_fig, providers_fig, speed_comp_fig, speed_diff_fig,
         message,

@@ -191,8 +191,8 @@ def get_evolution_filtrado(
         territory_id: str,
         start_period: int,
         end_period: int,
-        opera_estado: str | None = None,
-        isp_nombre: str | None = None,
+        opera_estados: list[str] | None = None,
+        isp_nombres: list[str] | None = None,
 ) -> pd.DataFrame:
     """
     Igual que get_evolution, pero agregando en tiempo de consulta desde
@@ -201,11 +201,21 @@ def get_evolution_filtrado(
     vw_dashboard_evolucion ya viene pre-agregada a nivel de territorio y
     no permite bajar a este nivel de detalle.
 
+    opera_estados / isp_nombres aceptan LISTAS (selección múltiple) -- si
+    se pasa una lista vacía o None, no se filtra por ese criterio.
+
+    CORRECCIÓN (30-jul-2026, tras discusión con el usuario): se eliminó
+    por completo el desglose "con líneas / sin dato" -- dependía de forma
+    indirecta de la distinción reportado/imputado (un prestador con líneas
+    > 0 podía ser 100% imputado), lo cual generaba una aparente
+    contradicción frente al conteo de "reportaron". Ahora solo existe UN
+    conteo de prestadores: los que tuvieron un reporte REAL ese mes
+    (tiene_reportado = TRUE) -- nada de imputados, ni como categoría de
+    desglose.
+
     Las columnas de comparación mes a mes (diferencia_mensual_lineas,
-    variacion_mensual_porcentaje, porcentaje_imputado) NO se calculan aquí
-    en SQL -- se calculan después en pandas (.diff()/.pct_change()), más
-    simple y igual de correcto que replicar el JOIN por fecha que usa
-    fact_resumen_mercado_mes.
+    variacion_mensual_porcentaje) se calculan en pandas (.diff()), no en
+    SQL -- más simple que replicar el JOIN por fecha de fact_resumen_mercado_mes.
     """
     clauses = [
         "b.territorio_id = :territory_id",
@@ -216,12 +226,15 @@ def get_evolution_filtrado(
         "start_period": start_period,
         "end_period": end_period,
     }
-    if opera_estado:
-        clauses.append("p.opera_actual ILIKE '%' || :opera_estado || '%'")
-        params["opera_estado"] = opera_estado
-    if isp_nombre:
-        clauses.append("p.isp_nombre ILIKE '%' || :isp_nombre || '%'")
-        params["isp_nombre"] = isp_nombre
+    if opera_estados:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM unnest(:opera_estados::text[]) AS estado "
+            "WHERE p.opera_actual ILIKE '%' || estado || '%')"
+        )
+        params["opera_estados"] = list(opera_estados)
+    if isp_nombres:
+        clauses.append("p.isp_nombre = ANY(:isp_nombres)")
+        params["isp_nombres"] = list(isp_nombres)
 
     df = _read(
         f"""
@@ -230,11 +243,7 @@ def get_evolution_filtrado(
             f.periodo,
             SUM(f.total_lineas) AS total_lineas,
             SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas,
-            SUM(COALESCE(f.lineas_imputadas, 0)) AS lineas_imputadas,
-            COUNT(DISTINCT f.prestador_id) AS numero_prestadores,
-            COUNT(DISTINCT f.prestador_id) FILTER (WHERE f.tiene_reportado) AS numero_prestadores_reportaron,
-            COUNT(DISTINCT f.prestador_id) FILTER (WHERE COALESCE(f.total_lineas, 0) > 0) AS numero_prestadores_con_lineas,
-            COUNT(DISTINCT f.prestador_id) FILTER (WHERE COALESCE(f.total_lineas, 0) = 0) AS numero_prestadores_sin_dato
+            COUNT(DISTINCT f.prestador_id) FILTER (WHERE f.tiene_reportado) AS numero_prestadores
         FROM mart.fact_lineas_geografia_mes f
         JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
         JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
@@ -252,41 +261,73 @@ def get_evolution_filtrado(
     df = df.merge(periods, on="periodo_id", how="left")
 
     df = df.sort_values("periodo_id").reset_index(drop=True)
-    # Diferencia y variación calculadas sobre lineas_reportadas (dato real),
-    # NO sobre total_lineas -- si el KPI de "cambio mensual" siguiera
-    # basado en el total mezclado con imputados, seguiría arrastrando la
-    # misma distorsión que motivó este rediseño (ver discusión con el
-    # usuario, 30-jul-2026: un prestador grande sin reportar no debe
-    # disfrazarse de "sin cambio" via LOCF).
     df["diferencia_mensual_lineas"] = df["lineas_reportadas"].diff()
     df["variacion_mensual_porcentaje"] = df["lineas_reportadas"].pct_change() * 100
-    df["porcentaje_imputado"] = (
-            df["lineas_imputadas"] / df["total_lineas"].replace(0, pd.NA) * 100
-    )
-    df["porcentaje_reportaron"] = (
-            df["numero_prestadores_reportaron"] / df["numero_prestadores"].replace(0, pd.NA) * 100
-    )
     return df
 
 
 @cache.memoize(timeout=300)
-def get_velocities(territory_id: str, start_period: int, end_period: int, speed_type: str) -> pd.DataFrame:
-    return _read(
-        """
-        SELECT *
-        FROM mart.vw_dashboard_velocidades
-        WHERE territorio_id = :territory_id
-          AND periodo_id BETWEEN :start_period AND :end_period
-          AND tipo_velocidad = :speed_type
-        ORDER BY periodo_id, orden_rango
+def get_velocities(
+        territory_id: str,
+        start_period: int,
+        end_period: int,
+        speed_type: str,
+        opera_estados: list[str] | None = None,
+        isp_nombres: list[str] | None = None,
+) -> pd.DataFrame:
+    """
+    Igual que get_evolution_filtrado, pero para la composición por
+    velocidad -- agrega en tiempo de consulta desde fact_lineas_velocidad_mes
+    + dim_prestador para poder respetar los mismos filtros de Estado de
+    operación / Prestador (antes solo usaba vw_dashboard_velocidades,
+    pre-agregada, sin posibilidad de filtrar por prestador).
+    """
+    clauses = [
+        "b.territorio_id = :territory_id",
+        "v.periodo_id BETWEEN :start_period AND :end_period",
+        "v.tipo_velocidad = :speed_type",
+    ]
+    params: dict[str, Any] = {
+        "territory_id": territory_id,
+        "start_period": start_period,
+        "end_period": end_period,
+        "speed_type": speed_type,
+    }
+    if opera_estados:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM unnest(:opera_estados::text[]) AS estado "
+            "WHERE p.opera_actual ILIKE '%' || estado || '%')"
+        )
+        params["opera_estados"] = list(opera_estados)
+    if isp_nombres:
+        clauses.append("p.isp_nombre = ANY(:isp_nombres)")
+        params["isp_nombres"] = list(isp_nombres)
+
+    df = _read(
+        f"""
+        SELECT
+            v.periodo_id,
+            v.periodo,
+            v.tipo_velocidad,
+            v.orden_rango,
+            v.rango_velocidad,
+            SUM(v.total_lineas_velocidad) AS total_lineas
+        FROM mart.fact_lineas_velocidad_mes v
+        JOIN mart.bridge_geografia_territorio b ON b.geografia_id = v.geografia_id
+        JOIN mart.dim_prestador p ON p.prestador_id = v.prestador_id
+        WHERE {' AND '.join(clauses)}
+        GROUP BY v.periodo_id, v.periodo, v.tipo_velocidad, v.orden_rango, v.rango_velocidad
+        ORDER BY v.periodo_id, v.orden_rango
         """,
-        {
-            "territory_id": territory_id,
-            "start_period": start_period,
-            "end_period": end_period,
-            "speed_type": speed_type,
-        },
+        params,
     )
+
+    if df.empty:
+        return df
+
+    df = df.sort_values(["rango_velocidad", "periodo_id"])
+    df["diferencia_mensual"] = df.groupby("rango_velocidad")["total_lineas"].diff()
+    return df.sort_values(["periodo_id", "orden_rango"]).reset_index(drop=True)
 
 
 @cache.memoize(timeout=300)
