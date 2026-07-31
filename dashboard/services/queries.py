@@ -144,15 +144,19 @@ def get_reporting_summary(
         isp_nombres: list[str] | None = None,
 ) -> dict[str, float]:
     """
-    Resumen de cumplimiento de entrega de reportes dentro del rango
-    Desde-Hasta:
-      - total_prestadores: TODOS los prestadores con presencia en el rango,
-        CON o SIN reporte real (a diferencia de get_provider_count_in_range,
-        que solo cuenta a los que sí reportaron alguna vez).
-      - celdas_esperadas: cantidad de celdas (prestador, mes) en las que el
-        prestador YA tenía obligación de reportar -- ver regla del año de
-        gracia más abajo.
-      - celdas_reportadas: de esas celdas, cuántas tienen un reporte real.
+    Resumen de cumplimiento de entrega de reportes:
+      - total_prestadores: TODOS los prestadores con presencia HASTA la
+        fecha 'Hasta' (con o sin reporte real) -- CORRECCIÓN (30-jul-2026,
+        tras revisión del usuario): este conteo usa SOLO el límite
+        superior del rango, NO el límite inferior. Antes estaba acotado
+        también por "Desde", así que angostar el inicio del rango (ej. a
+        los últimos 2 meses) hacía que el total de prestadores cayera a un
+        puñado (610 en vez de ~1369) -- una contradicción real, no un dato
+        legítimo: "cuántos existen en el registro hasta hoy" no debería
+        depender de cuán angosto sea el filtro de inicio.
+      - celdas_esperadas / celdas_reportadas: SÍ están acotadas al rango
+        completo Desde-Hasta (correctamente se reducen si el rango es
+        angosto, porque miden cumplimiento DENTRO de esa ventana).
       - tasa_entrega_porcentaje: celdas_reportadas / celdas_esperadas * 100.
 
     REGLA DEL AÑO DE GRACIA (agregada 30-jul-2026, a pedido del usuario):
@@ -184,19 +188,26 @@ def get_reporting_summary(
         "b.territorio_id = :territory_id",
         "f.periodo_id BETWEEN :start_period AND :end_period",
     ]
+    clauses_registro = [
+        "b.territorio_id = :territory_id",
+        "f.periodo_id <= :end_period",
+    ]
     params: dict[str, Any] = {
         "territory_id": territory_id,
         "start_period": start_period,
         "end_period": end_period,
     }
     if opera_estados:
-        clauses.append(
+        filtro_opera = (
             "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
             "WHERE p.opera_actual ILIKE '%' || estado || '%')"
         )
+        clauses.append(filtro_opera)
+        clauses_registro.append(filtro_opera)
         params["opera_estados"] = list(opera_estados)
     if isp_nombres:
         clauses.append("p.isp_nombre = ANY(:isp_nombres)")
+        clauses_registro.append("p.isp_nombre = ANY(:isp_nombres)")
         params["isp_nombres"] = list(isp_nombres)
 
     df = _read(
@@ -227,18 +238,35 @@ def get_reporting_summary(
                 END AS periodo_inicio_obligacion
             FROM celdas c
             JOIN mart.dim_prestador p ON p.prestador_id = c.prestador_id
+        ),
+        -- CORRECCIÓN (30-jul-2026, tras revisión del usuario): el conteo
+        -- "total de prestadores (con o sin reportes)" NO debe acortarse
+        -- solo porque el usuario angostó el filtro "Desde" -- eso mezclaba
+        -- dos preguntas distintas ("¿cuántos existen en el registro hasta
+        -- esta fecha?" vs "¿cuántos tuvieron actividad exactamente en esta
+        -- ventana?"). Este conteo usa SOLO el límite superior (Hasta), sin
+        -- el límite inferior (Desde) -- así, acotar "Desde" a los últimos
+        -- 2 meses ya no hace que el total de prestadores caiga a un
+        -- puñado, como reportó el usuario (610 en vez de ~1369).
+        registro_total AS (
+            SELECT DISTINCT f.prestador_id
+            FROM mart.fact_lineas_geografia_mes f
+            JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
+            JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
+            WHERE {' AND '.join(clauses_registro)}
         )
         SELECT
-            COUNT(DISTINCT prestador_id) AS total_prestadores,
-            COUNT(*) FILTER (
+            (SELECT COUNT(*) FROM registro_total) AS total_prestadores,
+            (
+                SELECT COUNT(*) FROM con_obligacion
                 WHERE periodo_inicio_obligacion IS NULL
                    OR periodo_id >= periodo_inicio_obligacion
             ) AS celdas_esperadas,
-            COUNT(*) FILTER (
+            (
+                SELECT COUNT(*) FROM con_obligacion
                 WHERE reporto
                   AND (periodo_inicio_obligacion IS NULL OR periodo_id >= periodo_inicio_obligacion)
             ) AS celdas_reportadas
-        FROM con_obligacion
         """,
         params,
     )

@@ -402,7 +402,7 @@ def update_evolution(
     try:
         resumen = get_reporting_summary(territory_id, start_period, end_period, opera_estados, isp_nombres)
         rango_total_value = format_number(resumen["total_prestadores"])
-        rango_total_note = f"Con o sin reportes, presencia en el sistema entre {rango_desde_label} y {rango_hasta_label}."
+        rango_total_note = f"Con o sin reportes, registrados en el sistema hasta {rango_hasta_label} (no depende de la fecha Desde)."
 
         tasa = resumen["tasa_entrega_porcentaje"]
         rango_tasa_value = f"{format_number(tasa, 1)}%" if tasa is not None else "—"
