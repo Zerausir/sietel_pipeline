@@ -239,6 +239,10 @@ body {
     max-width: 420px;
 }
 
+.kpi-grid.three {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 h3[id^="evo-titulo-"] {
     margin: 24px 0 10px;
     font-size: 15px;
@@ -364,6 +368,7 @@ h3[id^="evo-titulo-"] {
     .kpi-grid.four,
     .kpi-grid.five,
     .kpi-grid.six,
+    .kpi-grid.three,
     .chart-grid.two {
         grid-template-columns: 1fr;
     }

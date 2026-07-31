@@ -25,6 +25,7 @@ from services.queries import (
     get_periods,
     get_provider_count_in_range,
     get_provider_options,
+    get_reporting_summary,
     get_velocities,
     resolve_period_id,
 )
@@ -155,10 +156,14 @@ def layout():
             ),
             html.H3(id="evo-titulo-resumen-rango", children="Resumen del rango seleccionado"),
             html.Section(
-                className="kpi-grid one",
+                className="kpi-grid three",
                 children=[
                     kpi_card("Prestadores con actividad en el rango", "evo-kpi-rango-prestadores",
                              "evo-kpi-rango-prestadores-note"),
+                    kpi_card("Total de prestadores (con o sin reportes)", "evo-kpi-rango-total",
+                             "evo-kpi-rango-total-note"),
+                    kpi_card("Tasa de entrega de reportes", "evo-kpi-rango-tasa",
+                             "evo-kpi-rango-tasa-note"),
                 ],
             ),
             html.Section(
@@ -209,6 +214,10 @@ def update_provider_filter_options(territory_id: str):
     Output("evo-titulo-resumen-rango", "children"),
     Output("evo-kpi-rango-prestadores", "children"),
     Output("evo-kpi-rango-prestadores-note", "children"),
+    Output("evo-kpi-rango-total", "children"),
+    Output("evo-kpi-rango-total-note", "children"),
+    Output("evo-kpi-rango-tasa", "children"),
+    Output("evo-kpi-rango-tasa-note", "children"),
     Input("evo-territory-id", "data"),
     Input("evo-start-period", "date"),
     Input("evo-end-period", "date"),
@@ -232,7 +241,7 @@ def update_evolution(
     if not territory_id or start_period is None or end_period is None:
         figures = [empty_figure("Seleccione todos los filtros") for _ in range(4)]
         return ("—", "", "—", "", "—", "", "—", "", *figures, "", "Estado actual",
-                "Resumen del rango seleccionado", "—", "")
+                "Resumen del rango seleccionado", "—", "", "—", "", "—", "")
 
     start_period, end_period = sorted((int(start_period), int(end_period)))
 
@@ -242,13 +251,13 @@ def update_evolution(
     except Exception as exc:
         figures = [empty_figure("Error al consultar PostgreSQL") for _ in range(4)]
         return ("—", "", "—", "", "—", "", "—", "", *figures, str(exc), "Estado actual",
-                "Resumen del rango seleccionado", "—", "")
+                "Resumen del rango seleccionado", "—", "", "—", "", "—", "")
 
     if evolution.empty:
         figures = [empty_figure() for _ in range(4)]
         return ("—", "", "—", "", "—", "", "—", "", *figures,
                 "No existen datos para este territorio, período y filtros seleccionados.",
-                "Estado actual", "Resumen del rango seleccionado", "—", "")
+                "Estado actual", "Resumen del rango seleccionado", "—", "", "—", "", "—", "")
 
     evolution = evolution.copy()
     evolution["periodo"] = pd.to_datetime(evolution["periodo"])
@@ -390,6 +399,23 @@ def update_evolution(
     except Exception:
         rango_prestadores_value, rango_prestadores_note = "—", "No se pudo calcular"
 
+    try:
+        resumen = get_reporting_summary(territory_id, start_period, end_period, opera_estados, isp_nombres)
+        rango_total_value = format_number(resumen["total_prestadores"])
+        rango_total_note = f"Con o sin reportes, presencia en el sistema entre {rango_desde_label} y {rango_hasta_label}."
+
+        tasa = resumen["tasa_entrega_porcentaje"]
+        rango_tasa_value = f"{format_number(tasa, 1)}%" if tasa is not None else "—"
+        rango_tasa_note = (
+            f"{format_number(resumen['celdas_reportadas'])} de {format_number(resumen['celdas_esperadas'])} "
+            "meses-prestador con reporte real, contados desde que cumplen un año del título "
+            "habilitante (no desde el otorgamiento). No incluye prestadores que nunca han "
+            "reportado ni una sola vez -- esos no existen en esta base."
+        )
+    except Exception:
+        rango_total_value, rango_total_note = "—", "No se pudo calcular"
+        rango_tasa_value, rango_tasa_note = "—", "No se pudo calcular"
+
     return (
         lines_value, lines_note,
         providers_value, providers_note,
@@ -399,4 +425,6 @@ def update_evolution(
         message,
         titulo_estado_actual, titulo_resumen_rango,
         rango_prestadores_value, rango_prestadores_note,
+        rango_total_value, rango_total_note,
+        rango_tasa_value, rango_tasa_note,
     )

@@ -135,6 +135,127 @@ def get_provider_count_in_range(territory_id: str, start_period: int, end_period
     return int(df.iloc[0]["cantidad"])
 
 
+@cache.memoize(timeout=300)
+def get_reporting_summary(
+        territory_id: str,
+        start_period: int,
+        end_period: int,
+        opera_estados: list[str] | None = None,
+        isp_nombres: list[str] | None = None,
+) -> dict[str, float]:
+    """
+    Resumen de cumplimiento de entrega de reportes dentro del rango
+    Desde-Hasta:
+      - total_prestadores: TODOS los prestadores con presencia en el rango,
+        CON o SIN reporte real (a diferencia de get_provider_count_in_range,
+        que solo cuenta a los que sí reportaron alguna vez).
+      - celdas_esperadas: cantidad de celdas (prestador, mes) en las que el
+        prestador YA tenía obligación de reportar -- ver regla del año de
+        gracia más abajo.
+      - celdas_reportadas: de esas celdas, cuántas tienen un reporte real.
+      - tasa_entrega_porcentaje: celdas_reportadas / celdas_esperadas * 100.
+
+    REGLA DEL AÑO DE GRACIA (agregada 30-jul-2026, a pedido del usuario):
+    la obligación de reportar de un prestador NO empieza el día del título
+    habilitante, sino un año calendario después -- ej. título otorgado el
+    15/08/2021 => el primer reporte OBLIGATORIO es el de agosto de 2022
+    (pueden reportar antes de forma voluntaria, pero no es obligación
+    hasta cumplido el primer año). Se calcula como
+    fechapermiso + INTERVAL '1 year', truncado al mes, convertido al mismo
+    formato AAAAMM que periodo_id en todo el resto del esquema.
+
+    Si fechapermiso es NULL (dato no disponible para ese prestador), se
+    asume sin obligación conocida y se cuentan todos sus meses de
+    presencia como antes -- no se penaliza por falta de este dato
+    específico, pero tampoco se inventa una fecha.
+
+    LIMITACIÓN ESTRUCTURAL IMPORTANTE (reconocida explícitamente, no
+    oculta): esta consulta SOLO puede medir cumplimiento entre prestadores
+    que aparecen en fact_lineas_geografia_mes -- es decir, que reportaron
+    AL MENOS UNA VEZ. Un prestador con título habilitante vigente que
+    JAMÁS ha entregado ni un solo reporte no existe en ninguna capa de
+    este pipeline (capa2 se construye a partir de reportes reales), y por
+    lo tanto es invisible para este cálculo. Capturar ese caso -- el de
+    incumplimiento total -- requeriría cruzar contra el registro completo
+    de permisos (ej. analitico.v_ultimo_periodo_reportado_detalle), una
+    extensión de alcance pendiente, no incluida aquí.
+    """
+    clauses = [
+        "b.territorio_id = :territory_id",
+        "f.periodo_id BETWEEN :start_period AND :end_period",
+    ]
+    params: dict[str, Any] = {
+        "territory_id": territory_id,
+        "start_period": start_period,
+        "end_period": end_period,
+    }
+    if opera_estados:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
+            "WHERE p.opera_actual ILIKE '%' || estado || '%')"
+        )
+        params["opera_estados"] = list(opera_estados)
+    if isp_nombres:
+        clauses.append("p.isp_nombre = ANY(:isp_nombres)")
+        params["isp_nombres"] = list(isp_nombres)
+
+    df = _read(
+        f"""
+        WITH celdas AS (
+            SELECT
+                f.prestador_id,
+                f.periodo_id,
+                BOOL_OR(f.tiene_reportado) AS reporto
+            FROM mart.fact_lineas_geografia_mes f
+            JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
+            JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
+            WHERE {' AND '.join(clauses)}
+            GROUP BY f.prestador_id, f.periodo_id
+        ),
+        con_obligacion AS (
+            SELECT
+                c.prestador_id,
+                c.periodo_id,
+                c.reporto,
+                p.fechapermiso,
+                CASE
+                    WHEN p.fechapermiso IS NULL THEN NULL
+                    ELSE (
+                        EXTRACT(YEAR FROM (p.fechapermiso + INTERVAL '1 year'))::int * 100
+                        + EXTRACT(MONTH FROM (p.fechapermiso + INTERVAL '1 year'))::int
+                    )
+                END AS periodo_inicio_obligacion
+            FROM celdas c
+            JOIN mart.dim_prestador p ON p.prestador_id = c.prestador_id
+        )
+        SELECT
+            COUNT(DISTINCT prestador_id) AS total_prestadores,
+            COUNT(*) FILTER (
+                WHERE periodo_inicio_obligacion IS NULL
+                   OR periodo_id >= periodo_inicio_obligacion
+            ) AS celdas_esperadas,
+            COUNT(*) FILTER (
+                WHERE reporto
+                  AND (periodo_inicio_obligacion IS NULL OR periodo_id >= periodo_inicio_obligacion)
+            ) AS celdas_reportadas
+        FROM con_obligacion
+        """,
+        params,
+    )
+
+    if df.empty or df.iloc[0]["celdas_esperadas"] in (0, None):
+        return {"total_prestadores": 0, "celdas_esperadas": 0, "celdas_reportadas": 0, "tasa_entrega_porcentaje": None}
+
+    fila = df.iloc[0]
+    tasa = (fila["celdas_reportadas"] / fila["celdas_esperadas"] * 100) if fila["celdas_esperadas"] else None
+    return {
+        "total_prestadores": int(fila["total_prestadores"]),
+        "celdas_esperadas": int(fila["celdas_esperadas"]),
+        "celdas_reportadas": int(fila["celdas_reportadas"]),
+        "tasa_entrega_porcentaje": float(tasa) if tasa is not None else None,
+    }
+
+
 @cache.memoize(timeout=900)
 def get_operation_states() -> list[dict[str, str]]:
     """
