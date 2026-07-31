@@ -404,19 +404,40 @@ def update_evolution(
     except Exception:
         rango_prestadores_value, rango_prestadores_note = "—", "No se pudo calcular"
 
+    incluir_nunca = territory_id == "NACIONAL|ECUADOR"
     try:
-        resumen = get_reporting_summary(territory_id, start_period, end_period, opera_estados, isp_nombres)
+        resumen = get_reporting_summary(
+            territory_id, start_period, end_period, opera_estados, isp_nombres,
+            incluir_nunca_reportaron=incluir_nunca,
+        )
         rango_total_value = format_number(resumen["total_prestadores"])
-        rango_total_note = f"Con o sin reportes, registrados en el sistema hasta {rango_hasta_label} (no depende de la fecha Desde)."
+        if incluir_nunca:
+            rango_total_note = (
+                f"Con o sin reportes (incluye a quienes nunca han reportado), "
+                f"registrados hasta {rango_hasta_label}."
+            )
+        else:
+            rango_total_note = (
+                f"Con al menos un reporte real, registrados hasta {rango_hasta_label}. "
+                "No incluye a quienes nunca han reportado -- ese dato solo existe a nivel Nacional."
+            )
 
         tasa = resumen["tasa_entrega_porcentaje"]
         rango_tasa_value = f"{format_number(tasa, 1)}%" if tasa is not None else "—"
-        rango_tasa_note = (
-            f"{format_number(resumen['celdas_reportadas'])} de {format_number(resumen['celdas_esperadas'])} "
-            "meses-prestador con reporte real, contados desde que cumplen un año del título "
-            "habilitante (no desde el otorgamiento). No incluye prestadores que nunca han "
-            "reportado ni una sola vez -- esos no existen en esta base."
-        )
+        if incluir_nunca:
+            rango_tasa_note = (
+                f"{format_number(resumen['celdas_reportadas'])} de {format_number(resumen['celdas_esperadas'])} "
+                "meses-prestador con reporte real, contados desde que cumplen un año del título "
+                "habilitante. INCLUYE a quienes nunca han reportado ni una sola vez -- aportan "
+                "meses esperados sin ningún mes entregado, arrastrando la tasa hacia abajo."
+            )
+        else:
+            rango_tasa_note = (
+                f"{format_number(resumen['celdas_reportadas'])} de {format_number(resumen['celdas_esperadas'])} "
+                "meses-prestador con reporte real, contados desde que cumplen un año del título "
+                "habilitante. No incluye a quienes nunca han reportado -- ese dato solo existe a "
+                "nivel Nacional."
+            )
     except Exception:
         rango_total_value, rango_total_note = "—", "No se pudo calcular"
         rango_tasa_value, rango_tasa_note = "—", "No se pudo calcular"

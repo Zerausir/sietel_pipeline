@@ -142,38 +142,45 @@ def get_reporting_summary(
         end_period: int,
         opera_estados: list[str] | None = None,
         isp_nombres: list[str] | None = None,
+        incluir_nunca_reportaron: bool = False,
 ) -> dict[str, float]:
     """
     Resumen de cumplimiento de entrega de reportes:
       - total_prestadores: TODOS los prestadores con presencia HASTA la
         fecha 'Hasta' (con o sin reporte real). Usa SOLO el límite
-        superior del rango, NO el límite inferior (ver corrección
-        30-jul-2026 más abajo).
-      - celdas_esperadas / celdas_reportadas: para CADA prestador del
-        registro total, para CADA mes del rango Desde-Hasta en el que ya
-        tenía obligación de reportar (ver regla del año de gracia), se
-        cuenta como "celda esperada" -- SIN IMPORTAR si ese prestador
-        tiene o no una fila en fact_lineas_geografia_mes ese mes.
+        superior del rango, NO el límite inferior.
+      - celdas_esperadas / celdas_reportadas: para CADA prestador, para
+        CADA mes del rango Desde-Hasta en el que ya tenía obligación de
+        reportar (ver regla del año de gracia), se cuenta como "celda
+        esperada" -- SIN IMPORTAR si ese prestador tiene o no una fila en
+        fact_lineas_geografia_mes ese mes.
       - tasa_entrega_porcentaje: celdas_reportadas / celdas_esperadas * 100.
 
-    CORRECCIÓN CRÍTICA (30-jul-2026, tras segunda revisión del usuario):
-    la versión anterior calculaba "celdas_esperadas" únicamente a partir
-    de las filas que YA EXISTEN en fact_lineas_geografia_mes dentro del
-    rango -- pero un prestador que dejó de reportar hace tiempo (su
-    relleno LOCF en capa2 ya terminó antes del rango seleccionado) no
-    genera NINGUNA fila para esos meses, así que ni siquiera se contaba
-    como "esperado". Resultado: con un rango angosto y reciente (ej.
-    2025-11 a 2025-12), la tasa daba 100% -- una ilusión, porque solo
-    medía a los ~610 prestadores que TODAVÍA aparecen, ignorando a los
-    ~759 restantes del registro total que dejaron de reportar antes.
+    CORRECCIÓN (30-jul-2026, tercera revisión del usuario): la versión
+    anterior de esta función excluía por completo a los prestadores que
+    JAMÁS han entregado ni un solo reporte real -- ni del total, ni de la
+    tasa. Eso contradecía el propio nombre del KPI "Total de prestadores
+    (con o sin reportes)" (que promete incluir a quien no tiene reportes,
+    pero no lo hacía), y dejaba la tasa de entrega artificialmente alta al
+    ignorar el caso de incumplimiento más grave.
 
-    Ahora "celdas_esperadas" se construye cruzando TODO el registro
-    (registro_total) contra TODOS los meses reales del rango
-    (mart.dim_periodo, no una secuencia aritmética sobre periodo_id, que
-    no es secuencial entre años -- ver AAAAMM), filtrando solo por la
-    regla del año de gracia. Un prestador que dejó de reportar
-    correctamente aparece como "esperado, no reportado" en cada mes
-    posterior, arrastrando la tasa hacia abajo como corresponde.
+    Con incluir_nunca_reportaron=True, se fusiona la población de
+    mart.vw_prestadores_sin_reportar (prestadores con título habilitante
+    pero cero reportes en toda su historia) directamente en el cálculo:
+      - Se suman a total_prestadores.
+      - Aportan celdas_esperadas por cada mes del rango en el que ya
+        tenían obligación (misma regla del año de gracia, usando su
+        propio fechapermiso).
+      - Aportan CERO a celdas_reportadas -- por definición, nunca han
+        reportado, así que ningún mes suyo puede contar como entregado.
+
+    SOLO A NIVEL NACIONAL: mart.vw_prestadores_sin_reportar no tiene
+    columna de geografía (SIETEL no conoce la ubicación de un prestador
+    que nunca reportó). El llamador (evolucion.py) debe pasar
+    incluir_nunca_reportaron=True únicamente cuando territory_id sea
+    'NACIONAL|ECUADOR' -- para cualquier otro nivel, esta población es
+    estructuralmente invisible por falta de geografía, no por un límite
+    de esta función.
 
     REGLA DEL AÑO DE GRACIA: la obligación de reportar de un prestador NO
     empieza el día del título habilitante, sino un año calendario después
@@ -181,20 +188,12 @@ def get_reporting_summary(
     es el de agosto de 2022. Si fechapermiso es NULL, se asume sin
     obligación conocida y se cuentan todos los meses del rango para ese
     prestador (no se penaliza por falta de este dato, tampoco se inventa).
-
-    LIMITACIÓN QUE SIGUE VIGENTE: un prestador que JAMÁS ha entregado ni
-    un solo reporte real en toda su historia no aparece en
-    fact_lineas_geografia_mes en absoluto (capa2 se construye a partir de
-    reportes reales), y por lo tanto tampoco en "registro_total" ni en
-    esta tasa. Ese caso -- incumplimiento total desde el principio --
-    seguiría requiriendo cruzar contra el registro completo de permisos
-    (ej. analitico.v_ultimo_periodo_reportado_detalle), fuera de alcance
-    de esta consulta.
     """
     clauses_registro = [
         "b.territorio_id = :territory_id",
         "f.periodo_id <= :end_period",
     ]
+    clauses_nunca = ["1 = 1"]
     params: dict[str, Any] = {
         "territory_id": territory_id,
         "start_period": start_period,
@@ -205,20 +204,25 @@ def get_reporting_summary(
             "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
             "WHERE p.opera_actual ILIKE '%' || estado || '%')"
         )
+        clauses_nunca.append(
+            "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
+            "WHERE v.opera ILIKE '%' || estado || '%')"
+        )
         params["opera_estados"] = list(opera_estados)
     if isp_nombres:
         clauses_registro.append("p.isp_nombre = ANY(:isp_nombres)")
+        clauses_nunca.append("v.isp_nombre = ANY(:isp_nombres)")
         params["isp_nombres"] = list(isp_nombres)
+
+    sql_nunca_reportaron = "SELECT peva_codigo AS prestador_id, fechapermiso FROM mart.vw_prestadores_sin_reportar v WHERE 1 = 0"
+    if incluir_nunca_reportaron:
+        sql_nunca_reportaron = (
+            f"SELECT v.peva_codigo AS prestador_id, v.fechapermiso "
+            f"FROM mart.vw_prestadores_sin_reportar v WHERE {' AND '.join(clauses_nunca)}"
+        )
 
     df = _read(
         f"""
-        -- CORRECCIÓN (30-jul-2026, tras objeción del usuario): se agrega
-        -- el filtro explícito tiene_reportado = TRUE. Verificado con datos
-        -- reales que esto NO cambia el número (1369 = 1369, porque capa2
-        -- garantiza que toda fila imputada existe solo entre dos reportes
-        -- reales del mismo prestador -- nunca puede haber presencia
-        -- puramente imputada) -- pero el diseño no debe depender, ni
-        -- siquiera por presencia, de una fila que pueda ser imputada.
         WITH registro_total AS (
             SELECT DISTINCT f.prestador_id
             FROM mart.fact_lineas_geografia_mes f
@@ -226,6 +230,9 @@ def get_reporting_summary(
             JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
             WHERE {' AND '.join(clauses_registro)}
               AND f.tiene_reportado = TRUE
+        ),
+        nunca_reportaron AS (
+            {sql_nunca_reportaron}
         ),
         periodos_rango AS (
             SELECT periodo_id
@@ -245,15 +252,34 @@ def get_reporting_summary(
             FROM registro_total r
             JOIN mart.dim_prestador p ON p.prestador_id = r.prestador_id
         ),
-        -- El cruce completo: TODO prestador del registro x TODO mes del
-        -- rango en el que ya tenía obligación -- sin importar si tiene o
-        -- no una fila real en fact_lineas_geografia_mes ese mes.
+        nunca_con_obligacion AS (
+            SELECT
+                n.prestador_id,
+                CASE
+                    WHEN n.fechapermiso IS NULL THEN NULL
+                    ELSE (
+                        EXTRACT(YEAR FROM (n.fechapermiso + INTERVAL '1 year'))::int * 100
+                        + EXTRACT(MONTH FROM (n.fechapermiso + INTERVAL '1 year'))::int
+                    )
+                END AS periodo_inicio_obligacion
+            FROM nunca_reportaron n
+        ),
+        -- El cruce completo: TODO prestador (con o sin reportes previos)
+        -- x TODO mes del rango en el que ya tenía obligación -- sin
+        -- importar si tiene o no una fila real en fact_lineas_geografia_mes.
         celdas_esperadas_calc AS (
             SELECT pco.prestador_id, pr.periodo_id
             FROM prestador_con_obligacion pco
             CROSS JOIN periodos_rango pr
             WHERE pco.periodo_inicio_obligacion IS NULL
                OR pr.periodo_id >= pco.periodo_inicio_obligacion
+        ),
+        celdas_esperadas_nunca AS (
+            SELECT nco.prestador_id, pr.periodo_id
+            FROM nunca_con_obligacion nco
+            CROSS JOIN periodos_rango pr
+            WHERE nco.periodo_inicio_obligacion IS NULL
+               OR pr.periodo_id >= nco.periodo_inicio_obligacion
         ),
         reportes_reales AS (
             SELECT DISTINCT f.prestador_id, f.periodo_id
@@ -264,9 +290,14 @@ def get_reporting_summary(
               AND f.tiene_reportado = TRUE
         )
         SELECT
-            (SELECT COUNT(*) FROM registro_total) AS total_prestadores,
-            (SELECT COUNT(*) FROM celdas_esperadas_calc) AS celdas_esperadas,
+            (SELECT COUNT(*) FROM registro_total) + (SELECT COUNT(*) FROM nunca_reportaron)
+                AS total_prestadores,
+            (SELECT COUNT(*) FROM celdas_esperadas_calc) + (SELECT COUNT(*) FROM celdas_esperadas_nunca)
+                AS celdas_esperadas,
             (
+                -- Los prestadores de "nunca_reportaron" NUNCA aparecen aquí
+                -- por definición -- aportan cero celdas reportadas, tal
+                -- como deben.
                 SELECT COUNT(*)
                 FROM celdas_esperadas_calc cec
                 JOIN reportes_reales rr
