@@ -97,6 +97,17 @@ def serve_layout() -> html.Div:
                     "territory_id": "NACIONAL|ECUADOR",
                 },
             ),
+            # Mismo principio que shared-territory -- vive fuera de
+            # page_container para sobrevivir al cambio de pestaña.
+            # Sincroniza Estado de operación y Prestador entre Evolución y
+            # Concentración (31-jul-2026, a pedido del usuario). NO incluye
+            # "Período de participación" -- ese filtro es exclusivo de
+            # Concentración, no tiene equivalente en Evolución.
+            dcc.Store(
+                id="shared-filters",
+                storage_type="memory",
+                data={"opera_estados": [], "isp_nombres": []},
+            ),
             html.Main(dash.page_container, className="page-container"),
             html.Footer(
                 "Fuente: vistas analíticas del esquema mart en PostgreSQL.",

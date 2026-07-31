@@ -6,6 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, callback, dcc, html, register_page
 
+from components.filters_shared import register_shared_filters_callbacks, shared_filters_layout
 from components.territory_filters import register_territory_callbacks, territory_filter_layout
 from components.ui import (
     PALETTE,
@@ -15,30 +16,36 @@ from components.ui import (
     error_panel,
     format_number,
     kpi_card,
+    month_year_dropdown,
     page_header,
     style_figure,
 )
-from services.queries import get_ihh, get_participation, get_periods, get_provider_history, resolve_period_id
+from services.queries import (
+    get_ihh,
+    get_ihh_filtrado,
+    get_participation,
+    get_participation_filtrado,
+    get_periods,
+    get_provider_history,
+)
 
 register_page(__name__, path="/concentracion", name="IHH y participación", order=1)
 PREFIX = "con"
 
 
-def _period_configuration():
+def _period_options():
     periods = get_periods()
     if periods.empty:
         raise RuntimeError("mart.dim_periodo no contiene registros.")
     options = [{"label": row.anio_mes, "value": int(row.periodo_id)} for row in periods.itertuples()]
-    min_row = periods.loc[periods["periodo_id"].idxmin()]
-    max_row = periods.loc[periods["periodo_id"].idxmax()]
-    min_date = str(pd.Timestamp(min_row["periodo"]).date())
-    max_date = str(pd.Timestamp(max_row["periodo"]).date())
-    return options, min_date, max_date, int(periods.periodo_id.max())
+    min_period = int(periods["periodo_id"].min())
+    max_period = int(periods["periodo_id"].max())
+    return options, min_period, max_period
 
 
 def layout():
     try:
-        period_options, min_date, max_date, max_period = _period_configuration()
+        period_options, min_period, max_period = _period_options()
     except Exception as exc:
         return html.Div([page_header("Concentración de mercado", ""), error_panel(str(exc))])
 
@@ -46,7 +53,8 @@ def layout():
         children=[
             page_header(
                 "Concentración y participación",
-                "Evolución histórica del IHH, concentración acumulada y posición de cada prestador.",
+                "Evolución histórica del IHH, concentración acumulada y posición de cada prestador, "
+                "calculados exclusivamente sobre datos reportados -- sin relleno interior (imputado).",
             ),
             html.Section(
                 className="filter-panel",
@@ -55,36 +63,8 @@ def layout():
                     html.Div(
                         className="period-grid four-periods",
                         children=[
-                            html.Div(
-                                className="filter-field",
-                                children=[
-                                    html.Label("Historia desde"),
-                                    dcc.DatePickerSingle(
-                                        id="con-start-period",
-                                        min_date_allowed=min_date,
-                                        max_date_allowed=max_date,
-                                        initial_visible_month=min_date,
-                                        date=min_date,
-                                        display_format="YYYY-MM",
-                                        clearable=False,
-                                    ),
-                                ],
-                            ),
-                            html.Div(
-                                className="filter-field",
-                                children=[
-                                    html.Label("Historia hasta"),
-                                    dcc.DatePickerSingle(
-                                        id="con-end-period",
-                                        min_date_allowed=min_date,
-                                        max_date_allowed=max_date,
-                                        initial_visible_month=max_date,
-                                        date=max_date,
-                                        display_format="YYYY-MM",
-                                        clearable=False,
-                                    ),
-                                ],
-                            ),
+                            month_year_dropdown("con-start-period", "Historia desde", period_options, min_period),
+                            month_year_dropdown("con-end-period", "Historia hasta", period_options, max_period),
                             html.Div(
                                 className="filter-field",
                                 children=[
@@ -105,6 +85,7 @@ def layout():
                             ),
                         ],
                     ),
+                    shared_filters_layout(PREFIX),
                 ],
             ),
             html.Div(id="con-message", className="data-message"),
@@ -112,7 +93,7 @@ def layout():
                 className="kpi-grid six",
                 children=[
                     kpi_card("IHH", "con-kpi-ihh", "con-kpi-ihh-note"),
-                    kpi_card("Prestadores presentes", "con-kpi-providers", "con-kpi-providers-note"),
+                    kpi_card("Cobertura del índice", "con-kpi-cobertura", "con-kpi-cobertura-note"),
                     kpi_card("Líder", "con-kpi-leader", "con-kpi-leader-note"),
                     kpi_card("Participación líder", "con-kpi-leader-share", "con-kpi-leader-share-note"),
                     kpi_card("CR2", "con-kpi-cr2", "con-kpi-cr2-note"),
@@ -123,9 +104,9 @@ def layout():
                 className="chart-grid two",
                 children=[
                     chart_card("Evolución histórica del IHH", "con-ihh-chart",
-                               "Índice calculado sobre prestadores con líneas positivas."),
+                               "Calculado solo sobre prestadores con reporte real cada mes."),
                     chart_card("Participación por prestador", "con-participation-chart",
-                               "Principales prestadores del período seleccionado."),
+                               "Principales prestadores del período seleccionado, solo datos reales."),
                     chart_card("Aporte individual al IHH", "con-contribution-chart",
                                "Contribución de cada prestador al índice del mercado."),
                     chart_card("Evolución del prestador seleccionado", "con-provider-history-chart",
@@ -139,8 +120,12 @@ def layout():
                         className="chart-header",
                         children=[
                             html.H3("Detalle de participación", className="chart-title"),
-                            html.P("Incluye prestadores con líneas positivas, cero y sin dato.",
-                                   className="chart-subtitle"),
+                            html.P(
+                                "Incluye TODOS los prestadores del territorio, incluso quienes no "
+                                "reportaron ese mes exacto (columna 'Estado') -- para auditoría de "
+                                "cobertura, no solo los que entran en el cálculo del IHH.",
+                                className="chart-subtitle",
+                            ),
                         ],
                     ),
                     dag.AgGrid(
@@ -150,21 +135,18 @@ def layout():
                             {"field": "isp_nombre", "headerName": "Prestador", "minWidth": 260, "flex": 2},
                             {"field": "ruc_limpio", "headerName": "RUC", "minWidth": 150},
                             {"field": "cantidad_peva", "headerName": "PEVA", "width": 95},
-                            {"field": "total_lineas_prestador", "headerName": "Líneas", "type": "numericColumn",
-                             "minWidth": 130},
+                            {"field": "total_lineas_prestador", "headerName": "Líneas (real + imputado)",
+                             "type": "numericColumn", "minWidth": 170},
+                            {"field": "lineas_reportadas", "headerName": "Líneas reportadas",
+                             "type": "numericColumn", "minWidth": 150},
                             {"field": "participacion_porcentaje", "headerName": "Participación %",
                              "type": "numericColumn", "minWidth": 150},
                             {"field": "aporte_ihh", "headerName": "Aporte IHH", "type": "numericColumn",
                              "minWidth": 135},
-                            {"field": "estado_lineas", "headerName": "Estado", "minWidth": 120},
-                            {"field": "porcentaje_imputado_prestador", "headerName": "Imputado %",
-                             "type": "numericColumn", "minWidth": 135},
+                            {"field": "estado_lineas", "headerName": "Estado", "minWidth": 150},
                         ],
                         rowData=[],
                         defaultColDef={"sortable": True, "filter": True, "resizable": True},
-                        # theme + columnSize explícitos -- requerido por AGENTS.md para toda
-                        # instancia de AgGrid (el proyecto original usaba className="ag-theme-quartz"
-                        # sin esto, desviación ya señalada en la revisión profesional del 28-jul-2026).
                         dashGridOptions={"theme": "themeBalham", "pagination": True, "paginationPageSize": 20,
                                          "animateRows": True},
                         columnSize="responsiveSizeToFit",
@@ -177,6 +159,7 @@ def layout():
 
 
 register_territory_callbacks(PREFIX)
+register_shared_filters_callbacks(PREFIX)
 
 
 @callback(
@@ -184,12 +167,20 @@ register_territory_callbacks(PREFIX)
     Output("con-provider", "value"),
     Input("con-territory-id", "data"),
     Input("con-current-period", "value"),
+    Input("con-opera-estado", "value"),
+    Input("con-isp-nombre", "value"),
 )
-def update_provider_options(territory_id: str, period_id: int):
+def update_provider_options(territory_id: str, period_id: int, opera_estados: list[str] | None,
+                            isp_nombres: list[str] | None):
     if not territory_id or period_id is None:
         return [], None
+    opera_estados = opera_estados or []
+    isp_nombres = isp_nombres or []
     try:
-        df = get_participation(territory_id, int(period_id))
+        if opera_estados or isp_nombres:
+            df = get_participation_filtrado(territory_id, int(period_id), opera_estados, isp_nombres)
+        else:
+            df = get_participation(territory_id, int(period_id))
     except Exception:
         return [], None
     if df.empty:
@@ -198,7 +189,7 @@ def update_provider_options(territory_id: str, period_id: int):
     df = df.copy()
     df["provider_label"] = df["isp_nombre"].fillna(df["nombrecomercial"]).fillna(df["prestador_id"])
     options = [{"label": str(row.provider_label), "value": str(row.prestador_id)} for row in df.itertuples()]
-    positive = df[pd.to_numeric(df["total_lineas_prestador"], errors="coerce").fillna(0) > 0]
+    positive = df[pd.to_numeric(df["lineas_reportadas"], errors="coerce").fillna(0) > 0]
     selected = str(positive.iloc[0]["prestador_id"]) if not positive.empty else str(df.iloc[0]["prestador_id"])
     return options, selected
 
@@ -206,8 +197,8 @@ def update_provider_options(territory_id: str, period_id: int):
 @callback(
     Output("con-kpi-ihh", "children"),
     Output("con-kpi-ihh-note", "children"),
-    Output("con-kpi-providers", "children"),
-    Output("con-kpi-providers-note", "children"),
+    Output("con-kpi-cobertura", "children"),
+    Output("con-kpi-cobertura-note", "children"),
     Output("con-kpi-leader", "children"),
     Output("con-kpi-leader-note", "children"),
     Output("con-kpi-leader-share", "children"),
@@ -222,13 +213,22 @@ def update_provider_options(territory_id: str, period_id: int):
     Output("con-participation-grid", "rowData"),
     Output("con-message", "children"),
     Input("con-territory-id", "data"),
-    Input("con-start-period", "date"),
-    Input("con-end-period", "date"),
+    Input("con-start-period", "value"),
+    Input("con-end-period", "value"),
     Input("con-current-period", "value"),
+    Input("con-opera-estado", "value"),
+    Input("con-isp-nombre", "value"),
 )
-def update_concentration(territory_id: str, start_date: str, end_date: str, current_period: int):
-    start_period = resolve_period_id(start_date)
-    end_period = resolve_period_id(end_date)
+def update_concentration(
+        territory_id: str,
+        start_period: int | None,
+        end_period: int | None,
+        current_period: int | None,
+        opera_estados: list[str] | None,
+        isp_nombres: list[str] | None,
+):
+    opera_estados = opera_estados or []
+    isp_nombres = isp_nombres or []
 
     empty_figures = [empty_figure() for _ in range(3)]
     empty_return = ("—", "", "—", "", "—", "", "—", "", "—", "", "—", "", *empty_figures, [], "")
@@ -237,10 +237,15 @@ def update_concentration(territory_id: str, start_date: str, end_date: str, curr
 
     start_period, end_period = sorted((int(start_period), int(end_period)))
     current_period = int(current_period)
+    hay_filtros = bool(opera_estados) or bool(isp_nombres)
 
     try:
-        ihh = get_ihh(territory_id, start_period, end_period)
-        participation = get_participation(territory_id, current_period)
+        if hay_filtros:
+            ihh = get_ihh_filtrado(territory_id, start_period, end_period, opera_estados, isp_nombres)
+            participation = get_participation_filtrado(territory_id, current_period, opera_estados, isp_nombres)
+        else:
+            ihh = get_ihh(territory_id, start_period, end_period)
+            participation = get_participation(territory_id, current_period)
     except Exception as exc:
         values = list(empty_return)
         values[-1] = str(exc)
@@ -254,8 +259,8 @@ def update_concentration(territory_id: str, start_date: str, end_date: str, curr
     ihh = ihh.copy()
     ihh["periodo"] = pd.to_datetime(ihh["periodo"])
     for column in [
-        "ihh", "numero_prestadores", "numero_prestadores_con_lineas", "numero_prestadores_sin_dato",
-        "participacion_lider", "cr2", "cr4", "porcentaje_imputado_mercado",
+        "ihh", "numero_prestadores_reportaron", "numero_prestadores_registrados",
+        "porcentaje_cobertura_prestadores", "participacion_lider", "cr2", "cr4",
     ]:
         if column in ihh:
             ihh[column] = pd.to_numeric(ihh[column], errors="coerce")
@@ -270,20 +275,28 @@ def update_concentration(territory_id: str, start_date: str, end_date: str, curr
     leader_name = leader_name if pd.notna(leader_name) and leader_name else "—"
 
     ihh_value = format_number(selected_row.get("ihh"), 1)
-    ihh_note = f"Período {selected_label}"
-    providers_value = format_number(selected_row.get("numero_prestadores"))
-    providers_note = (
-        f"{format_number(selected_row.get('numero_prestadores_con_lineas'))} con líneas · "
-        f"{format_number(selected_row.get('numero_prestadores_sin_dato'))} sin dato"
+    ihh_note = (
+        f"Período {selected_label} · Calculado exclusivamente sobre líneas reportadas (dato real) -- "
+        "ningún prestador sin reporte ese mes entra al cálculo, ni en cero ni con su último valor conocido."
     )
+
+    cobertura = selected_row.get("porcentaje_cobertura_prestadores")
+    cobertura_value = f"{format_number(cobertura, 1)}%" if pd.notna(cobertura) else "—"
+    cobertura_note = (
+        f"{format_number(selected_row.get('numero_prestadores_reportaron'))} de "
+        f"{format_number(selected_row.get('numero_prestadores_registrados'))} prestadores registrados "
+        f"reportaron este mes -- el IHH de al lado se calculó solo sobre ellos. Una cobertura baja "
+        "significa que el índice representa una porción menor del mercado real ese mes."
+    )
+
     leader_value = str(leader_name)
-    leader_note = "Prestador con mayor participación"
+    leader_note = "Prestador con mayor participación, entre quienes reportaron"
     leader_share_value = f"{format_number(selected_row.get('participacion_lider'), 2)}%"
-    leader_share_note = "Participación del principal prestador"
+    leader_share_note = "Participación del principal prestador (sobre el mercado reportado)"
     cr2_value = f"{format_number(selected_row.get('cr2'), 2)}%"
-    cr2_note = "Participación conjunta de los dos primeros"
+    cr2_note = "Participación conjunta de los dos primeros (sobre el mercado reportado)"
     cr4_value = f"{format_number(selected_row.get('cr4'), 2)}%"
-    cr4_note = "Participación conjunta de los cuatro primeros"
+    cr4_note = "Participación conjunta de los cuatro primeros (sobre el mercado reportado)"
 
     ihh_fig = go.Figure()
     ihh_fig.add_trace(
@@ -306,12 +319,12 @@ def update_concentration(territory_id: str, start_date: str, end_date: str, curr
             participation["isp_nombre"].fillna(participation["nombrecomercial"]).fillna(participation["prestador_id"])
         )
         for column in [
-            "total_lineas_prestador", "participacion_porcentaje", "aporte_ihh",
-            "porcentaje_imputado_prestador", "ranking_prestador",
+            "total_lineas_prestador", "lineas_reportadas", "participacion_porcentaje", "aporte_ihh",
+            "ranking_prestador",
         ]:
             participation[column] = pd.to_numeric(participation[column], errors="coerce")
 
-        positive = participation[participation["total_lineas_prestador"].fillna(0) > 0].copy()
+        positive = participation[participation["ranking_prestador"].notna()].copy()
         positive = positive.sort_values("participacion_porcentaje", ascending=False)
         top = positive.head(15).sort_values("participacion_porcentaje")
 
@@ -323,7 +336,7 @@ def update_concentration(territory_id: str, start_date: str, end_date: str, curr
             )
         )
         style_figure(participation_fig, height=420, hovermode="closest")
-        participation_fig.update_xaxes(title="Participación (%)")
+        participation_fig.update_xaxes(title="Participación (%, solo reportadas)")
         participation_fig.update_yaxes(title="")
 
         contribution_top = positive.head(15).sort_values("aporte_ihh")
@@ -340,20 +353,26 @@ def update_concentration(territory_id: str, start_date: str, end_date: str, curr
 
         grid_columns = [
             "ranking_prestador", "isp_nombre", "ruc_limpio", "cantidad_peva",
-            "total_lineas_prestador", "participacion_porcentaje", "aporte_ihh",
-            "estado_lineas", "porcentaje_imputado_prestador",
+            "total_lineas_prestador", "lineas_reportadas", "participacion_porcentaje", "aporte_ihh",
+            "estado_lineas",
         ]
         grid_rows = clean_records(participation[grid_columns])
 
+    filtros_txt = []
+    if opera_estados:
+        filtros_txt.append(f"Estado: {', '.join(opera_estados)}")
+    if isp_nombres:
+        filtros_txt.append(f"Prestador: {', '.join(isp_nombres)}")
+    filtros_sufijo = f" · Filtros: {'; '.join(filtros_txt)}" if filtros_txt else ""
     message = (
-        f"Territorio: {selected_row.get('nombre_geografico', territory_id)} · "
+        f"Territorio: {territory_id} · "
         f"Período de participación: {selected_label} · "
-        f"Imputado: {format_number(selected_row.get('porcentaje_imputado_mercado'), 2)}%"
+        f"Cobertura: {cobertura_value}{filtros_sufijo}"
     )
 
     return (
         ihh_value, ihh_note,
-        providers_value, providers_note,
+        cobertura_value, cobertura_note,
         leader_value, leader_note,
         leader_share_value, leader_share_note,
         cr2_value, cr2_note,
@@ -367,13 +386,11 @@ def update_concentration(territory_id: str, start_date: str, end_date: str, curr
     Output("con-provider-history-chart", "figure"),
     Input("con-territory-id", "data"),
     Input("con-provider", "value"),
-    Input("con-start-period", "date"),
-    Input("con-end-period", "date"),
+    Input("con-start-period", "value"),
+    Input("con-end-period", "value"),
 )
-def update_provider_history(territory_id: str, provider_id: str | None, start_date: str, end_date: str):
-    start_period = resolve_period_id(start_date)
-    end_period = resolve_period_id(end_date)
-
+def update_provider_history(territory_id: str, provider_id: str | None, start_period: int | None,
+                            end_period: int | None):
     if not territory_id or not provider_id or start_period is None or end_period is None:
         return empty_figure("Seleccione un prestador")
 
@@ -394,7 +411,7 @@ def update_provider_history(territory_id: str, provider_id: str | None, start_da
     fig.add_trace(
         go.Scatter(
             x=history["periodo"], y=history["participacion_porcentaje"], mode="lines+markers",
-            name="Participación (%)", line={"color": PALETTE["blue"], "width": 3}, yaxis="y",
+            name="Participación (%, solo reportadas)", line={"color": PALETTE["blue"], "width": 3}, yaxis="y",
         )
     )
     fig.add_trace(

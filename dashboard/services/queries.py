@@ -562,7 +562,7 @@ def get_provider_history(
                participacion_porcentaje,
                ranking_prestador,
                estado_lineas,
-               porcentaje_imputado_prestador
+               tiene_reportado
         FROM mart.vw_dashboard_participacion
         WHERE territorio_id = :territory_id
           AND prestador_id = :provider_id
@@ -622,3 +622,212 @@ def get_prestadores_sin_reportar(
     if df.empty:
         return 0
     return int(df.iloc[0]["cantidad"])
+
+
+def _filtros_participacion(opera_estados: list[str] | None, isp_nombres: list[str] | None):
+    """Cláusulas y parámetros compartidos por get_participation_filtrado y get_ihh_filtrado."""
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+    if opera_estados:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
+            "WHERE p.opera_actual ILIKE '%' || estado || '%')"
+        )
+        params["opera_estados"] = list(opera_estados)
+    if isp_nombres:
+        clauses.append("p.isp_nombre = ANY(:isp_nombres)")
+        params["isp_nombres"] = list(isp_nombres)
+    return clauses, params
+
+
+@cache.memoize(timeout=300)
+def get_participation_filtrado(
+        territory_id: str,
+        period_id: int,
+        opera_estados: list[str] | None = None,
+        isp_nombres: list[str] | None = None,
+) -> pd.DataFrame:
+    """
+    Igual que get_participation, pero recalculando ranking/participación/
+    aporte_ihh EN VIVO sobre el subconjunto filtrado por Estado de
+    operación / Prestador -- mart.vw_dashboard_participacion ya viene
+    pre-calculada sobre TODO el universo de prestadores del territorio, sin
+    posibilidad de excluir antes de calcular el mercado.
+
+    Replica exactamente la misma metodología ya aplicada en
+    fact_participacion_mercado (31-jul-2026): solo lineas_reportadas de
+    quien reportó ese mes exacto, denominador (mercado) recalculado de
+    forma consistente sobre el mismo subconjunto filtrado -- nunca sobre
+    el total sin filtrar mientras el numerador sí está filtrado.
+    """
+    clauses_extra, params = _filtros_participacion(opera_estados, isp_nombres)
+    clauses = ["b.territorio_id = :territory_id", "f.periodo_id = :period_id", *clauses_extra]
+    params.update({"territory_id": territory_id, "period_id": period_id})
+
+    return _read(
+        f"""
+        WITH base AS (
+            SELECT
+                f.prestador_id,
+                SUM(f.total_lineas) AS total_lineas_prestador,
+                SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas,
+                SUM(COALESCE(f.lineas_imputadas, 0)) AS lineas_imputadas,
+                BOOL_OR(f.tiene_reportado) AS tiene_reportado
+            FROM mart.fact_lineas_geografia_mes f
+            JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
+            JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
+            WHERE {' AND '.join(clauses)}
+            GROUP BY f.prestador_id
+        ),
+        mercado AS (
+            SELECT
+                SUM(lineas_reportadas) FILTER (WHERE tiene_reportado) AS total_mercado,
+                COUNT(*) FILTER (WHERE tiene_reportado) AS n_reportaron,
+                COUNT(*) AS n_total
+            FROM base
+        ),
+        ranking AS (
+            SELECT
+                b.*,
+                m.total_mercado, m.n_reportaron, m.n_total,
+                CASE
+                    WHEN b.tiene_reportado AND b.lineas_reportadas > 0 AND m.total_mercado > 0
+                    THEN ROW_NUMBER() OVER (ORDER BY b.lineas_reportadas DESC NULLS LAST, b.prestador_id)
+                END AS ranking_prestador
+            FROM base b
+            CROSS JOIN mercado m
+        )
+        SELECT
+            r.prestador_id,
+            p.ruc_limpio, p.isp_ruc, p.peva_codigo_principal, p.cantidad_peva, p.codigos_peva,
+            p.isp_nombre, p.nombrecomercial, p.opera_actual, p.es_cancelado_actual,
+            r.total_lineas_prestador,
+            r.total_mercado AS total_lineas_mercado,
+            CASE WHEN r.tiene_reportado AND r.lineas_reportadas > 0 AND r.total_mercado > 0
+                THEN ROUND(r.lineas_reportadas / r.total_mercado, 10) END AS participacion_decimal,
+            CASE WHEN r.tiene_reportado AND r.lineas_reportadas > 0 AND r.total_mercado > 0
+                THEN ROUND(100.0 * r.lineas_reportadas / r.total_mercado, 8) END AS participacion_porcentaje,
+            CASE WHEN r.tiene_reportado AND r.lineas_reportadas > 0 AND r.total_mercado > 0
+                THEN ROUND(POWER(100.0 * r.lineas_reportadas / r.total_mercado, 2), 8) END AS aporte_ihh,
+            r.ranking_prestador,
+            r.ranking_prestador = 1 AS es_lider,
+            CASE
+                WHEN NOT r.tiene_reportado THEN 'SIN_REPORTE_ESTE_MES'
+                WHEN r.lineas_reportadas > 0 THEN 'POSITIVO'
+                WHEN r.lineas_reportadas = 0 THEN 'CERO'
+                ELSE 'SIN_DATO'
+            END AS estado_lineas,
+            r.lineas_reportadas, r.lineas_imputadas, r.tiene_reportado,
+            r.n_reportaron AS numero_prestadores_reportaron_periodo,
+            r.n_total AS numero_prestadores_totales_periodo,
+            ROUND(100.0 * r.n_reportaron / NULLIF(r.n_total, 0), 4) AS porcentaje_cobertura_prestadores
+        FROM ranking r
+        JOIN mart.dim_prestador p ON p.prestador_id = r.prestador_id
+        ORDER BY r.ranking_prestador NULLS LAST, p.isp_nombre NULLS LAST
+        """,
+        params,
+    )
+
+
+@cache.memoize(timeout=300)
+def get_ihh_filtrado(
+        territory_id: str,
+        start_period: int,
+        end_period: int,
+        opera_estados: list[str] | None = None,
+        isp_nombres: list[str] | None = None,
+) -> pd.DataFrame:
+    """
+    Igual que get_ihh, pero recalculando el IHH/CR2/CR4 mes a mes EN VIVO
+    sobre el subconjunto filtrado -- mismo principio que
+    get_participation_filtrado, aplicado a toda la serie de tiempo.
+    """
+    clauses_extra, params = _filtros_participacion(opera_estados, isp_nombres)
+    clauses = [
+        "b.territorio_id = :territory_id",
+        "f.periodo_id BETWEEN :start_period AND :end_period",
+        *clauses_extra,
+    ]
+    params.update({"territory_id": territory_id, "start_period": start_period, "end_period": end_period})
+
+    df = _read(
+        f"""
+        WITH base AS (
+            SELECT
+                f.periodo_id,
+                f.prestador_id,
+                SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas,
+                SUM(COALESCE(f.lineas_imputadas, 0)) AS lineas_imputadas,
+                BOOL_OR(f.tiene_reportado) AS tiene_reportado
+            FROM mart.fact_lineas_geografia_mes f
+            JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
+            JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
+            WHERE {' AND '.join(clauses)}
+            GROUP BY f.periodo_id, f.prestador_id
+        ),
+        mercado AS (
+            SELECT
+                periodo_id,
+                SUM(lineas_reportadas) FILTER (WHERE tiene_reportado) AS total_mercado,
+                COUNT(*) FILTER (WHERE tiene_reportado) AS n_reportaron,
+                COUNT(*) AS n_total
+            FROM base
+            GROUP BY periodo_id
+        ),
+        con_mercado AS (
+            SELECT b.*, m.total_mercado, m.n_reportaron, m.n_total
+            FROM base b
+            JOIN mercado m ON m.periodo_id = b.periodo_id
+        ),
+        ranking AS (
+            SELECT
+                c.*,
+                CASE
+                    WHEN c.tiene_reportado AND c.lineas_reportadas > 0 AND c.total_mercado > 0
+                    THEN ROW_NUMBER() OVER (
+                        PARTITION BY c.periodo_id
+                        ORDER BY c.lineas_reportadas DESC NULLS LAST, c.prestador_id
+                    )
+                END AS ranking_prestador,
+                CASE WHEN c.tiene_reportado AND c.lineas_reportadas > 0 AND c.total_mercado > 0
+                    THEN ROUND(POWER(100.0 * c.lineas_reportadas / c.total_mercado, 2), 8) END AS aporte_ihh,
+                CASE WHEN c.tiene_reportado AND c.lineas_reportadas > 0 AND c.total_mercado > 0
+                    THEN ROUND(100.0 * c.lineas_reportadas / c.total_mercado, 8) END AS participacion_porcentaje
+            FROM con_mercado c
+        ),
+        agregado AS (
+            SELECT
+                r.periodo_id,
+                MAX(r.total_mercado) AS total_lineas_mercado,
+                MAX(r.n_total) AS numero_prestadores,
+                COUNT(*) FILTER (WHERE r.tiene_reportado AND r.lineas_reportadas > 0) AS numero_prestadores_con_lineas,
+                ROUND(COALESCE(SUM(r.aporte_ihh), 0), 6) AS ihh,
+                MAX(r.prestador_id) FILTER (WHERE r.ranking_prestador = 1) AS prestador_lider_id,
+                MAX(r.participacion_porcentaje) FILTER (WHERE r.ranking_prestador = 1) AS participacion_lider,
+                ROUND(COALESCE(SUM(r.participacion_porcentaje) FILTER (WHERE r.ranking_prestador <= 2), 0), 6) AS cr2,
+                ROUND(COALESCE(SUM(r.participacion_porcentaje) FILTER (WHERE r.ranking_prestador <= 4), 0), 6) AS cr4,
+                SUM(r.lineas_reportadas) AS lineas_reportadas_mercado,
+                SUM(r.lineas_imputadas) AS lineas_imputadas_mercado,
+                MAX(r.n_reportaron) AS numero_prestadores_reportaron,
+                MAX(r.n_total) AS numero_prestadores_registrados,
+                ROUND(100.0 * MAX(r.n_reportaron) / NULLIF(MAX(r.n_total), 0), 4) AS porcentaje_cobertura_prestadores
+            FROM ranking r
+            GROUP BY r.periodo_id
+        )
+        SELECT
+            a.*,
+            p.isp_nombre AS prestador_lider_nombre,
+            p.nombrecomercial AS prestador_lider_nombrecomercial
+        FROM agregado a
+        LEFT JOIN mart.dim_prestador p ON p.prestador_id = a.prestador_lider_id
+        ORDER BY a.periodo_id
+        """,
+        params,
+    )
+
+    if df.empty:
+        return df
+
+    periods = get_periods()[["periodo_id", "periodo", "anio", "mes", "nombre_mes", "anio_mes"]]
+    df = df.merge(periods, on="periodo_id", how="left")
+    return df.sort_values("periodo_id").reset_index(drop=True)

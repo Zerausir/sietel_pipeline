@@ -6,6 +6,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from dash import Input, Output, callback, dcc, html, register_page
 
+from components.filters_shared import register_shared_filters_callbacks, shared_filters_layout
 from components.territory_filters import register_territory_callbacks, territory_filter_layout
 from components.ui import (
     PALETTE,
@@ -15,17 +16,16 @@ from components.ui import (
     format_number,
     format_signed,
     kpi_card,
+    month_year_dropdown,
     page_header,
     style_figure,
 )
 from services.queries import (
     get_evolution_filtrado,
-    get_operation_states,
     get_participation,
     get_periods,
     get_prestadores_sin_reportar,
     get_provider_count_in_range,
-    get_provider_options,
     get_reporting_summary,
     get_velocities,
     resolve_period_id,
@@ -35,24 +35,21 @@ register_page(__name__, path="/", name="Evolución", order=0)
 PREFIX = "evo"
 
 
-def _period_configuration():
+def _period_options():
     periods = get_periods()
     if periods.empty:
         raise RuntimeError("mart.dim_periodo no contiene registros.")
-    min_row = periods.loc[periods["periodo_id"].idxmin()]
-    max_row = periods.loc[periods["periodo_id"].idxmax()]
-    min_date = str(pd.Timestamp(min_row["periodo"]).date())
-    max_date = str(pd.Timestamp(max_row["periodo"]).date())
-    return min_date, max_date
+    options = [{"label": row.anio_mes, "value": int(row.periodo_id)} for row in periods.itertuples()]
+    min_period = int(periods["periodo_id"].min())
+    max_period = int(periods["periodo_id"].max())
+    return options, min_period, max_period
 
 
 def layout():
     try:
-        min_date, max_date = _period_configuration()
+        period_options, min_period, max_period = _period_options()
     except Exception as exc:
         return html.Div([page_header("Evolución del mercado", ""), error_panel(str(exc))])
-
-    estados_operacion = get_operation_states()
 
     return html.Div(
         children=[
@@ -67,64 +64,11 @@ def layout():
                     html.Div(
                         className="period-grid four-periods",
                         children=[
-                            html.Div(
-                                className="filter-field",
-                                children=[
-                                    html.Label("Desde"),
-                                    dcc.DatePickerSingle(
-                                        id="evo-start-period",
-                                        min_date_allowed=min_date,
-                                        max_date_allowed=max_date,
-                                        initial_visible_month=min_date,
-                                        date=min_date,
-                                        display_format="YYYY-MM",
-                                        clearable=False,
-                                    ),
-                                ],
-                            ),
-                            html.Div(
-                                className="filter-field",
-                                children=[
-                                    html.Label("Hasta"),
-                                    dcc.DatePickerSingle(
-                                        id="evo-end-period",
-                                        min_date_allowed=min_date,
-                                        max_date_allowed=max_date,
-                                        initial_visible_month=max_date,
-                                        date=max_date,
-                                        display_format="YYYY-MM",
-                                        clearable=False,
-                                    ),
-                                ],
-                            ),
-                            html.Div(
-                                className="filter-field",
-                                children=[
-                                    html.Label("Estado de operación"),
-                                    dcc.Dropdown(
-                                        id="evo-opera-estado",
-                                        options=estados_operacion,
-                                        value=[],
-                                        multi=True,
-                                        placeholder="Todos",
-                                    ),
-                                ],
-                            ),
-                            html.Div(
-                                className="filter-field",
-                                children=[
-                                    html.Label("Prestador"),
-                                    dcc.Dropdown(
-                                        id="evo-isp-nombre",
-                                        options=[],
-                                        value=[],
-                                        multi=True,
-                                        placeholder="Todos",
-                                    ),
-                                ],
-                            ),
+                            month_year_dropdown("evo-start-period", "Desde", period_options, min_period),
+                            month_year_dropdown("evo-end-period", "Hasta", period_options, max_period),
                         ],
                     ),
+                    shared_filters_layout(PREFIX),
                     html.Div(
                         className="filter-field",
                         style={"marginTop": "14px", "maxWidth": "260px"},
@@ -187,16 +131,7 @@ def layout():
 
 
 register_territory_callbacks(PREFIX)
-
-
-@callback(
-    Output("evo-isp-nombre", "options"),
-    Input("evo-territory-id", "data"),
-)
-def update_provider_filter_options(territory_id: str):
-    if not territory_id:
-        return []
-    return get_provider_options(territory_id)
+register_shared_filters_callbacks(PREFIX)
 
 
 @callback(
@@ -224,22 +159,20 @@ def update_provider_filter_options(territory_id: str):
     Output("evo-kpi-nunca-reportaron", "children"),
     Output("evo-kpi-nunca-reportaron-note", "children"),
     Input("evo-territory-id", "data"),
-    Input("evo-start-period", "date"),
-    Input("evo-end-period", "date"),
+    Input("evo-start-period", "value"),
+    Input("evo-end-period", "value"),
     Input("evo-speed-type", "value"),
     Input("evo-opera-estado", "value"),
     Input("evo-isp-nombre", "value"),
 )
 def update_evolution(
         territory_id: str,
-        start_date: str,
-        end_date: str,
+        start_period: int | None,
+        end_period: int | None,
         speed_type: str,
         opera_estados: list[str] | None,
         isp_nombres: list[str] | None,
 ):
-    start_period = resolve_period_id(start_date)
-    end_period = resolve_period_id(end_date)
     opera_estados = opera_estados or []
     isp_nombres = isp_nombres or []
 
@@ -280,13 +213,6 @@ def update_evolution(
     lines_value = format_number(latest.get("lineas_reportadas"))
     lines_note = f"Período {latest_label}"
 
-    # "Prestadores que reportaron" -- CORRECCIÓN (30-jul-2026, tras
-    # discusión con el usuario): antes existían dos números que parecían
-    # contradecirse ("246 con líneas" vs "238 reportaron"), porque "con
-    # líneas" incluía prestadores 100% imputados (con total_lineas > 0
-    # heredado por LOCF, pero sin ningún reporte real ese mes). Ahora solo
-    # existe UN conteo de prestadores: los que reportaron de verdad. Nada
-    # de imputados, ni como categoría de desglose.
     providers_value = format_number(latest.get("numero_prestadores"))
     providers_note = f"Con reporte real en {latest_label}"
 
@@ -297,7 +223,7 @@ def update_evolution(
     # período anterior que ya NO aparecen en el último. periodo_id se
     # codifica como anio*100+mes -- se usa aritmética de fecha real
     # (no periodo_id - 1) para hallar el mes anterior correctamente en
-    # cualquier enero (ver auditoría completa, 29-jul-2026).
+    # cualquier enero.
     churn_value, churn_note = "—", ""
     try:
         periodo_actual_id = int(latest["periodo_id"])
@@ -321,11 +247,6 @@ def update_evolution(
     except Exception:
         churn_value, churn_note = "—", "No se pudo calcular"
 
-    # Gráfico de barras -- SOLO reportadas (dato real). No se muestra el
-    # total mezclado con imputados ni una serie de "imputadas" por
-    # separado: cuando un prestador grande deja de reportar, mostrar un
-    # numero "imputado" sugiere una falsa precisión sobre algo que en
-    # realidad no se sabe. La caída en la barra es la señal honesta.
     lines_fig = px.bar(
         evolution, x="periodo", y="lineas_reportadas",
         labels={"lineas_reportadas": "Líneas reportadas", "periodo": "Período"},
@@ -442,12 +363,6 @@ def update_evolution(
         rango_total_value, rango_total_note = "—", "No se pudo calcular"
         rango_tasa_value, rango_tasa_note = "—", "No se pudo calcular"
 
-    # "Nunca han reportado" -- SOLO tiene sentido a nivel Nacional: la
-    # fuente (analitico.v_ultimo_periodo_reportado_detalle) no registra
-    # geografía para un prestador que nunca reportó (SIETEL solo conoce su
-    # ubicación a través del reporte real que nunca llegó). Mostrar
-    # "sin datos disponibles" en Provincia/Cantón/Parroquia en vez de
-    # ocultar la tarjeta, a pedido del usuario (30-jul-2026).
     if territory_id == "NACIONAL|ECUADOR":
         try:
             nunca_reportaron_value = format_number(get_prestadores_sin_reportar(opera_estados, isp_nombres))

@@ -66,6 +66,23 @@ def kpi_card(title: str, value_id: str, note_id: str | None = None) -> html.Div:
     return html.Div(children, className="kpi-card")
 
 
+def month_year_dropdown(id_: str, label: str, options: list[dict[str, Any]], value: int) -> html.Div:
+    """
+    Selector de PERÍODO MENSUAL -- solo mes y año, sin días (a pedido del
+    usuario, 31-jul-2026: el dcc.DatePickerSingle con calendario completo
+    sugería una precisión diaria que los datos no tienen -- son mensuales).
+    El valor es directamente periodo_id (entero AAAAMM), no una fecha --
+    quien llama ya no necesita resolve_period_id() para estos selectores.
+    """
+    return html.Div(
+        className="filter-field",
+        children=[
+            html.Label(label),
+            dcc.Dropdown(id=id_, options=options, value=value, clearable=False),
+        ],
+    )
+
+
 def chart_card(title: str, graph_id: str, subtitle: str | None = None) -> html.Div:
     header: list[Any] = [html.H3(title, className="chart-title")]
     if subtitle:

@@ -1799,16 +1799,10 @@ WITH prestador_territorio AS (
         f.prestador_id,
         SUM(f.total_lineas)
             AS total_lineas_prestador,
-        -- CORRECCIÓN (auditoría completa, 29-jul-2026): mismo defecto que
-        -- ya se corrigió en fact_resumen_mercado_mes -- CASE WHEN
-        -- f.tiene_imputacion (booleano "¿ALGO se imputó?") clasificaba el
-        -- total_lineas COMPLETO como 100% reportado o 100% imputado. Ahora
-        -- se suman directamente las columnas ya resueltas correctamente
-        -- por fila desde fact_lineas_geografia_mes.
         SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas,
         SUM(COALESCE(f.lineas_imputadas, 0)) AS lineas_imputadas,
-        BOOL_OR(f.tiene_imputacion)
-            AS tiene_imputacion
+        BOOL_OR(f.tiene_reportado) AS tiene_reportado,
+        BOOL_OR(f.tiene_imputacion) AS tiene_imputacion
     FROM mart.fact_lineas_geografia_mes f
     JOIN mart.bridge_geografia_territorio b
       ON b.geografia_id = f.geografia_id
@@ -1817,99 +1811,105 @@ WITH prestador_territorio AS (
         b.territorio_id,
         f.prestador_id
 ),
-totales AS (
+-- CORRECCIÓN METODOLÓGICA (31-jul-2026, a pedido del usuario, siguiendo
+-- práctica de autoridades de competencia -- DOJ/FTC, Ofcom, ARCEP: el HHI
+-- y la participación de mercado NUNCA se calculan con datos imputados o
+-- heredados. Un prestador sin reporte real ese mes exacto queda FUERA del
+-- cálculo del índice -- no se le asigna 0% (eso también sería fabricar un
+-- hecho que no conocemos), ni se hereda su último valor conocido (eso
+-- distorsiona la estructura competitiva real de ese mes específico).
+--
+-- El denominador ("mercado") se recalcula de forma consistente con el
+-- numerador: es la suma de lineas_reportadas SOLO entre quienes
+-- reportaron ese mes -- no el total mezclado con imputados. Si se usara
+-- el total mezclado como denominador mientras el numerador es solo
+-- reportado, TODOS los prestadores quedarían con participación
+-- artificialmente baja por igual -- un sesgo sutil pero real.
+mercado_reportado AS (
+    SELECT
+        periodo_id,
+        territorio_id,
+        SUM(lineas_reportadas) FILTER (WHERE tiene_reportado)
+            AS total_lineas_mercado_reportado,
+        COUNT(*) FILTER (WHERE tiene_reportado)
+            AS numero_prestadores_reportaron_periodo,
+        COUNT(*)
+            AS numero_prestadores_totales_periodo
+    FROM prestador_territorio
+    GROUP BY periodo_id, territorio_id
+),
+con_mercado AS (
     SELECT
         p.*,
-        SUM(
-            CASE
-                WHEN p.total_lineas_prestador > 0
-                THEN p.total_lineas_prestador
-                ELSE 0
-            END
-        ) OVER (
-            PARTITION BY
-                p.periodo_id,
-                p.territorio_id
-        ) AS total_lineas_mercado
+        m.total_lineas_mercado_reportado,
+        m.numero_prestadores_reportaron_periodo,
+        m.numero_prestadores_totales_periodo
     FROM prestador_territorio p
+    JOIN mercado_reportado m
+      ON m.periodo_id = p.periodo_id
+     AND m.territorio_id = p.territorio_id
 ),
 ranking AS (
     SELECT
-        t.*,
+        c.*,
         CASE
-            WHEN t.total_lineas_prestador > 0
+            WHEN c.tiene_reportado
+             AND c.lineas_reportadas > 0
+             AND c.total_lineas_mercado_reportado > 0
             THEN ROW_NUMBER() OVER (
                 PARTITION BY
-                    t.periodo_id,
-                    t.territorio_id
+                    c.periodo_id,
+                    c.territorio_id
                 ORDER BY
-                    CASE
-                        WHEN t.total_lineas_prestador > 0
-                        THEN 0
-                        ELSE 1
-                    END,
-                    t.total_lineas_prestador DESC NULLS LAST,
-                    t.prestador_id
+                    c.lineas_reportadas DESC NULLS LAST,
+                    c.prestador_id
             )
         END AS ranking_prestador
-    FROM totales t
+    FROM con_mercado c
 )
 SELECT
     periodo_id,
     territorio_id,
     prestador_id,
     total_lineas_prestador,
-    total_lineas_mercado,
+    total_lineas_mercado_reportado AS total_lineas_mercado,
     CASE
-        WHEN total_lineas_prestador > 0
-         AND total_lineas_mercado > 0
-        THEN ROUND(
-            total_lineas_prestador
-            / total_lineas_mercado,
-            10
-        )
+        WHEN tiene_reportado
+         AND lineas_reportadas > 0
+         AND total_lineas_mercado_reportado > 0
+        THEN ROUND(lineas_reportadas / total_lineas_mercado_reportado, 10)
     END AS participacion_decimal,
     CASE
-        WHEN total_lineas_prestador > 0
-         AND total_lineas_mercado > 0
-        THEN ROUND(
-            100.0
-            * total_lineas_prestador
-            / total_lineas_mercado,
-            8
-        )
+        WHEN tiene_reportado
+         AND lineas_reportadas > 0
+         AND total_lineas_mercado_reportado > 0
+        THEN ROUND(100.0 * lineas_reportadas / total_lineas_mercado_reportado, 8)
     END AS participacion_porcentaje,
     CASE
-        WHEN total_lineas_prestador > 0
-         AND total_lineas_mercado > 0
-        THEN ROUND(
-            POWER(
-                100.0
-                * total_lineas_prestador
-                / total_lineas_mercado,
-                2
-            ),
-            8
-        )
+        WHEN tiene_reportado
+         AND lineas_reportadas > 0
+         AND total_lineas_mercado_reportado > 0
+        THEN ROUND(POWER(100.0 * lineas_reportadas / total_lineas_mercado_reportado, 2), 8)
     END AS aporte_ihh,
     ranking_prestador,
     ranking_prestador = 1 AS es_lider,
     CASE
-        WHEN total_lineas_prestador > 0
-            THEN 'POSITIVO'
-        WHEN total_lineas_prestador = 0
-            THEN 'CERO'
+        WHEN NOT tiene_reportado THEN 'SIN_REPORTE_ESTE_MES'
+        WHEN lineas_reportadas > 0 THEN 'POSITIVO'
+        WHEN lineas_reportadas = 0 THEN 'CERO'
         ELSE 'SIN_DATO'
     END AS estado_lineas,
     lineas_reportadas,
     lineas_imputadas,
+    tiene_reportado,
+    tiene_imputacion,
+    numero_prestadores_reportaron_periodo,
+    numero_prestadores_totales_periodo,
     ROUND(
-        100.0
-        * lineas_imputadas
-        / NULLIF(total_lineas_prestador, 0),
-        6
-    ) AS porcentaje_imputado_prestador,
-    tiene_imputacion
+        100.0 * numero_prestadores_reportaron_periodo
+        / NULLIF(numero_prestadores_totales_periodo, 0),
+        4
+    ) AS porcentaje_cobertura_prestadores
 FROM ranking;
 
 CREATE UNIQUE INDEX uq_fact_participacion_mercado
@@ -2000,7 +2000,21 @@ SELECT
     ) AS porcentaje_imputado_mercado,
     COUNT(*) FILTER (
         WHERE tiene_imputacion
-    ) AS numero_prestadores_imputados
+    ) AS numero_prestadores_imputados,
+    -- COBERTURA (31-jul-2026): el IHH/CR2/CR4 de arriba se calculan SOLO
+    -- sobre lineas_reportadas de quien reportó ese mes exacto -- estas
+    -- columnas dejan explícito CUÁNTO del universo conocido queda
+    -- representado, para que el índice nunca se lea sin su contexto de
+    -- completitud (mismo principio ya aplicado en Evolución con
+    -- "% de prestadores que reportaron").
+    MAX(numero_prestadores_reportaron_periodo) AS numero_prestadores_reportaron,
+    MAX(numero_prestadores_totales_periodo) AS numero_prestadores_registrados,
+    ROUND(
+        100.0
+        * MAX(numero_prestadores_reportaron_periodo)
+        / NULLIF(MAX(numero_prestadores_totales_periodo), 0),
+        4
+    ) AS porcentaje_cobertura_prestadores
 FROM mart.fact_participacion_mercado
 GROUP BY
     periodo_id,
@@ -2142,8 +2156,11 @@ SELECT
     f.estado_lineas,
     f.lineas_reportadas,
     f.lineas_imputadas,
-    f.porcentaje_imputado_prestador,
-    f.tiene_imputacion
+    f.tiene_reportado,
+    f.tiene_imputacion,
+    f.numero_prestadores_reportaron_periodo,
+    f.numero_prestadores_totales_periodo,
+    f.porcentaje_cobertura_prestadores
 FROM mart.fact_participacion_mercado f
 JOIN mart.dim_periodo d
   ON d.periodo_id = f.periodo_id
@@ -2187,7 +2204,10 @@ SELECT
     f.lineas_reportadas_mercado,
     f.lineas_imputadas_mercado,
     f.porcentaje_imputado_mercado,
-    f.numero_prestadores_imputados
+    f.numero_prestadores_imputados,
+    f.numero_prestadores_reportaron,
+    f.numero_prestadores_registrados,
+    f.porcentaje_cobertura_prestadores
 FROM mart.fact_ihh_geografico f
 JOIN mart.dim_periodo d
   ON d.periodo_id = f.periodo_id
@@ -2470,3 +2490,22 @@ WHERE territorio_id = 'NACIONAL|ECUADOR'
   AND periodo = '2013-12-01';
 
 -- Resultado esperado: porcentaje_imputado cercano a 66-67, NO 93.76.
+
+-- 17.12. NUEVA (31-jul-2026) -- IHH/participación exclusivamente sobre
+-- datos reales. Verifica: (a) ningún prestador sin reporte real ese mes
+-- tiene participación o aporte_ihh distinto de NULL; (b) la cobertura de
+-- prestadores está siempre entre 0 y 100; (c) CR2 <= CR4 <= 100 siempre.
+SELECT *
+FROM mart.fact_participacion_mercado
+WHERE (NOT tiene_reportado) AND (participacion_porcentaje IS NOT NULL OR aporte_ihh IS NOT NULL);
+
+-- Resultado esperado: cero filas.
+
+SELECT *
+FROM mart.fact_ihh_geografico
+WHERE porcentaje_cobertura_prestadores < 0
+   OR porcentaje_cobertura_prestadores > 100
+   OR cr2 > cr4 + 0.001
+   OR cr4 > 100.001;
+
+-- Resultado esperado: cero filas.
