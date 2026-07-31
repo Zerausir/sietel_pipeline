@@ -43,12 +43,26 @@ def clean_records(df: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 def kpi_card(title: str, value_id: str, note_id: str | None = None) -> html.Div:
+    title_row: list[Any] = [html.Span(title, className="kpi-title-text")]
+    if note_id:
+        title_row.append(
+            html.Div(
+                className="kpi-info",
+                children=[
+                    html.Span("i", className="kpi-info-icon"),
+                    # Mismo note_id de siempre -- los callbacks existentes
+                    # (Output(note_id, "children")) no necesitan cambiar,
+                    # solo cambia la presentación: tooltip al pasar el
+                    # cursor, en vez de texto siempre visible debajo del
+                    # valor (a pedido del usuario, 30-jul-2026).
+                    html.Div("", id=note_id, className="kpi-info-tooltip"),
+                ],
+            )
+        )
     children: list[Any] = [
-        html.Div(title, className="kpi-title"),
+        html.Div(title_row, className="kpi-title-row"),
         html.Div("—", id=value_id, className="kpi-value"),
     ]
-    if note_id:
-        children.append(html.Div("", id=note_id, className="kpi-note"))
     return html.Div(children, className="kpi-card")
 
 
