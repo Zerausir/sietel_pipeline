@@ -2242,6 +2242,42 @@ ANALYZE mart.fact_participacion_mercado;
 ANALYZE mart.fact_ihh_geografico;
 
 -- ============================================================
+-- VISTA ADICIONAL (fuera de secuencia, 30-jul-2026, a pedido del usuario):
+-- vw_prestadores_sin_reportar -- prestadores con título habilitante
+-- otorgado que JAMÁS han entregado ni un solo reporte real -- el caso de
+-- incumplimiento más grave, invisible en toda la cadena capa2/mart porque
+-- esa cadena se construye a partir de reportes reales (si nunca llegó
+-- ninguno, el prestador simplemente no existe en capa2/fact_lineas_geografia_mes).
+--
+-- NOTA DE NUMERACIÓN: esta vista NO es la sección "17.9" -- ese número ya
+-- pertenece a una validación de integridad distinta, más adelante en este
+-- mismo archivo (después del COMMIT, dentro del bloque de validaciones
+-- posteriores). Se etiqueta sin número de secuencia, deliberadamente, para
+-- no chocar con esa numeración ya existente.
+--
+-- Fuente: analitico.v_ultimo_periodo_reportado_detalle, filtrando
+-- tiene_reportes = FALSE (ya viene calculado en esa vista).
+--
+-- SIN GEOGRAFÍA: todas las columnas geográficas de la vista origen vienen
+-- vacías para estos casos -- confirmado con datos reales (29-jul-2026):
+-- SIETEL solo conoce la ubicación de un prestador a partir de su reporte
+-- real (VALineasDedicadas especifica parroquia); si nunca reportó, no hay
+-- forma de saber dónde. Por eso esta vista NO tiene columna de
+-- geografía/territorio -- el consumo en el dashboard debe restringirse a
+-- nivel Nacional únicamente.
+CREATE VIEW mart.vw_prestadores_sin_reportar AS
+SELECT
+    peva_codigo,
+    isp_nombre,
+    isp_ruc,
+    isp_tipopersona,
+    opera,
+    resolucion,
+    fechapermiso
+FROM analitico.v_ultimo_periodo_reportado_detalle
+WHERE tiene_reportes = FALSE;
+
+-- ============================================================
 -- 18. RE-OTORGAR ACCESO A dashboard_lector -- sobrevive a la reconstrucción
 -- ============================================================
 -- CRÍTICO: el DROP SCHEMA mart CASCADE del inicio de este archivo borra

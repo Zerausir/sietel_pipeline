@@ -545,3 +545,49 @@ def get_provider_history(
             "end_period": end_period,
         },
     )
+
+
+@cache.memoize(timeout=300)
+def get_prestadores_sin_reportar(
+        opera_estados: list[str] | None = None,
+        isp_nombres: list[str] | None = None,
+) -> int:
+    """
+    Cuenta prestadores con título habilitante otorgado que JAMÁS han
+    entregado ni un solo reporte real -- el caso de incumplimiento más
+    grave, y el único que get_reporting_summary no puede ver (esa consulta
+    solo conoce prestadores que ya aparecen en capa2/fact_lineas_geografia_mes,
+    lo que por construcción exige al menos un reporte real).
+
+    SIN GEOGRAFÍA A PROPÓSITO: mart.vw_prestadores_sin_reportar no tiene
+    columna de territorio -- confirmado con datos reales (29-jul-2026) que
+    SIETEL no conoce la ubicación de un prestador que nunca reportó (la
+    geografía solo se registra en el reporte real mismo). Por eso esta
+    función NO acepta territory_id -- el consumidor (evolucion.py) debe
+    mostrar "sin datos disponibles" para cualquier nivel distinto de
+    Nacional, no filtrar por geografía aquí (sería inventar un filtro
+    sobre una columna que no existe).
+    """
+    clauses = ["1 = 1"]
+    params: dict[str, Any] = {}
+    if opera_estados:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
+            "WHERE v.opera ILIKE '%' || estado || '%')"
+        )
+        params["opera_estados"] = list(opera_estados)
+    if isp_nombres:
+        clauses.append("v.isp_nombre = ANY(:isp_nombres)")
+        params["isp_nombres"] = list(isp_nombres)
+
+    df = _read(
+        f"""
+        SELECT COUNT(*) AS cantidad
+        FROM mart.vw_prestadores_sin_reportar v
+        WHERE {' AND '.join(clauses)}
+        """,
+        params,
+    )
+    if df.empty:
+        return 0
+    return int(df.iloc[0]["cantidad"])

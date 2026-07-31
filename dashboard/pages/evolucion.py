@@ -23,6 +23,7 @@ from services.queries import (
     get_operation_states,
     get_participation,
     get_periods,
+    get_prestadores_sin_reportar,
     get_provider_count_in_range,
     get_provider_options,
     get_reporting_summary,
@@ -156,7 +157,7 @@ def layout():
             ),
             html.H3(id="evo-titulo-resumen-rango", children="Resumen del rango seleccionado"),
             html.Section(
-                className="kpi-grid three",
+                className="kpi-grid four",
                 children=[
                     kpi_card("Prestadores con actividad en el rango", "evo-kpi-rango-prestadores",
                              "evo-kpi-rango-prestadores-note"),
@@ -164,6 +165,8 @@ def layout():
                              "evo-kpi-rango-total-note"),
                     kpi_card("Tasa de entrega de reportes", "evo-kpi-rango-tasa",
                              "evo-kpi-rango-tasa-note"),
+                    kpi_card("Nunca han reportado", "evo-kpi-nunca-reportaron",
+                             "evo-kpi-nunca-reportaron-note"),
                 ],
             ),
             html.Section(
@@ -218,6 +221,8 @@ def update_provider_filter_options(territory_id: str):
     Output("evo-kpi-rango-total-note", "children"),
     Output("evo-kpi-rango-tasa", "children"),
     Output("evo-kpi-rango-tasa-note", "children"),
+    Output("evo-kpi-nunca-reportaron", "children"),
+    Output("evo-kpi-nunca-reportaron-note", "children"),
     Input("evo-territory-id", "data"),
     Input("evo-start-period", "date"),
     Input("evo-end-period", "date"),
@@ -241,7 +246,7 @@ def update_evolution(
     if not territory_id or start_period is None or end_period is None:
         figures = [empty_figure("Seleccione todos los filtros") for _ in range(4)]
         return ("—", "", "—", "", "—", "", "—", "", *figures, "", "Estado actual",
-                "Resumen del rango seleccionado", "—", "", "—", "", "—", "")
+                "Resumen del rango seleccionado", "—", "", "—", "", "—", "", "—", "")
 
     start_period, end_period = sorted((int(start_period), int(end_period)))
 
@@ -251,13 +256,13 @@ def update_evolution(
     except Exception as exc:
         figures = [empty_figure("Error al consultar PostgreSQL") for _ in range(4)]
         return ("—", "", "—", "", "—", "", "—", "", *figures, str(exc), "Estado actual",
-                "Resumen del rango seleccionado", "—", "", "—", "", "—", "")
+                "Resumen del rango seleccionado", "—", "", "—", "", "—", "", "—", "")
 
     if evolution.empty:
         figures = [empty_figure() for _ in range(4)]
         return ("—", "", "—", "", "—", "", "—", "", *figures,
                 "No existen datos para este territorio, período y filtros seleccionados.",
-                "Estado actual", "Resumen del rango seleccionado", "—", "", "—", "", "—", "")
+                "Estado actual", "Resumen del rango seleccionado", "—", "", "—", "", "—", "", "—", "")
 
     evolution = evolution.copy()
     evolution["periodo"] = pd.to_datetime(evolution["periodo"])
@@ -416,6 +421,26 @@ def update_evolution(
         rango_total_value, rango_total_note = "—", "No se pudo calcular"
         rango_tasa_value, rango_tasa_note = "—", "No se pudo calcular"
 
+    # "Nunca han reportado" -- SOLO tiene sentido a nivel Nacional: la
+    # fuente (analitico.v_ultimo_periodo_reportado_detalle) no registra
+    # geografía para un prestador que nunca reportó (SIETEL solo conoce su
+    # ubicación a través del reporte real que nunca llegó). Mostrar
+    # "sin datos disponibles" en Provincia/Cantón/Parroquia en vez de
+    # ocultar la tarjeta, a pedido del usuario (30-jul-2026).
+    if territory_id == "NACIONAL|ECUADOR":
+        try:
+            nunca_reportaron_value = format_number(get_prestadores_sin_reportar(opera_estados, isp_nombres))
+            nunca_reportaron_note = (
+                "Título habilitante otorgado, cero reportes en toda su historia. "
+                "Solo disponible a nivel Nacional -- SIETEL no registra la geografía "
+                "de un prestador que nunca llegó a reportar."
+            )
+        except Exception:
+            nunca_reportaron_value, nunca_reportaron_note = "—", "No se pudo calcular"
+    else:
+        nunca_reportaron_value = "Sin datos disponibles"
+        nunca_reportaron_note = "Este indicador solo existe a nivel Nacional -- cambie el Nivel geográfico para verlo."
+
     return (
         lines_value, lines_note,
         providers_value, providers_note,
@@ -427,4 +452,5 @@ def update_evolution(
         rango_prestadores_value, rango_prestadores_note,
         rango_total_value, rango_total_note,
         rango_tasa_value, rango_tasa_note,
+        nunca_reportaron_value, nunca_reportaron_note,
     )
