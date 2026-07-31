@@ -146,48 +146,51 @@ def get_reporting_summary(
     """
     Resumen de cumplimiento de entrega de reportes:
       - total_prestadores: TODOS los prestadores con presencia HASTA la
-        fecha 'Hasta' (con o sin reporte real) -- CORRECCIÓN (30-jul-2026,
-        tras revisión del usuario): este conteo usa SOLO el límite
-        superior del rango, NO el límite inferior. Antes estaba acotado
-        también por "Desde", así que angostar el inicio del rango (ej. a
-        los últimos 2 meses) hacía que el total de prestadores cayera a un
-        puñado (610 en vez de ~1369) -- una contradicción real, no un dato
-        legítimo: "cuántos existen en el registro hasta hoy" no debería
-        depender de cuán angosto sea el filtro de inicio.
-      - celdas_esperadas / celdas_reportadas: SÍ están acotadas al rango
-        completo Desde-Hasta (correctamente se reducen si el rango es
-        angosto, porque miden cumplimiento DENTRO de esa ventana).
+        fecha 'Hasta' (con o sin reporte real). Usa SOLO el límite
+        superior del rango, NO el límite inferior (ver corrección
+        30-jul-2026 más abajo).
+      - celdas_esperadas / celdas_reportadas: para CADA prestador del
+        registro total, para CADA mes del rango Desde-Hasta en el que ya
+        tenía obligación de reportar (ver regla del año de gracia), se
+        cuenta como "celda esperada" -- SIN IMPORTAR si ese prestador
+        tiene o no una fila en fact_lineas_geografia_mes ese mes.
       - tasa_entrega_porcentaje: celdas_reportadas / celdas_esperadas * 100.
 
-    REGLA DEL AÑO DE GRACIA (agregada 30-jul-2026, a pedido del usuario):
-    la obligación de reportar de un prestador NO empieza el día del título
-    habilitante, sino un año calendario después -- ej. título otorgado el
-    15/08/2021 => el primer reporte OBLIGATORIO es el de agosto de 2022
-    (pueden reportar antes de forma voluntaria, pero no es obligación
-    hasta cumplido el primer año). Se calcula como
-    fechapermiso + INTERVAL '1 year', truncado al mes, convertido al mismo
-    formato AAAAMM que periodo_id en todo el resto del esquema.
+    CORRECCIÓN CRÍTICA (30-jul-2026, tras segunda revisión del usuario):
+    la versión anterior calculaba "celdas_esperadas" únicamente a partir
+    de las filas que YA EXISTEN en fact_lineas_geografia_mes dentro del
+    rango -- pero un prestador que dejó de reportar hace tiempo (su
+    relleno LOCF en capa2 ya terminó antes del rango seleccionado) no
+    genera NINGUNA fila para esos meses, así que ni siquiera se contaba
+    como "esperado". Resultado: con un rango angosto y reciente (ej.
+    2025-11 a 2025-12), la tasa daba 100% -- una ilusión, porque solo
+    medía a los ~610 prestadores que TODAVÍA aparecen, ignorando a los
+    ~759 restantes del registro total que dejaron de reportar antes.
 
-    Si fechapermiso es NULL (dato no disponible para ese prestador), se
-    asume sin obligación conocida y se cuentan todos sus meses de
-    presencia como antes -- no se penaliza por falta de este dato
-    específico, pero tampoco se inventa una fecha.
+    Ahora "celdas_esperadas" se construye cruzando TODO el registro
+    (registro_total) contra TODOS los meses reales del rango
+    (mart.dim_periodo, no una secuencia aritmética sobre periodo_id, que
+    no es secuencial entre años -- ver AAAAMM), filtrando solo por la
+    regla del año de gracia. Un prestador que dejó de reportar
+    correctamente aparece como "esperado, no reportado" en cada mes
+    posterior, arrastrando la tasa hacia abajo como corresponde.
 
-    LIMITACIÓN ESTRUCTURAL IMPORTANTE (reconocida explícitamente, no
-    oculta): esta consulta SOLO puede medir cumplimiento entre prestadores
-    que aparecen en fact_lineas_geografia_mes -- es decir, que reportaron
-    AL MENOS UNA VEZ. Un prestador con título habilitante vigente que
-    JAMÁS ha entregado ni un solo reporte no existe en ninguna capa de
-    este pipeline (capa2 se construye a partir de reportes reales), y por
-    lo tanto es invisible para este cálculo. Capturar ese caso -- el de
-    incumplimiento total -- requeriría cruzar contra el registro completo
-    de permisos (ej. analitico.v_ultimo_periodo_reportado_detalle), una
-    extensión de alcance pendiente, no incluida aquí.
+    REGLA DEL AÑO DE GRACIA: la obligación de reportar de un prestador NO
+    empieza el día del título habilitante, sino un año calendario después
+    -- ej. título otorgado el 15/08/2021 => el primer reporte OBLIGATORIO
+    es el de agosto de 2022. Si fechapermiso es NULL, se asume sin
+    obligación conocida y se cuentan todos los meses del rango para ese
+    prestador (no se penaliza por falta de este dato, tampoco se inventa).
+
+    LIMITACIÓN QUE SIGUE VIGENTE: un prestador que JAMÁS ha entregado ni
+    un solo reporte real en toda su historia no aparece en
+    fact_lineas_geografia_mes en absoluto (capa2 se construye a partir de
+    reportes reales), y por lo tanto tampoco en "registro_total" ni en
+    esta tasa. Ese caso -- incumplimiento total desde el principio --
+    seguiría requiriendo cruzar contra el registro completo de permisos
+    (ej. analitico.v_ultimo_periodo_reportado_detalle), fuera de alcance
+    de esta consulta.
     """
-    clauses = [
-        "b.territorio_id = :territory_id",
-        "f.periodo_id BETWEEN :start_period AND :end_period",
-    ]
     clauses_registro = [
         "b.territorio_id = :territory_id",
         "f.periodo_id <= :end_period",
@@ -198,37 +201,40 @@ def get_reporting_summary(
         "end_period": end_period,
     }
     if opera_estados:
-        filtro_opera = (
+        clauses_registro.append(
             "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
             "WHERE p.opera_actual ILIKE '%' || estado || '%')"
         )
-        clauses.append(filtro_opera)
-        clauses_registro.append(filtro_opera)
         params["opera_estados"] = list(opera_estados)
     if isp_nombres:
-        clauses.append("p.isp_nombre = ANY(:isp_nombres)")
         clauses_registro.append("p.isp_nombre = ANY(:isp_nombres)")
         params["isp_nombres"] = list(isp_nombres)
 
     df = _read(
         f"""
-        WITH celdas AS (
-            SELECT
-                f.prestador_id,
-                f.periodo_id,
-                BOOL_OR(f.tiene_reportado) AS reporto
+        -- CORRECCIÓN (30-jul-2026, tras objeción del usuario): se agrega
+        -- el filtro explícito tiene_reportado = TRUE. Verificado con datos
+        -- reales que esto NO cambia el número (1369 = 1369, porque capa2
+        -- garantiza que toda fila imputada existe solo entre dos reportes
+        -- reales del mismo prestador -- nunca puede haber presencia
+        -- puramente imputada) -- pero el diseño no debe depender, ni
+        -- siquiera por presencia, de una fila que pueda ser imputada.
+        WITH registro_total AS (
+            SELECT DISTINCT f.prestador_id
             FROM mart.fact_lineas_geografia_mes f
             JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
             JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
-            WHERE {' AND '.join(clauses)}
-            GROUP BY f.prestador_id, f.periodo_id
+            WHERE {' AND '.join(clauses_registro)}
+              AND f.tiene_reportado = TRUE
         ),
-        con_obligacion AS (
+        periodos_rango AS (
+            SELECT periodo_id
+            FROM mart.dim_periodo
+            WHERE periodo_id BETWEEN :start_period AND :end_period
+        ),
+        prestador_con_obligacion AS (
             SELECT
-                c.prestador_id,
-                c.periodo_id,
-                c.reporto,
-                p.fechapermiso,
+                r.prestador_id,
                 CASE
                     WHEN p.fechapermiso IS NULL THEN NULL
                     ELSE (
@@ -236,36 +242,35 @@ def get_reporting_summary(
                         + EXTRACT(MONTH FROM (p.fechapermiso + INTERVAL '1 year'))::int
                     )
                 END AS periodo_inicio_obligacion
-            FROM celdas c
-            JOIN mart.dim_prestador p ON p.prestador_id = c.prestador_id
+            FROM registro_total r
+            JOIN mart.dim_prestador p ON p.prestador_id = r.prestador_id
         ),
-        -- CORRECCIÓN (30-jul-2026, tras revisión del usuario): el conteo
-        -- "total de prestadores (con o sin reportes)" NO debe acortarse
-        -- solo porque el usuario angostó el filtro "Desde" -- eso mezclaba
-        -- dos preguntas distintas ("¿cuántos existen en el registro hasta
-        -- esta fecha?" vs "¿cuántos tuvieron actividad exactamente en esta
-        -- ventana?"). Este conteo usa SOLO el límite superior (Hasta), sin
-        -- el límite inferior (Desde) -- así, acotar "Desde" a los últimos
-        -- 2 meses ya no hace que el total de prestadores caiga a un
-        -- puñado, como reportó el usuario (610 en vez de ~1369).
-        registro_total AS (
-            SELECT DISTINCT f.prestador_id
+        -- El cruce completo: TODO prestador del registro x TODO mes del
+        -- rango en el que ya tenía obligación -- sin importar si tiene o
+        -- no una fila real en fact_lineas_geografia_mes ese mes.
+        celdas_esperadas_calc AS (
+            SELECT pco.prestador_id, pr.periodo_id
+            FROM prestador_con_obligacion pco
+            CROSS JOIN periodos_rango pr
+            WHERE pco.periodo_inicio_obligacion IS NULL
+               OR pr.periodo_id >= pco.periodo_inicio_obligacion
+        ),
+        reportes_reales AS (
+            SELECT DISTINCT f.prestador_id, f.periodo_id
             FROM mart.fact_lineas_geografia_mes f
             JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
-            JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
-            WHERE {' AND '.join(clauses_registro)}
+            WHERE b.territorio_id = :territory_id
+              AND f.periodo_id BETWEEN :start_period AND :end_period
+              AND f.tiene_reportado = TRUE
         )
         SELECT
             (SELECT COUNT(*) FROM registro_total) AS total_prestadores,
+            (SELECT COUNT(*) FROM celdas_esperadas_calc) AS celdas_esperadas,
             (
-                SELECT COUNT(*) FROM con_obligacion
-                WHERE periodo_inicio_obligacion IS NULL
-                   OR periodo_id >= periodo_inicio_obligacion
-            ) AS celdas_esperadas,
-            (
-                SELECT COUNT(*) FROM con_obligacion
-                WHERE reporto
-                  AND (periodo_inicio_obligacion IS NULL OR periodo_id >= periodo_inicio_obligacion)
+                SELECT COUNT(*)
+                FROM celdas_esperadas_calc cec
+                JOIN reportes_reales rr
+                  ON rr.prestador_id = cec.prestador_id AND rr.periodo_id = cec.periodo_id
             ) AS celdas_reportadas
         """,
         params,
