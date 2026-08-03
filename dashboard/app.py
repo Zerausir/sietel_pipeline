@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import dash
-from dash import Dash, dcc, html
-from flask import request
+from dash import Dash, Input, Output, callback, dcc, html
 from flask_login import current_user
 
 from config import settings
@@ -40,25 +39,23 @@ def navigation() -> html.Header:
         if current_user.is_authenticated
         else ""
     )
-    # Navegación consciente de la ruta actual (31-jul-2026, a pedido del
-    # usuario): en el Panel de opciones (path "/") no tiene sentido mostrar
-    # los enlaces de un módulo que todavía no se eligió. Dentro de un
-    # módulo (hoy, /sai/*) se muestra un enlace de regreso al Panel, más
-    # los enlaces propios de ESE módulo. request.path funciona aquí porque
-    # serve_layout() -- y por lo tanto navigation() -- se ejecuta dentro
-    # del contexto de la request de Flask en cada carga de página.
-    dentro_de_sai = request.path.startswith("/sai/")
-
-    contenido_nav: list = []
-    if dentro_de_sai:
-        contenido_nav.append(dcc.Link("← Panel", href="/", className="nav-link nav-back"))
-        contenido_nav.append(html.Div(className="topbar-sep"))
-        contenido_nav.append(dcc.Link("Evolución", href="/sai/evolucion", className="nav-link"))
-        contenido_nav.append(dcc.Link("IHH y participación", href="/sai/concentracion", className="nav-link"))
-
+    # CORRECCIÓN (tras prueba real del usuario, 31-jul-2026): la primera
+    # versión leía flask.request.path directamente aquí -- pero esta
+    # función (parte de app.layout, una función) solo se evalúa en la
+    # carga INICIAL completa del documento. La navegación interna de Dash
+    # Pages (dcc.Link, incluida la del propio Panel) reutiliza esa misma
+    # barra ya renderizada sin volver a pedirle nada a Flask -- por eso la
+    # barra quedaba "congelada" en el estado de la primera carga (el
+    # Panel, sin enlaces), aunque la URL visible cambiara a /sai/evolucion.
+    #
+    # La forma correcta: dejar la barra como placeholders con id fijo, y
+    # que un callback (más abajo) los actualice reaccionando a
+    # Input("obtel-url", "pathname") -- eso sí se dispara en cada
+    # navegación, sea clic interno o carga completa.
     return html.Header(
         className="topbar",
         children=[
+            dcc.Location(id="obtel-url", refresh=False),
             html.Div(
                 className="brand",
                 children=[
@@ -67,14 +64,15 @@ def navigation() -> html.Header:
                         [
                             html.Div("OBTEL", className="brand-title"),
                             html.Div(
-                                "Servicio de Acceso a Internet — SAI" if dentro_de_sai else "Observatorio de Telecomunicaciones",
+                                "Observatorio de Telecomunicaciones",
+                                id="obtel-brand-subtitle",
                                 className="brand-subtitle",
                             ),
                         ]
                     ),
                 ],
             ),
-            html.Nav(className="nav-links", children=contenido_nav),
+            html.Nav(id="obtel-nav-links", className="nav-links", children=[]),
             html.Div(
                 className="nav-user",
                 children=[
@@ -84,6 +82,33 @@ def navigation() -> html.Header:
             ),
         ],
     )
+
+
+@callback(
+    Output("obtel-nav-links", "children"),
+    Output("obtel-brand-subtitle", "children"),
+    Input("obtel-url", "pathname"),
+)
+def actualizar_navegacion(pathname: str | None):
+    """
+    Se dispara en CADA cambio de ruta -- clic en dcc.Link, botón atrás/
+    adelante del navegador, o carga completa -- a diferencia de leer
+    flask.request en navigation(), que solo veía la ruta de la carga
+    inicial. Único lugar donde se decide qué módulo está activo hoy
+    (/sai/*); si se agregan más módulos en el futuro, esta es la función
+    a extender.
+    """
+    dentro_de_sai = (pathname or "").startswith("/sai/")
+    if not dentro_de_sai:
+        return [], "Observatorio de Telecomunicaciones"
+
+    nav = [
+        dcc.Link("← Panel", href="/", className="nav-link nav-back"),
+        html.Div(className="topbar-sep"),
+        dcc.Link("Evolución", href="/sai/evolucion", className="nav-link"),
+        dcc.Link("IHH y participación", href="/sai/concentracion", className="nav-link"),
+    ]
+    return nav, "Servicio de Acceso a Internet — SAI"
 
 
 def serve_layout() -> html.Div:

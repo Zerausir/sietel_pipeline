@@ -8,7 +8,7 @@ de acceso) que Zerausir/tablero, adaptado a la paleta de OBTEL.
 """
 from __future__ import annotations
 
-from dash import html, register_page
+from dash import dcc, html, register_page
 from flask_login import current_user
 
 register_page(__name__, path="/", name="Panel de opciones", order=0)
@@ -39,7 +39,7 @@ def layout():
             html.Div(
                 className="modules-grid",
                 children=[
-                    html.A(
+                    dcc.Link(
                         href="/sai/evolucion",
                         className="mod-card",
                         children=[
