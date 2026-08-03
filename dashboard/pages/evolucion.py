@@ -31,7 +31,7 @@ from services.queries import (
     resolve_period_id,
 )
 
-register_page(__name__, path="/", name="Evolución", order=0)
+register_page(__name__, path="/sai/evolucion", name="Evolución", order=1)
 PREFIX = "evo"
 
 

@@ -1,10 +1,48 @@
-# SIETEL Analítico — Pipeline de datos y dashboard de mercado
+# OBTEL — Observatorio de Telecomunicaciones
 
 Sistema de datos de extremo a extremo para el módulo **Líneas Dedicadas de Internet Fijo** de **SIETEL** (el sistema
 regulatorio de ARCOTEL sobre SQL Server): extrae, certifica, modela y expone en un dashboard analítico la información
-que los prestadores de servicios de telecomunicaciones reportan mensualmente al regulador.
+que los prestadores de servicios de telecomunicaciones reportan mensualmente al regulador — como insumo tanto para el
+análisis de mercado como para el control y la regulación del sector.
 
 Desarrollado por la **Dirección de Mercados — ARCOTEL**.
+
+## Versiones del software
+
+**Orquestación e infraestructura**
+
+[![Apache Airflow](https://img.shields.io/badge/Apache%20Airflow-3.3.0-017CEE?logo=apacheairflow&logoColor=white)](https://airflow.apache.org/)
+[![Python](https://img.shields.io/badge/Python-3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![ODBC Driver](https://img.shields.io/badge/ODBC%20Driver%20for%20SQL%20Server-18-CC2927?logo=microsoftsqlserver&logoColor=white)](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server)
+[![Docker Compose](https://img.shields.io/badge/Docker%20Compose-v2-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
+
+**Capa 1** — `requirements.txt` (raíz)
+
+[![pyodbc](https://img.shields.io/badge/pyodbc-5.3.0-4B8BBE)](https://pypi.org/project/pyodbc/)
+[![psycopg2-binary](https://img.shields.io/badge/psycopg2--binary-2.9.12-336791?logo=postgresql&logoColor=white)](https://pypi.org/project/psycopg2-binary/)
+[![python-dotenv](https://img.shields.io/badge/python--dotenv-1.2.2-ECD53F)](https://pypi.org/project/python-dotenv/)
+
+**Capa 2/3** — `mart/requirements.txt` (rangos, no versión fija)
+
+[![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.x-D71F00)](https://www.sqlalchemy.org/)
+[![psycopg](https://img.shields.io/badge/psycopg%5Bbinary%5D-3.x-336791?logo=postgresql&logoColor=white)](https://www.psycopg.org/psycopg3/)
+[![python-dotenv](https://img.shields.io/badge/python--dotenv-1.x-ECD53F)](https://pypi.org/project/python-dotenv/)
+
+> Rangos exactos: `SQLAlchemy>=2.0,<3`, `psycopg[binary]>=3.2,<4`, `python-dotenv>=1.0,<2`.
+
+**Dashboard** — `dashboard/requirements.txt`
+
+[![Dash](https://img.shields.io/badge/Dash-4.4.1-008DE4?logo=plotly&logoColor=white)](https://dash.plotly.com/)
+[![dash-ag-grid](https://img.shields.io/badge/dash--ag--grid-35.3.0-1D1D1D)](https://github.com/plotly/dash-ag-grid)
+[![pandas](https://img.shields.io/badge/pandas-3.0.5-150458?logo=pandas&logoColor=white)](https://pandas.pydata.org/)
+[![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0.51-D71F00)](https://www.sqlalchemy.org/)
+[![psycopg](https://img.shields.io/badge/psycopg%5Bbinary%5D-3.3.4-336791?logo=postgresql&logoColor=white)](https://www.psycopg.org/psycopg3/)
+[![python-dotenv](https://img.shields.io/badge/python--dotenv-1.2.2-ECD53F)](https://pypi.org/project/python-dotenv/)
+[![Flask-Caching](https://img.shields.io/badge/Flask--Caching-2.4.1-000000?logo=flask&logoColor=white)](https://flask-caching.readthedocs.io/)
+[![Flask-Login](https://img.shields.io/badge/Flask--Login-0.6.3-000000?logo=flask&logoColor=white)](https://flask-login.readthedocs.io/)
+[![bcrypt](https://img.shields.io/badge/bcrypt-5.0.0-4B8BBE)](https://pypi.org/project/bcrypt/)
+[![gunicorn](https://img.shields.io/badge/gunicorn-26.0.0-499848?logo=gunicorn&logoColor=white)](https://gunicorn.org/)
 
 ---
 
@@ -57,8 +95,9 @@ Desarrollado por la **Dirección de Mercados — ARCOTEL**.
   relleno — sin mezclar nunca ambos conceptos en un dashboard de decisión regulatoria.
 - Calcula **IHH, CR2, CR4 y participación de mercado exclusivamente sobre datos reportados** — nunca sobre datos
   imputados —, publicando siempre un indicador de cobertura junto al índice.
-- Publica un **dashboard web** (Dash + PostgreSQL) con autenticación propia, para que la Dirección de Mercados analice
-  evolución del mercado, cumplimiento de reporte y concentración, sin depender de Power BI para el día a día.
+- Publica un **dashboard web** (Dash + PostgreSQL) con autenticación propia — OBTEL — para que la Dirección de Mercados
+  analice evolución del mercado, cumplimiento de reporte y concentración, como insumo tanto para el análisis de mercado
+  como para el control y la regulación del sector, sin depender de Power BI para el día a día.
 
 ## Por qué existe
 

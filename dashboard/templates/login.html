@@ -2,75 +2,361 @@
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <title>Ingreso — Dashboard SIETEL</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, shrink-to-fit=no">
+    <title>Ingreso — OBTEL</title>
     <style>
-        body {
+        *, *::before, *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        :root {
+            --brand-primary: #0b1f33;
+            --brand-dark: #071426;
+            --brand-light: #e6edf5;
+            --brand-teal: #0f6e56;
+            --brand-teal-bg: #e1f5ee;
+
+            --surface: #ffffff;
+            --surface-2: #f7f8fa;
+            --surface-3: #f0f2f5;
+            --border: rgba(0, 0, 0, 0.10);
+            --border-med: rgba(0, 0, 0, 0.18);
+
+            --text-primary: #111827;
+            --text-secondary: #4b5563;
+            --text-muted: #9ca3af;
+
+            --radius-sm: 6px;
+            --radius-md: 10px;
+            --radius-lg: 14px;
+
+            --shadow-md: 0 4px 12px rgba(0, 0, 0, .10);
+        }
+
+        html, body {
+            height: 100%;
             font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
-            background: #0f1b2d;
+            font-size: 15px;
+            line-height: 1.6;
+            color: var(--text-primary);
+            background-color: var(--surface-3);
+        }
+
+        .login-layout {
+            min-height: 100vh;
+            display: flex;
+        }
+
+        /* ── Sidebar izquierdo con identidad institucional ── */
+        .login-sidebar {
+            width: 380px;
+            flex-shrink: 0;
+            background: linear-gradient(160deg, var(--brand-primary) 0%, var(--brand-dark) 100%);
+            display: flex;
+            flex-direction: column;
+            padding: 52px 40px;
+        }
+
+        .login-sidebar-logo {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            margin-bottom: 44px;
+        }
+
+        .login-logo-mark {
+            width: 48px;
+            height: 48px;
+            background: rgba(255, 255, 255, .15);
+            border-radius: var(--radius-md);
             display: flex;
             align-items: center;
             justify-content: center;
-            height: 100vh;
-            margin: 0;
+            font-size: 18px;
+            font-weight: 800;
+            color: #fff;
+            flex-shrink: 0;
         }
-        .card {
-            background: #ffffff;
-            border-radius: 10px;
-            padding: 2.5rem 2.5rem 2rem;
-            width: 100%;
-            max-width: 360px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+
+        .login-logo-text-name {
+            font-size: 18px;
+            font-weight: 700;
+            color: #fff;
+            letter-spacing: -.01em;
         }
-        .brand { font-weight: 700; font-size: 1.1rem; color: #0f1b2d; }
-        .subtitle { color: #6b7280; font-size: 0.85rem; margin-bottom: 1.5rem; }
-        label { display: block; font-size: 0.85rem; margin-bottom: 0.25rem; color: #374151; }
-        input {
-            width: 100%;
-            padding: 0.6rem 0.7rem;
-            margin-bottom: 1rem;
-            border: 1px solid #d1d5db;
-            border-radius: 6px;
-            box-sizing: border-box;
-            font-size: 0.95rem;
+
+        .login-logo-text-sub {
+            font-size: 11px;
+            color: rgba(255, 255, 255, .55);
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            margin-top: 1px;
         }
-        button {
+
+        .login-sidebar-desc {
+            font-size: 14px;
+            color: rgba(255, 255, 255, .72);
+            line-height: 1.75;
+            margin-bottom: 36px;
+        }
+
+        .login-sidebar-divider {
+            height: 1px;
+            background: rgba(255, 255, 255, .12);
+            margin: 0 0 28px;
+        }
+
+        .login-feature {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            margin-bottom: 18px;
+        }
+
+        .login-feature-icon {
+            font-size: 16px;
+            color: rgba(255, 255, 255, .6);
+            margin-top: 1px;
+            flex-shrink: 0;
+            width: 20px;
+            text-align: center;
+        }
+
+        .login-feature-text {
+            font-size: 13px;
+            color: rgba(255, 255, 255, .68);
+            line-height: 1.55;
+        }
+
+        .login-sidebar-footer {
+            margin-top: auto;
+            font-size: 11px;
+            color: rgba(255, 255, 255, .35);
+            line-height: 1.65;
+        }
+
+        /* ── Panel de login ── */
+        .login-main {
+            flex: 1;
+            background: var(--surface-3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px 24px;
+        }
+
+        .login-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 40px;
             width: 100%;
-            padding: 0.65rem;
-            background: #0f1b2d;
-            color: white;
+            max-width: 420px;
+            box-shadow: var(--shadow-md);
+        }
+
+        .login-card-headline {
+            font-size: 22px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 6px;
+            letter-spacing: -.01em;
+        }
+
+        .login-card-sub {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-bottom: 32px;
+        }
+
+        label {
+            display: block;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
+
+        input[type="text"], input[type="password"] {
+            width: 100%;
+            height: 42px;
+            border: 1px solid var(--border-med);
+            border-radius: var(--radius-sm);
+            padding: 0 14px;
+            font-size: 14px;
+            font-family: inherit;
+            color: var(--text-primary);
+            background: var(--surface-2);
+            transition: border-color .15s, box-shadow .15s;
+            outline: none;
+            margin-bottom: 18px;
+        }
+
+        input[type="text"]:focus, input[type="password"]:focus {
+            border-color: var(--brand-primary);
+            box-shadow: 0 0 0 3px rgba(11, 31, 51, .1);
+            background: var(--surface);
+        }
+
+        .field-group {
+            margin-bottom: 18px;
+        }
+
+        .field-group.password {
+            margin-bottom: 24px;
+        }
+
+        .field-group input {
+            margin-bottom: 0;
+        }
+
+        button[type="submit"] {
+            width: 100%;
+            height: 44px;
+            background: var(--brand-primary);
+            color: #fff;
             border: none;
-            border-radius: 6px;
-            font-size: 0.95rem;
+            border-radius: var(--radius-sm);
+            font-size: 14px;
+            font-weight: 600;
+            font-family: inherit;
             cursor: pointer;
+            transition: background .15s;
+            margin-top: 8px;
         }
-        button:hover { background: #1c3050; }
+
+        button[type="submit"]:hover {
+            background: var(--brand-dark);
+        }
+
         .error {
             background: #fef2f2;
+            border: 1px solid #fecaca;
+            border-radius: var(--radius-sm);
             color: #b91c1c;
-            padding: 0.6rem 0.8rem;
-            border-radius: 6px;
-            font-size: 0.85rem;
-            margin-bottom: 1rem;
+            font-size: 13px;
+            padding: 10px 14px;
+            margin-bottom: 18px;
+        }
+
+        .login-security-strip {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 10px 14px;
+            margin-top: 20px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .login-security-icon {
+            color: #15803d;
+            flex-shrink: 0;
+        }
+
+        .login-access-note {
+            font-size: 11px;
+            color: var(--text-muted);
+            text-align: center;
+            margin-top: 14px;
+            line-height: 1.55;
+        }
+
+        @media (max-width: 860px) {
+            .login-sidebar {
+                display: none;
+            }
         }
     </style>
 </head>
 <body>
-    <form class="card" method="POST" action="{{ url_for('auth.login') }}">
-        <div class="brand">SIETEL Analítico</div>
-        <div class="subtitle">Dirección de Mercados — ARCOTEL</div>
 
-        {% if error %}
-        <div class="error">{{ error }}</div>
-        {% endif %}
+<div class="login-layout">
 
-        <label for="username">Usuario</label>
-        <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+    <!-- Sidebar izquierdo con identidad institucional -->
+    <aside class="login-sidebar" aria-label="Información del sistema">
+        <div class="login-sidebar-logo">
+            <div class="login-logo-mark" aria-hidden="true">OB</div>
+            <div>
+                <div class="login-logo-text-name">OBTEL</div>
+                <div class="login-logo-text-sub">ARCOTEL &middot; Ecuador</div>
+            </div>
+        </div>
 
-        <label for="password">Contraseña</label>
-        <input type="password" id="password" name="password" autocomplete="current-password" required>
+        <p class="login-sidebar-desc">
+            Observatorio de Telecomunicaciones — sistema de visualización y análisis de datos
+            para el mercado, el control y la regulación del sector de telecomunicaciones.
+        </p>
 
-        <button type="submit">Ingresar</button>
-    </form>
+        <div class="login-sidebar-divider"></div>
+
+        <div class="login-feature">
+            <span class="login-feature-icon" aria-hidden="true">&#9679;</span>
+            <span class="login-feature-text">
+                Evolución del mercado con datos exclusivamente reportados — sin relleno interior mostrado como si fuera real
+            </span>
+        </div>
+        <div class="login-feature">
+            <span class="login-feature-icon" aria-hidden="true">&#9679;</span>
+            <span class="login-feature-text">
+                Índice de concentración (IHH), CR2/CR4 y participación de mercado, con cobertura de reporte siempre visible
+            </span>
+        </div>
+        <div class="login-feature">
+            <span class="login-feature-icon" aria-hidden="true">&#9679;</span>
+            <span class="login-feature-text">
+                Cumplimiento de reporte por prestador, para control y seguimiento regulatorio
+            </span>
+        </div>
+
+        <footer class="login-sidebar-footer">
+            Uso exclusivo del personal autorizado de ARCOTEL.<br>
+            Toda actividad queda registrada por el sistema.<br><br>
+            &copy; 2026 ARCOTEL. Todos los derechos reservados.
+        </footer>
+    </aside>
+
+    <!-- Panel de login -->
+    <main class="login-main" aria-label="Formulario de inicio de sesión">
+        <div class="login-card">
+            <h1 class="login-card-headline">Iniciar sesión</h1>
+            <p class="login-card-sub">Ingresa tus credenciales institucionales para continuar</p>
+
+            {% if error %}
+            <div class="error" role="alert">{{ error }}</div>
+            {% endif %}
+
+            <form method="POST" action="{{ url_for('auth.login') }}">
+                <div class="field-group">
+                    <label for="username">Usuario</label>
+                    <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+                </div>
+
+                <div class="field-group password">
+                    <label for="password">Contraseña</label>
+                    <input type="password" id="password" name="password" autocomplete="current-password" required>
+                </div>
+
+                <button type="submit">Iniciar sesión</button>
+            </form>
+
+            <div class="login-security-strip">
+                <span class="login-security-icon" aria-hidden="true">&#10003;</span>
+                <span>Acceso restringido &middot; Sesión protegida</span>
+            </div>
+
+            <p class="login-access-note">
+                Acceso restringido a personal autorizado de ARCOTEL.<br>
+                Toda actividad es registrada por la plataforma.
+            </p>
+        </div>
+    </main>
+</div>
+
 </body>
 </html>

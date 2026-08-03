@@ -29,7 +29,7 @@ from services.queries import (
     get_provider_history,
 )
 
-register_page(__name__, path="/concentracion", name="IHH y participación", order=1)
+register_page(__name__, path="/sai/concentracion", name="IHH y participación", order=2)
 PREFIX = "con"
 
 
