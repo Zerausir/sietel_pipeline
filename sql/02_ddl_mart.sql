@@ -2285,6 +2285,36 @@ ANALYZE mart.fact_ihh_geografico;
 -- forma de saber dónde. Por eso esta vista NO tiene columna de
 -- geografía/territorio -- el consumo en el dashboard debe restringirse a
 -- nivel Nacional únicamente.
+--
+-- fuera_de_gracia / clasificacion_incumplimiento (agregado 05-ago-2026,
+-- promovido desde el EDA de líneas dedicadas -- secciones 9.4/9.6 del
+-- notebook, ver EDA_sietel_lineas_dedicadas.ipynb):
+--
+-- El campo `opera` hereda la misma codificación heredada inconsistente ya
+-- documentada en la sección 10 de las instrucciones del proyecto (mezcla
+-- SI/NO/- con categorías descriptivas: Nuevo, Opera Normalmente,
+-- Cancelación, Para Revocatoria, Opera Irregularmente, Otro Estado, "-").
+-- Contar los 285 prestadores de esta vista como "285 casos de
+-- incumplimiento" sin desagregar `opera` sobreestima el problema real --
+-- verificado con datos de producción (05-ago-2026): de los 285, solo 104
+-- son activo_sin_reportar (el número defendible de incumplimiento real),
+-- 125 son no_operativo (cancelados/revocados -- nunca llegaron a operar,
+-- universo administrativo distinto), y 56 quedan en zona_gris (estado
+-- ambiguo, requiere revisión caso por caso, nunca se fuerzan a una
+-- categoría por conveniencia estadística -- mismo principio que
+-- es_reportado/es_imputado en Capa 3).
+--
+-- fuera_de_gracia usa la misma regla del año de gracia que
+-- dashboard/services/queries.py:get_reporting_summary (un año calendario
+-- desde fechapermiso, no desde el otorgamiento) -- NULL si fechapermiso es
+-- NULL, para no asumir silenciosamente que un prestador sin fecha conocida
+-- ya está en incumplimiento.
+--
+-- Esta vista NO filtra por fuera_de_gracia ni por clasificacion_incumplimiento
+-- -- expone las 285 filas completas con las columnas calculadas, para que
+-- cada consumidor decida el corte (ej. WHERE fuera_de_gracia AND
+-- clasificacion_incumplimiento = 'activo_sin_reportar' para el número de
+-- 104 verificado en el EDA).
 CREATE VIEW mart.vw_prestadores_sin_reportar AS
 SELECT
     peva_codigo,
@@ -2293,7 +2323,16 @@ SELECT
     isp_tipopersona,
     opera,
     resolucion,
-    fechapermiso
+    fechapermiso,
+    CASE
+        WHEN fechapermiso IS NULL THEN NULL
+        ELSE CURRENT_DATE >= (fechapermiso + INTERVAL '1 year')
+    END AS fuera_de_gracia,
+    CASE
+        WHEN opera IN ('Nuevo', 'Opera Normalmente', 'SI') THEN 'activo_sin_reportar'
+        WHEN opera IN ('Cancelación', 'NO', 'Opera Irregularmente') THEN 'no_operativo'
+        ELSE 'zona_gris'
+    END AS clasificacion_incumplimiento
 FROM analitico.v_ultimo_periodo_reportado_detalle
 WHERE tiene_reportes = FALSE;
 
