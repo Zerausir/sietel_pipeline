@@ -1937,6 +1937,102 @@ CREATE INDEX idx_participacion_prestador
 -- ============================================================
 
 CREATE MATERIALIZED VIEW mart.fact_ihh_geografico AS
+-- ALERTA DE PRESTADOR DOMINANTE AUSENTE (agregado 05-ago-2026, EDA de
+-- líneas dedicadas -- sección 9.10). NO modifica el IHH/CR2/CR4 en
+-- absoluto -- es exclusivamente informativa, mismo principio que
+-- porcentaje_cobertura_prestadores: el índice se calcula igual que siempre
+-- (solo con lineas_reportadas de quien reportó ese mes), y esta bandera
+-- se agrega al lado para que nadie lo lea sin ese contexto.
+--
+-- Por qué hace falta además de porcentaje_cobertura_prestadores: esa
+-- columna ya existe pero trata a todos los prestadores por igual -- no
+-- distingue entre "faltaron 10 prestadores chicos" y "faltó el único
+-- prestador que domina ese territorio". Verificado con datos reales
+-- (CNT EP, 2012-2015): su ausencia hacía caer el IHH nacional de ~5.741 a
+-- ~1.840 en promedio (9.10/9.11) mientras la cobertura de prestadores
+-- seguía siendo ALTA (98.28%) -- es decir, el % de cobertura por sí solo
+-- no habría alertado de nada en esos meses.
+--
+-- "Dominante" se define de forma objetiva y verificable con los propios
+-- datos, no con un umbral inventado para este caso: cualquier prestador
+-- que en ALGÚN período de su historia haya alcanzado >=30% de
+-- participación real en ESE territorio específico (umbral estándar de
+-- posición dominante en derecho de competencia). Es específico por
+-- territorio, no solo nacional -- un prestador puede ser dominante en una
+-- provincia pequeña sin serlo a nivel país (ver 9.13, dependencia de
+-- provincias periféricas de CNT).
+WITH
+-- ACOTADO SOLO A NACIONAL (segunda corrección de alcance, 05-ago-2026):
+-- se intentó primero acotar a NACIONAL + PROVINCIA, pero verificado en
+-- producción que el nivel PROVINCIA tiene el MISMO problema que
+-- cantón/parroquia, solo a otra escala -- prestadores chicos (ej.
+-- TRANSTELCO S.A., con 388 meses marcados, más que los 292 de CNT)
+-- superan 30% en provincias con pocos competidores y luego salen del
+-- mercado para siempre, quedando marcados "ausente" perpetuamente. No es
+-- rotación normal a nivel cantón/parroquia únicamente -- ocurre igual a
+-- nivel provincia. El único caso que los hallazgos originales (9.10/9.11)
+-- documentaron y cuantificaron con evidencia real es CNT a nivel NACIONAL
+-- -- por eso la Parte A se acota estrictamente ahí. Detectar dominancia
+-- provincial genuina (distinta de rotación de mercado) requeriría un
+-- diseño más cuidadoso (ej. límite de tiempo a la alerta tras la salida,
+-- o un piso de tamaño absoluto de mercado, no solo porcentaje) -- fuera
+-- de alcance de este cambio puntual.
+umbral_dominancia AS (
+    SELECT DISTINCT territorio_id, prestador_id
+    FROM mart.fact_participacion_mercado
+    WHERE participacion_porcentaje >= 30
+      AND territorio_id = 'NACIONAL|ECUADOR'
+),
+periodos_territorios AS (
+    SELECT DISTINCT periodo_id, territorio_id
+    FROM mart.fact_participacion_mercado
+    WHERE territorio_id = 'NACIONAL|ECUADOR'
+),
+dominante_x_periodo AS (
+    -- CORRECCIÓN (05-ago-2026, verificado en producción antes de comprometer
+    -- el cambio): sin el filtro de dp.primer_periodo_reportado, un prestador
+    -- que alcanzó >=30% de participación en cualquier momento de su
+    -- historia (ej. CONECEL, MEGADATOS -- ambos entraron recién en
+    -- 2020/2021) aparecía marcado como "ausente" en períodos ANTERIORES a
+    -- su propia existencia en el sistema (ej. 2012-2013) -- falso positivo
+    -- semántico: no estaban ausentes, todavía no operaban en este segmento.
+    -- Mismo principio ya aplicado como año de gracia en
+    -- vw_prestadores_sin_reportar -- no juzgar a un prestador por un
+    -- período en que no tenía presencia/obligación todavía.
+    SELECT
+        pt.periodo_id,
+        ud.territorio_id,
+        ud.prestador_id,
+        EXISTS (
+            SELECT 1 FROM mart.fact_participacion_mercado fpm
+            WHERE fpm.periodo_id = pt.periodo_id
+              AND fpm.territorio_id = ud.territorio_id
+              AND fpm.prestador_id = ud.prestador_id
+              AND fpm.tiene_reportado
+        ) AS reporto_este_periodo
+    FROM umbral_dominancia ud
+    JOIN periodos_territorios pt ON pt.territorio_id = ud.territorio_id
+    JOIN mart.dim_prestador dp ON dp.prestador_id = ud.prestador_id
+    WHERE dp.primer_periodo_reportado IS NOT NULL
+      AND pt.periodo_id >= (
+            EXTRACT(YEAR FROM dp.primer_periodo_reportado)::int * 100
+            + EXTRACT(MONTH FROM dp.primer_periodo_reportado)::int
+          )
+),
+alerta_dominante_ausente AS (
+    SELECT
+        dxp.periodo_id,
+        dxp.territorio_id,
+        BOOL_OR(NOT dxp.reporto_este_periodo) AS prestador_dominante_ausente,
+        STRING_AGG(
+            DISTINCT p.isp_nombre, ', ' ORDER BY p.isp_nombre
+        ) FILTER (WHERE NOT dxp.reporto_este_periodo)
+            AS prestadores_dominantes_ausentes_nombres
+    FROM dominante_x_periodo dxp
+    JOIN mart.dim_prestador p ON p.prestador_id = dxp.prestador_id
+    GROUP BY dxp.periodo_id, dxp.territorio_id
+),
+agregado_base AS (
 SELECT
     periodo_id,
     territorio_id,
@@ -2018,7 +2114,16 @@ SELECT
 FROM mart.fact_participacion_mercado
 GROUP BY
     periodo_id,
-    territorio_id;
+    territorio_id
+)
+SELECT
+    b.*,
+    COALESCE(a.prestador_dominante_ausente, FALSE) AS prestador_dominante_ausente,
+    a.prestadores_dominantes_ausentes_nombres
+FROM agregado_base b
+LEFT JOIN alerta_dominante_ausente a
+  ON a.periodo_id = b.periodo_id
+ AND a.territorio_id = b.territorio_id;
 
 CREATE UNIQUE INDEX uq_fact_ihh_geografico
     ON mart.fact_ihh_geografico (
@@ -2207,7 +2312,9 @@ SELECT
     f.numero_prestadores_imputados,
     f.numero_prestadores_reportaron,
     f.numero_prestadores_registrados,
-    f.porcentaje_cobertura_prestadores
+    f.porcentaje_cobertura_prestadores,
+    f.prestador_dominante_ausente,
+    f.prestadores_dominantes_ausentes_nombres
 FROM mart.fact_ihh_geografico f
 JOIN mart.dim_periodo d
   ON d.periodo_id = f.periodo_id
