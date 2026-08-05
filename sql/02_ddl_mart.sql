@@ -2336,6 +2336,84 @@ SELECT
 FROM analitico.v_ultimo_periodo_reportado_detalle
 WHERE tiene_reportes = FALSE;
 
+-- vw_prestadores_reporte_detenido (agregado 05-ago-2026, promovido desde el
+-- EDA de líneas dedicadas -- secciones 9.11/9.12/9.13 del notebook, ver
+-- EDA_sietel_lineas_dedicadas.ipynb).
+--
+-- Complemento de vw_prestadores_sin_reportar: mientras esa vista cubre a
+-- quien JAMÁS reportó, esta cubre a quien SÍ reportó al menos una vez y
+-- luego se detuvo -- caso descubierto en el EDA al investigar por qué CNT
+-- EP (el operador estatal incumbente) no aparecía en el ranking de
+-- participación de sep-2025 pese a haber tenido hasta 90% de participación
+-- histórica. Resultó tener quince meses sin reportar (jul-2024 en
+-- adelante), sin cierre a la fecha del análisis -- ver 9.11.
+--
+-- DELIBERADAMENTE SIN FILTRO DE UMBRAL NI DE FECHA DE CORTE EN LA VISTA
+-- MISMA -- mismo principio que vw_prestadores_sin_reportar (que tampoco
+-- filtra por fuera_de_gracia). El EDA usó un corte de >100.000 líneas
+-- históricas para aislar la señal de ruido de prestadores pequeños, pero es
+-- un umbral arbitrario de ESE análisis puntual -- no debe quedar fijo en la
+-- vista para que otro consumo futuro (ej. alguien que sí quiera ver el
+-- universo completo, incluyendo prestadores chicos) no tenga que
+-- reconstruir la lógica desde cero. La vista expone TODOS los prestadores
+-- con al menos un reporte real, con las columnas de magnitud y antigüedad
+-- ya calculadas, para que cada consumidor decida su propio corte.
+--
+-- meses_desde_ultimo_reporte se calcula contra un PERÍODO DE REFERENCIA
+-- CONFIABLE, no contra MAX(periodo) crudo -- corrección agregada 05-ago-2026
+-- tras verificar en producción que usar MAX(periodo) sin ajuste produce
+-- falsos positivos: cuando sietel_mart_pipeline avanza y carga meses nuevos,
+-- los últimos ~3 meses todavía están incompletos por rezago normal de
+-- reporte (mismo fenómeno ya documentado en 9.7 -- construir_capa2.py solo
+-- rellena huecos interiores, así que el borde de la ventana no tiene
+-- "futuro" contra el cual anclar el LOCF). Confirmado con datos reales
+-- (05-ago-2026): al cargar hasta dic-2025, 13 prestadores con último
+-- reporte real en sep-2025 (exactamente 3 meses de rezago) aparecían como
+-- "detenidos" cuando en realidad solo estaban esperando su próximo reporte
+-- normal -- excluir ese margen reprodujo exactamente el universo de 18
+-- verificado en el EDA original (31 - 13 = 18).
+--
+-- MARGEN_REZAGO_MESES = 3 es un valor fijo, no derivado dinámicamente de los
+-- datos -- basado en la observación empírica de la sección 4/9.7 del EDA. Si
+-- el patrón de rezago de carga cambia (ej. el pipeline empieza a cargar con
+-- más o menos demora), este número debe reconsiderarse -- no es una
+-- constante física, es una convención operativa de este pipeline.
+CREATE VIEW mart.vw_prestadores_reporte_detenido AS
+WITH periodo_confiable AS (
+    SELECT (MAX(periodo) - INTERVAL '3 months')::date AS periodo
+    FROM mart.fact_lineas_geografia_mes
+)
+SELECT
+    p.prestador_id,
+    p.isp_nombre,
+    p.ruc_limpio,
+    p.opera_actual,
+    p.es_cancelado_actual,
+    p.primer_periodo_reportado,
+    p.ultimo_periodo_reportado,
+    COALESCE(ultimo.lineas_reportadas, 0) AS lineas_ultimo_reporte,
+    COALESCE(historico.total_lineas_historico, 0) AS total_lineas_historico,
+    (
+        EXTRACT(YEAR FROM pc.periodo)::int * 12 + EXTRACT(MONTH FROM pc.periodo)::int
+    ) - (
+        EXTRACT(YEAR FROM p.ultimo_periodo_reportado)::int * 12
+        + EXTRACT(MONTH FROM p.ultimo_periodo_reportado)::int
+    ) AS meses_desde_ultimo_reporte
+FROM mart.dim_prestador p
+CROSS JOIN periodo_confiable pc
+LEFT JOIN LATERAL (
+    SELECT SUM(f.lineas_reportadas) AS lineas_reportadas
+    FROM mart.fact_lineas_geografia_mes f
+    WHERE f.prestador_id = p.prestador_id
+      AND f.periodo = p.ultimo_periodo_reportado
+) ultimo ON TRUE
+LEFT JOIN LATERAL (
+    SELECT SUM(f.lineas_reportadas) AS total_lineas_historico
+    FROM mart.fact_lineas_geografia_mes f
+    WHERE f.prestador_id = p.prestador_id
+) historico ON TRUE
+WHERE p.primer_periodo_reportado IS NOT NULL;
+
 -- ============================================================
 -- 18. RE-OTORGAR ACCESO A dashboard_lector -- sobrevive a la reconstrucción
 -- ============================================================
