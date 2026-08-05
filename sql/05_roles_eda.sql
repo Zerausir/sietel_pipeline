@@ -45,6 +45,23 @@ ALTER DEFAULT PRIVILEGES FOR ROLE mart_user IN SCHEMA mart
 -- mart/aplicar_capa3.py deja a eda_lector sin acceso hasta la próxima vez
 -- que se corra este archivo a mano.
 
+-- Solo lectura sobre calidad.* también -- el EDA necesita cruzar conflictos
+-- RUC/PEVA (calidad.conflictos_ruc_peva) contra mart, porque afectan
+-- directamente qué cuenta como una sola "identidad" de prestador para
+-- cualquier análisis o feature de ML. Mismo alcance de lectura que
+-- calidad_lector, pero como rol separado (no se reutiliza calidad_lector
+-- para no mezclar el consumidor "futuro dashboard de consistencia" con el
+-- consumidor "EDA/ML exploratorio").
+-- NOTA: agregado después de la primera aplicación de este archivo en VM1
+-- (03-ago-2026) -- la primera versión solo cubría mart y causó
+-- InsufficientPrivilege al consultar calidad.conflictos_ruc_peva desde el
+-- notebook de EDA. Si este archivo ya se corrió antes sin este bloque,
+-- correrlo de nuevo es seguro (todas las sentencias son idempotentes).
+GRANT USAGE ON SCHEMA calidad TO eda_lector;
+GRANT SELECT ON ALL TABLES IN SCHEMA calidad TO eda_lector;
+ALTER DEFAULT PRIVILEGES FOR ROLE mart_user IN SCHEMA calidad
+    GRANT SELECT ON TABLES TO eda_lector;
+
 -- Límite de tiempo por sesión, deliberado: un notebook de EDA puede quedar
 -- una conexión abierta más tiempo del que Airflow/el dashboard necesitan.
 -- 30 minutos es suficiente para una consulta pesada puntual sin arriesgar
