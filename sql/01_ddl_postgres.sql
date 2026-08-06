@@ -217,7 +217,30 @@ COMMENT ON VIEW analitico.v_lineas_dedicadas_resumen IS
 'Vista de consumo del módulo Usuarios y Cuentas de Internet Fijo. lineas_dl/ul_* cuentan LÍNEAS (COUNT), no usuarios -- para usuarios finales usar total_usuarios. codigo_provincia/codigo_ciudad/codigo_parroquia son para cruce con INEC. Recreada con DROP VIEW + CREATE VIEW para poder reordenar columnas libremente.';
 
 -- 6. VISTA — analitico.v_ultimo_periodo_reportado_detalle
-DROP VIEW IF EXISTS analitico.v_ultimo_periodo_reportado_detalle;
+--
+-- CASCADE agregado 06-ago-2026: mart.vw_prestadores_sin_reportar (KPI
+-- "prestadores que nunca han reportado" del dashboard) depende de esta
+-- vista -- FK_VAPorcenRecCapaci... no, esto no es SQL Server, es la propia
+-- vista de mart -- ver sql/02_ddl_mart.sql linea ~2288, unica dependencia
+-- cruzada confirmada de mart hacia analitico (grep sobre todo el archivo).
+-- Sin CASCADE, aplicar_esquema.py falla con DependentObjectsStillExist en
+-- CUALQUIER corrida de Capa 1 posterior a que Capa 2/3 haya construido
+-- mart -- confirmado en produccion 06-ago-2026 al ejecutar aplicar_esquema
+-- por primera vez desde que mart.vw_prestadores_sin_reportar existe.
+--
+-- EFECTO SECUNDARIO IMPORTANTE, operativo, no solo de este archivo:
+-- CASCADE elimina mart.vw_prestadores_sin_reportar junto con esta vista.
+-- aplicar_esquema.py (Capa 1) NO reconstruye mart -- eso es exclusivo de
+-- aplicar_capa3.py (Capa 2/3, DAG sietel_mart_pipeline). Es decir: toda
+-- corrida de Capa 1 que llegue a este DROP deja el KPI "prestadores sin
+-- reportar" del dashboard roto hasta que alguien dispare manualmente
+-- sietel_mart_pipeline despues. Esto NO esta resuelto todavia a nivel de
+-- orquestacion (ver conversacion 06-ago-2026) -- pendiente decidir entre:
+-- (a) paso de runbook manual "correr mart_pipeline despues de Capa 1",
+-- (b) TriggerDagRunOperator al final de sietel_usuarios_cuentas_pipeline,
+-- (c) que aplicar_esquema.py solo haga DROP+CREATE cuando la definicion
+-- de la vista realmente cambio, no en cada corrida.
+DROP VIEW IF EXISTS analitico.v_ultimo_periodo_reportado_detalle CASCADE;
 
 CREATE VIEW analitico.v_ultimo_periodo_reportado_detalle AS
 WITH ultimo AS (
