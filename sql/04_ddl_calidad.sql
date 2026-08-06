@@ -159,3 +159,79 @@ GRANT UPDATE (estado_revision, revisado_por, notas_revision, fecha_revision)
     ON calidad.conflictos_ruc_peva TO calidad_revisor;
 ALTER DEFAULT PRIVILEGES FOR ROLE mart_user IN SCHEMA calidad
     GRANT SELECT ON TABLES TO calidad_revisor;
+
+-- ============================================================================
+-- DISCREPANCIAS DE GEOGRAFÍA DE NODO ISP -- 06-ago-2026
+-- ============================================================================
+-- Mismo patrón de workflow persistente que calidad.conflictos_ruc_peva (ver
+-- comentario al inicio del archivo) -- la única diferencia estructural es la
+-- llave natural: una fila por NODO (noisp_codigo), no por par de PEVA.
+--
+-- Alcance deliberadamente ACOTADO: esta tabla solo registra nodos donde el
+-- cruce espacial SÍ pudo calcularse (coordenada válida) pero la parroquia
+-- derivada de la coordenada no coincide con la parroquia reportada en
+-- SIETEL. Los nodos con coordenada inválida/no convertible (ver
+-- capa2.nodo_isp_geocodificado.es_coordenada_valida) son un problema
+-- distinto -- "no sé dónde está" vs. "sé dónde está y no coincide" -- y no
+-- se mezclan en la misma cola de revisión humana.
+--
+-- Poblada por mart/detectar_discrepancias_geografia_nodo.py (Parte B del
+-- geoprocesamiento de nodos ISP, pendiente del shapefile CONALI
+-- ORGANIZACION_TERRITORIAL_PARROQUIAL -- ver conversación 06-ago-2026).
+CREATE TABLE IF NOT EXISTS calidad.discrepancias_geografia_nodo (
+    id                          BIGSERIAL PRIMARY KEY,
+
+    noisp_codigo                VARCHAR(50) NOT NULL UNIQUE,
+    peva_codigo                 VARCHAR(50) NOT NULL,
+
+    -- Snapshot informativo, actualizado en cada corrida -- no es workflow.
+    isp_nombre                  TEXT,
+    noisp_nombre                VARCHAR(50),
+    tiponodo                     VARCHAR(50),
+    latitud_decimal              DOUBLE PRECISION NOT NULL,
+    longitud_decimal             DOUBLE PRECISION NOT NULL,
+
+    -- Geografía REPORTADA en SIETEL (dbo.NodoISP.par_codigo -> dbo.Parroquia).
+    par_codigo_reportado         VARCHAR(50),
+    parroquia_reportada_nombre   VARCHAR(100),
+    canton_reportado_nombre      VARCHAR(50),
+    provincia_reportada_nombre   VARCHAR(50),
+
+    -- Geografía DERIVADA de la coordenada (shapefile CONALI, punto-en-polígono).
+    codigo_parroquia_derivado    VARCHAR(50) NOT NULL,
+    parroquia_derivada_nombre    VARCHAR(100) NOT NULL,
+    codigo_canton_derivado       VARCHAR(50) NOT NULL,
+    canton_derivado_nombre       VARCHAR(100) NOT NULL,
+    codigo_provincia_derivado    VARCHAR(50) NOT NULL,
+    provincia_derivada_nombre    VARCHAR(100) NOT NULL,
+
+    -- ── Workflow humano -- NUNCA se sobreescribe en corridas posteriores ──
+    estado_revision              VARCHAR(30) NOT NULL DEFAULT 'PENDIENTE'
+        CHECK (estado_revision IN (
+            'PENDIENTE', 'CONFIRMADO_DISCREPANCIA', 'DESCARTADO_MANUAL'
+        )),
+    revisado_por                 VARCHAR(100),
+    notas_revision                TEXT,
+    fecha_revision                TIMESTAMP,
+
+    fecha_deteccion               TIMESTAMP NOT NULL DEFAULT now(),
+    fecha_ultima_deteccion        TIMESTAMP NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE calidad.discrepancias_geografia_nodo IS
+'Nodos ISP donde la parroquia derivada de latitud/longitud (shapefile CONALI, punto-en-poligono) no coincide con la parroquia reportada en SIETEL. Recalculado en cada refresco via UPSERT (mart/detectar_discrepancias_geografia_nodo.py, Parte B, pendiente del shapefile) -- columnas de workflow preservadas entre corridas, igual que calidad.conflictos_ruc_peva. No incluye nodos con coordenada invalida (ver capa2.nodo_isp_geocodificado.es_coordenada_valida) -- causa raiz distinta.';
+
+CREATE INDEX IF NOT EXISTS ix_discrepancias_geografia_nodo_estado
+    ON calidad.discrepancias_geografia_nodo (estado_revision);
+
+CREATE INDEX IF NOT EXISTS ix_discrepancias_geografia_nodo_peva
+    ON calidad.discrepancias_geografia_nodo (peva_codigo);
+
+-- Mismo patrón de permisos que conflictos_ruc_peva: calidad_lector ve todo
+-- (ya cubierto por el ALTER DEFAULT PRIVILEGES general de arriba, que
+-- aplica a CUALQUIER tabla futura de mart_user en el esquema calidad).
+-- calidad_revisor necesita el UPDATE de columnas explícito de nuevo aquí --
+-- a diferencia de SELECT, un privilegio a nivel de columna NO se hereda vía
+-- ALTER DEFAULT PRIVILEGES a una tabla nueva.
+GRANT UPDATE (estado_revision, revisado_por, notas_revision, fecha_revision)
+    ON calidad.discrepancias_geografia_nodo TO calidad_revisor;
