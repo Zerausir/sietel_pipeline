@@ -31,6 +31,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -82,12 +83,12 @@ _SENTENCIAS_DDL = [
     "CREATE SCHEMA IF NOT EXISTS capa2;",
     """
     CREATE TABLE IF NOT EXISTS capa2.parroquias_geometria (
-        codigo_parroquia    VARCHAR(6)  PRIMARY KEY,
-        nombre_parroquia    VARCHAR(100) NOT NULL,
-        codigo_canton       VARCHAR(4)  NOT NULL,
-        nombre_canton       VARCHAR(100) NOT NULL,
-        codigo_provincia    VARCHAR(2)  NOT NULL,
-        nombre_provincia    VARCHAR(100) NOT NULL,
+        codigo_parroquia    VARCHAR(20) PRIMARY KEY,
+        nombre_parroquia    VARCHAR(150) NOT NULL,
+        codigo_canton       VARCHAR(20) NOT NULL,
+        nombre_canton       VARCHAR(150) NOT NULL,
+        codigo_provincia    VARCHAR(20) NOT NULL,
+        nombre_provincia    VARCHAR(150) NOT NULL,
         anio_corte          VARCHAR(4),
         geometria_geojson   JSONB NOT NULL,
         fuente              VARCHAR(100) NOT NULL DEFAULT 'CONALI',
@@ -98,9 +99,44 @@ _SENTENCIAS_DDL = [
     "CREATE INDEX IF NOT EXISTS ix_parroquias_geometria_provincia ON capa2.parroquias_geometria (codigo_provincia);",
     """
     COMMENT ON TABLE capa2.parroquias_geometria IS
-    'Geometrías de parroquias de Ecuador, fuente CONALI (ver mart/data/shapefiles/parroquial/README.md para el detalle y la fecha de corte). Cargada una sola vez por mart/cargar_parroquias.py (idempotente) -- no se recarga en cada refresco de mart. Consumida por mart/detectar_discrepancias_geografia_nodo.py via shapely + STRtree, sin geopandas en tiempo de cruce.';
+    'Geometrías de parroquias de Ecuador, fuente CONALI (ver mart/data/shapefiles/parroquial/README.md para el detalle y la fecha de corte). Cargada una sola vez por mart/cargar_parroquias.py (idempotente) -- no se recarga en cada refresco de mart. Códigos VARCHAR(20), no numéricos de ancho fijo: CONALI incluye zonas especiales (en disputa/en estudio, insulares) con texto en vez de código INEC de 2/4/6 dígitos -- ver log de la carga para el listado de códigos no estándar detectados. Consumida por mart/detectar_discrepancias_geografia_nodo.py via shapely + STRtree, sin geopandas en tiempo de cruce.';
     """,
 ]
+
+_PATRON_PROVINCIA = re.compile(r"^\d{2}$")
+_PATRON_CANTON = re.compile(r"^\d{4}$")
+_PATRON_PARROQUIA = re.compile(r"^\d{6}$")
+
+
+def _reportar_codigos_no_estandar(gdf) -> None:
+    """
+    Reporta (no excluye) parroquias cuyo código no sigue el patrón INEC
+    esperado (provincia 2 dígitos, cantón 4, parroquia 6) -- CONALI incluye
+    zonas especiales (ej. 'ISLA', '900651 ZONA EN ESTUDIO...') que no
+    encajan en ese patrón. No se descartan: si un nodo cae dentro de una de
+    estas zonas, el cruce espacial (Parte B) lo va a marcar como
+    discrepancia frente a cualquier par_codigo real reportado -- lo cual es
+    correcto, no un error del cruce -- pero conviene saber de antemano
+    cuántas y cuáles son estas zonas antes de interpretar esos resultados.
+    """
+    anomalos = gdf[
+        ~gdf["DPA_PROVIN"].astype(str).str.match(_PATRON_PROVINCIA)
+        | ~gdf["DPA_CANTON"].astype(str).str.match(_PATRON_CANTON)
+        | ~gdf["DPA_PARROQ"].astype(str).str.match(_PATRON_PARROQUIA)
+        ]
+    if anomalos.empty:
+        logger.info("Todos los códigos siguen el patrón INEC estándar (provincia 2 dígitos / cantón 4 / parroquia 6).")
+        return
+
+    logger.warning(
+        "%s parroquia(s) con código fuera del patrón INEC estándar -- se cargan igual, tal cual las reporta CONALI:",
+        len(anomalos),
+    )
+    for _, row in anomalos.iterrows():
+        logger.warning(
+            "  parroquia=%r canton=%r provincia=%r nombre_parroquia=%r",
+            row["DPA_PARROQ"], row["DPA_CANTON"], row["DPA_PROVIN"], row["DPA_DESPAR"],
+        )
 
 
 def _tabla_tiene_datos(engine) -> bool:
@@ -162,6 +198,8 @@ def cargar_parroquias(forzar: bool = False, dry_run: bool = False) -> None:
             len(invalidas), codigos_invalidos,
         )
         gdf = gdf[gdf.geometry.is_valid]
+
+    _reportar_codigos_no_estandar(gdf)
 
     registros = [
         {
