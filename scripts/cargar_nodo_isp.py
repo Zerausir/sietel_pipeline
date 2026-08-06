@@ -84,8 +84,24 @@ def _obtener_vigentes(pg_cursor, tabla, llave_natural):
 
 
 def _cambio_relevante(fila_origen: dict, fila_vigente: dict, columnas: list) -> bool:
+    """
+    Comparación insensible a mayúsculas/minúsculas en las CLAVES (no en los
+    valores). fila_origen viene de SQL Server (pyodbc preserva el case
+    exacto de la columna, ej. "tipoNodo"); fila_vigente viene de Postgres
+    (RealDictCursor devuelve las claves tal como Postgres las guarda -- y
+    Postgres pliega a minúsculas cualquier identificador sin comillas del
+    CREATE TABLE, ej. "tipoNodo" se guarda como "tiponodo"). Sin este
+    normalizado, fila_vigente.get("tipoNodo") siempre da None (la clave real
+    es "tiponodo"), y None != <valor real> dispara "cambio relevante" para
+    TODAS las filas, siempre -- confirmado en producción 07-ago-2026 con
+    dim_nodo_isp (8606 "cambios" que no eran reales) y con el mismo patrón
+    ya presente en COLUMNAS_VERSIONABLES_PERMISO de cargar_dimensiones.py
+    (nombreComercial/Resolucion).
+    """
+    origen_lower = {k.lower(): v for k, v in fila_origen.items()}
+    vigente_lower = {k.lower(): v for k, v in fila_vigente.items()}
     for col in columnas:
-        if fila_origen.get(col) != fila_vigente.get(col):
+        if origen_lower.get(col.lower()) != vigente_lower.get(col.lower()):
             return True
     return False
 

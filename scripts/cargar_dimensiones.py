@@ -57,8 +57,29 @@ def _obtener_vigentes(pg_cursor, tabla, llave_natural):
 
 
 def _cambio_relevante(fila_origen: dict, fila_vigente: dict, columnas: list) -> bool:
+    """
+    CORRECCIÓN 07-ago-2026: comparación insensible a mayúsculas/minúsculas
+    en las CLAVES. fila_origen (SQL Server, pyodbc) preserva el case exacto
+    de la columna (ej. "nombreComercial", "Resolucion"); fila_vigente
+    (Postgres, RealDictCursor) usa las claves tal como Postgres las guarda
+    -- y Postgres pliega a minúsculas cualquier identificador sin comillas
+    del CREATE TABLE. Sin este normalizado, fila_vigente.get("Resolucion")
+    siempre devolvía None (la clave real es "resolucion"), y None != <valor
+    real> disparaba "cambio relevante" para TODOS los PEVA en TODAS las
+    corridas -- es decir, cargar_dim_permiso_va_agregado() ha estado
+    abriendo una versión SCD2 nueva en cada corrida de Capa 1 para
+    prácticamente cada PEVA, sin que hubiera cambio real de
+    nombreComercial/Resolucion. Confirmado en producción al diagnosticar el
+    mismo patrón en cargar_nodo_isp.py (COLUMNAS_VERSIONABLES_PERMISO tiene
+    el mismo problema con "nombreComercial"/"Resolucion" en mayúscula
+    mixta). Pendiente evaluar el volumen de versiones espurias ya creadas en
+    staging.dim_permiso_va_agregado -- este fix solo corrige la carga hacia
+    adelante, no limpia el histórico ya contaminado.
+    """
+    origen_lower = {k.lower(): v for k, v in fila_origen.items()}
+    vigente_lower = {k.lower(): v for k, v in fila_vigente.items()}
     for col in columnas:
-        if fila_origen.get(col) != fila_vigente.get(col):
+        if origen_lower.get(col.lower()) != vigente_lower.get(col.lower()):
             return True
     return False
 
