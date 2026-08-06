@@ -277,6 +277,42 @@ COMMENT ON VIEW analitico.v_ultimo_periodo_reportado_detalle IS
 'Última entrega detallada por prestador vigente. tiene_reportes distingue prestadores sin reportes. opera refleja el estado de la última corrida de cargar_dimensiones.py. codigo_provincia/codigo_ciudad/codigo_parroquia son para cruce con INEC.';
 
 -- ============================================================================
+-- 6b. GRANT a mart_user sobre vistas de analitico -- 06-ago-2026
+-- ============================================================================
+-- DROP VIEW + CREATE VIEW (secciones 5 y 6, ambas incondicionales en cada
+-- corrida de aplicar_esquema.py) resetea los permisos de la vista a los del
+-- dueño (sietel_user) -- borra cualquier GRANT previo, incluido el que
+-- necesita mart_user para leerlas desde mart/detectar_conflictos_peva.py y
+-- mart/construir_capa2.py. Antes esto vivía solo como comentario/paso manual
+-- en sql/04_ddl_calidad.sql -- confirmado en producción 06-ago-2026 que se
+-- pierde en cualquier corrida de Capa 1 posterior al GRANT manual, no solo
+-- cuando hay CASCADE de por medio. Se integra aquí, en el propio DDL
+-- idempotente de Capa 1, para que no dependa de que alguien recuerde
+-- re-ejecutar un paso manual documentado en otro archivo.
+--
+-- Guardado con IF EXISTS sobre el rol: este archivo (01_ddl_postgres.sql)
+-- es el DDL de Capa 1 y debe poder aplicarse en un entorno donde Capa 2/3
+-- (mart_user) todavía no se haya aprovisionado.
+--
+-- GRANT explícito (cubre las vistas que existen HOY) + ALTER DEFAULT
+-- PRIVILEGES (cubre cualquier vista/tabla que sietel_user cree en analitico
+-- de aquí en adelante, sin depender de mantener esta lista actualizada a
+-- mano) -- mismo patrón que 03_ddl_auth.sql ya usa para dashboard_lector
+-- sobre el esquema mart. Sin el ALTER DEFAULT PRIVILEGES, agregar una
+-- vista nueva a este archivo en el futuro y olvidar añadirla a la lista de
+-- GRANT explícitos repetiría este mismo incidente (06-ago-2026).
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mart_user') THEN
+        GRANT USAGE ON SCHEMA analitico TO mart_user;
+        GRANT SELECT ON analitico.v_ultimo_periodo_reportado_detalle TO mart_user;
+        GRANT SELECT ON analitico.v_lineas_dedicadas_resumen TO mart_user;
+        ALTER DEFAULT PRIVILEGES FOR ROLE sietel_user IN SCHEMA analitico
+            GRANT SELECT ON TABLES TO mart_user;
+    END IF;
+END $$;
+
+-- ============================================================================
 -- 7. HISTORIAL DE CORRECCIONES (22-jul-2026)
 -- ============================================================================
 -- Decisión: la tabla de hechos NO se versiona completa (SCD Tipo 2 como las
