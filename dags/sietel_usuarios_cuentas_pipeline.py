@@ -4,10 +4,13 @@ DAG: sietel_usuarios_cuentas_pipeline
 Orquesta la carga del módulo analítico "Usuarios y Cuentas — Internet Fijo":
   1. aplicar_esquema    — DDL idempotente contra PostgreSQL analítico.
   2. cargar_dimensiones — SCD Tipo 2: ISP y PermisoVAgregado.
-  3. obtener_anios_a_cargar — determina qué años cargar en esta corrida.
-  4. cargar_hechos_de_anio  — extracción agregada de dbo.VALineasDedicadas,
+  3. cargar_nodos_isp   — SCD Tipo 2: NodoISP (geografía de nodos de acceso;
+                          dbo.NodoISP_Auxiliar excluida a propósito, ver
+                          scripts/cargar_nodo_isp.py).
+  4. obtener_anios_a_cargar — determina qué años cargar en esta corrida.
+  5. cargar_hechos_de_anio  — extracción agregada de dbo.VALineasDedicadas,
                               un año a la vez (dynamic task mapping).
-  5. validar_carga      — certificación cruzada SQL Server vs PostgreSQL.
+  6. validar_carga      — certificación cruzada SQL Server vs PostgreSQL.
 
 VARIABLE DE AIRFLOW "sietel_anios_a_cargar":
   "historico"  → carga todo el rango ANIO_INICIO_HISTORICO..ANIO_FIN_HISTORICO
@@ -64,6 +67,14 @@ def sietel_usuarios_cuentas_pipeline():
         cargar_dim_permiso_va_agregado()
 
     @task
+    def cargar_nodos_isp():
+        """SCD Tipo 2 de dbo.NodoISP. Tarea separada de cargar_dimensiones
+        para aislar logs/reintentos -- ver scripts/cargar_nodo_isp.py para el
+        motivo de excluir dbo.NodoISP_Auxiliar."""
+        from cargar_nodo_isp import cargar_dim_nodo_isp
+        cargar_dim_nodo_isp()
+
+    @task
     def obtener_anios_a_cargar() -> list[int]:
         """
         Determina qué años cargar según la variable "sietel_anios_a_cargar":
@@ -112,11 +123,12 @@ def sietel_usuarios_cuentas_pipeline():
 
     esquema = aplicar_esquema()
     dimensiones = cargar_dimensiones()
+    nodos = cargar_nodos_isp()
     anios = obtener_anios_a_cargar()
     hechos = cargar_hechos_de_anio.expand(anio=anios)
     validacion = validar_carga(anios)
 
-    esquema >> dimensiones >> hechos >> validacion
+    esquema >> dimensiones >> nodos >> hechos >> validacion
 
 
 sietel_usuarios_cuentas_pipeline()

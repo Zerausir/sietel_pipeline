@@ -321,3 +321,57 @@ CREATE TRIGGER trg_registrar_correccion_resumen
     BEFORE UPDATE ON staging.va_lineas_dedicadas_resumen
     FOR EACH ROW
     EXECUTE FUNCTION staging.fn_registrar_correccion_resumen();
+
+-- ============================================================================
+-- 8. DIMENSION NodoISP (SCD Tipo 2) -- 06-ago-2026
+-- ============================================================================
+-- Fuente: dbo.NodoISP exclusivamente. dbo.NodoISP_Auxiliar queda fuera a
+-- propósito -- EDA dirigido (06-ago-2026) confirmó que está congelada desde
+-- 2014-07-03 (max fechaCreacion/fechaModificacion) y que sus 366 peva_codigo
+-- ya están cubiertos por NodoISP (0 PEVA exclusivos de Auxiliar). Es un
+-- remanente de migración, no una fuente paralela viva.
+--
+-- SCD Tipo 2 por el mismo motivo que dim_isp / dim_permiso_va_agregado:
+-- SIETEL solo expone el estado ACTUAL del nodo. Un cambio de par_codigo,
+-- estado (ACTIVO/CANCELADO), tipoNodo o coordenadas es un hecho de negocio
+-- versionable -- sobrescribirlo en sitio ocultaría historia relevante para
+-- auditoría (mismo principio que capa2/mart: nunca enmascarar).
+--
+-- IMPORTANTE: igual que COLUMNAS_VERSIONABLES_ISP/PERMISO, la lista de
+-- columnas versionables de abajo (ver scripts/cargar_nodo_isp.py) es una
+-- propuesta inicial, no confirmada formalmente con Mercados.
+--
+-- latitud/longitud se preservan tal cual las reporta SIETEL (nvarchar,
+-- formato DMS libre, potencialmente sucio) -- Capa 1 certifica y extrae,
+-- no transforma. La conversión a decimal y el cruce espacial contra el
+-- shapefile de parroquias son responsabilidad de Capa 2/3 (mart), igual
+-- que el resto de la limpieza de negocio de este pipeline.
+
+CREATE TABLE IF NOT EXISTS staging.dim_nodo_isp (
+    noisp_sk                 BIGSERIAL PRIMARY KEY,
+    noisp_codigo              VARCHAR(50)  NOT NULL,
+    peva_codigo               VARCHAR(50)  NOT NULL,
+    par_codigo                VARCHAR(50),
+    noisp_nombre              VARCHAR(50),
+    noisp_fechaInicio         TIMESTAMP,
+    noisp_oficioSenatel       VARCHAR(50),
+    estado                    VARCHAR(50),
+    tipoNodo                  VARCHAR(50),
+    direccion                 TEXT,
+    latitud                   VARCHAR(20),
+    longitud                  VARCHAR(20),
+    verificado                VARCHAR(2),
+    observacion               TEXT,
+    regional                  VARCHAR(50),
+    fechaModificacion         TIMESTAMP,
+    fecha_inicio_vigencia     TIMESTAMP    NOT NULL DEFAULT now(),
+    fecha_fin_vigencia        TIMESTAMP,
+    es_vigente                BOOLEAN      NOT NULL DEFAULT true,
+    fecha_carga                TIMESTAMP    NOT NULL DEFAULT now(),
+    UNIQUE (noisp_codigo, fecha_inicio_vigencia)
+);
+CREATE INDEX IF NOT EXISTS ix_dim_nodo_isp_codigo_vigente ON staging.dim_nodo_isp (noisp_codigo) WHERE es_vigente = true;
+CREATE INDEX IF NOT EXISTS ix_dim_nodo_isp_peva_vigente ON staging.dim_nodo_isp (peva_codigo) WHERE es_vigente = true;
+
+COMMENT ON TABLE staging.dim_nodo_isp IS
+'Dimensión SCD Tipo 2 de nodos de acceso de ISP (dbo.NodoISP). NodoISP_Auxiliar excluido a propósito -- ver EDA 06-ago-2026, congelada desde 2014 y sin cobertura exclusiva. latitud/longitud crudas (nvarchar, DMS libre) -- sin limpiar, sin cruce geográfico; eso vive en Capa 2/3.';
