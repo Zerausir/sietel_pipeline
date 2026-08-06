@@ -423,6 +423,12 @@ CREATE TABLE IF NOT EXISTS staging.dim_nodo_isp (
     observacion               TEXT,
     regional                  VARCHAR(50),
     fechaModificacion         TIMESTAMP,
+    par_nombre                VARCHAR(100),
+    codigo_parroquia          VARCHAR(50),
+    ciu_nombre                VARCHAR(100),
+    codigo_canton             VARCHAR(50),
+    pro_nombre                VARCHAR(100),
+    codigo_provincia          VARCHAR(50),
     fecha_inicio_vigencia     TIMESTAMP    NOT NULL DEFAULT now(),
     fecha_fin_vigencia        TIMESTAMP,
     es_vigente                BOOLEAN      NOT NULL DEFAULT true,
@@ -432,5 +438,48 @@ CREATE TABLE IF NOT EXISTS staging.dim_nodo_isp (
 CREATE INDEX IF NOT EXISTS ix_dim_nodo_isp_codigo_vigente ON staging.dim_nodo_isp (noisp_codigo) WHERE es_vigente = true;
 CREATE INDEX IF NOT EXISTS ix_dim_nodo_isp_peva_vigente ON staging.dim_nodo_isp (peva_codigo) WHERE es_vigente = true;
 
+-- Códigos INEC de parroquia/cantón/provincia (07-ago-2026) -- faltaban en
+-- la versión original de esta tabla; mismo criterio ya aplicado a
+-- va_lineas_dedicadas_resumen (sección 1): son metadata derivada de
+-- par_codigo para cruce con fuentes externas (aquí, el shapefile CONALI de
+-- Parte B), no forman parte de ninguna llave natural. ADD COLUMN IF NOT
+-- EXISTS porque staging.dim_nodo_isp ya tenía 8.606 filas cargadas en
+-- producción cuando se detectó la falta (necesarias para
+-- mart/detectar_discrepancias_geografia_nodo.py, que compara esto contra
+-- DPA_PARROQ del shapefile).
+ALTER TABLE staging.dim_nodo_isp ADD COLUMN IF NOT EXISTS par_nombre VARCHAR(100);
+ALTER TABLE staging.dim_nodo_isp ADD COLUMN IF NOT EXISTS codigo_parroquia VARCHAR(50);
+ALTER TABLE staging.dim_nodo_isp ADD COLUMN IF NOT EXISTS ciu_nombre VARCHAR(100);
+ALTER TABLE staging.dim_nodo_isp ADD COLUMN IF NOT EXISTS codigo_canton VARCHAR(50);
+ALTER TABLE staging.dim_nodo_isp ADD COLUMN IF NOT EXISTS pro_nombre VARCHAR(100);
+ALTER TABLE staging.dim_nodo_isp ADD COLUMN IF NOT EXISTS codigo_provincia VARCHAR(50);
+
 COMMENT ON TABLE staging.dim_nodo_isp IS
-'Dimensión SCD Tipo 2 de nodos de acceso de ISP (dbo.NodoISP). NodoISP_Auxiliar excluido a propósito -- ver EDA 06-ago-2026, congelada desde 2014 y sin cobertura exclusiva. latitud/longitud crudas (nvarchar, DMS libre) -- sin limpiar, sin cruce geográfico; eso vive en Capa 2/3.';
+'Dimensión SCD Tipo 2 de nodos de acceso de ISP (dbo.NodoISP). NodoISP_Auxiliar excluido a propósito -- ver EDA 06-ago-2026, congelada desde 2014 y sin cobertura exclusiva. latitud/longitud crudas (nvarchar, DMS libre) -- sin limpiar, sin cruce geográfico; eso vive en Capa 2/3. codigo_parroquia/codigo_canton/codigo_provincia son códigos INEC (no confundir con par_codigo/ciu_codigo/pro_codigo, PKs internas de SIETEL) -- agregados 07-ago-2026 para cruce contra el shapefile CONALI.';
+
+-- ============================================================================
+-- 9. VISTA — analitico.v_nodo_isp_vigente -- 06-ago-2026
+-- ============================================================================
+-- Interfaz de consumo de staging.dim_nodo_isp para Capa 2/3, mismo patrón
+-- que analitico.v_lineas_dedicadas_resumen / v_ultimo_periodo_reportado_detalle:
+-- Capa 2/3 nunca lee staging.* directamente, solo vistas de analitico.
+-- Gracias al ALTER DEFAULT PRIVILEGES de la sección 6b, mart_user ya tiene
+-- SELECT sobre esta vista automáticamente, sin GRANT adicional.
+DROP VIEW IF EXISTS analitico.v_nodo_isp_vigente;
+
+CREATE VIEW analitico.v_nodo_isp_vigente AS
+SELECT
+    n.noisp_sk, n.noisp_codigo, n.peva_codigo, n.par_codigo, n.noisp_nombre,
+    n.noisp_fechaInicio, n.noisp_oficioSenatel, n.estado, n.tipoNodo,
+    n.direccion, n.latitud, n.longitud, n.verificado, n.observacion,
+    n.regional, n.fechaModificacion,
+    n.par_nombre, n.codigo_parroquia, n.ciu_nombre, n.codigo_canton,
+    n.pro_nombre, n.codigo_provincia
+FROM staging.dim_nodo_isp n
+WHERE n.es_vigente = true;
+
+COMMENT ON VIEW analitico.v_nodo_isp_vigente IS
+'Nodos de acceso ISP vigentes (dbo.NodoISP, sin NodoISP_Auxiliar). latitud/longitud crudas, sin limpiar -- la conversión DMS->decimal y validación viven en mart/limpiar_coordenadas_nodo_isp.py (Capa 2/3). codigo_parroquia/codigo_canton/codigo_provincia son códigos INEC (07-ago-2026), para cruce contra el shapefile CONALI en mart/detectar_discrepancias_geografia_nodo.py.';
+
+COMMENT ON VIEW analitico.v_nodo_isp_vigente IS
+'Nodos de acceso ISP vigentes (dbo.NodoISP, sin NodoISP_Auxiliar). latitud/longitud crudas, sin limpiar -- la conversión DMS->decimal y validación viven en mart/limpiar_coordenadas_nodo_isp.py (Capa 2/3).';

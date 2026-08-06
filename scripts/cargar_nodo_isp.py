@@ -27,6 +27,19 @@ Alcance de Capa 1 (este archivo): extraer y certificar tal cual lo reporta
 SIETEL. latitud/longitud viajan como texto libre (formato DMS potencialmente
 sucio) sin ninguna limpieza ni conversión -- eso es responsabilidad de
 Capa 2/3 (mart), igual que el resto de la lógica de negocio de este pipeline.
+
+CAMBIO 07-ago-2026: se agregó el JOIN contra dbo.Parroquia/Ciudad/Provincia
+para traer codigo_parroquia/codigo_canton/codigo_provincia (códigos INEC,
+no confundir con par_codigo/ciu_codigo/pro_codigo que son PKs internas de
+SIETEL). Faltaban en la versión original -- detectados como necesarios recién
+al diseñar mart/detectar_discrepancias_geografia_nodo.py (Parte B), que
+compara estos códigos contra DPA_PARROQ del shapefile CONALI. Mismo patrón
+de LEFT JOIN sin FK declarada que ya se usó en la consulta ad hoc de ADEATEL
+S.A. -- de las tres relaciones, solo NodoISP.par_codigo -> Parroquia.par_codigo
+carece de FK real; Parroquia.ciu_codigo -> Ciudad (FK_Parroquia_Ciudad) y
+Ciudad.pro_codigo -> Provincia (FK_Ciudad_Provincia) sí están declaradas. Un
+par_codigo huérfano en NodoISP deja estos campos en NULL, visible, en vez de
+perder la fila -- por eso los tres JOIN son LEFT, no INNER.
 """
 import logging
 from datetime import datetime
@@ -43,11 +56,17 @@ COLUMNAS_VERSIONABLES_NODO_ISP = [
 
 SQL_EXTRAER_NODO_ISP = """
     SELECT
-        noisp_codigo, peva_codigo, par_codigo, noisp_nombre,
-        noisp_fechaInicio, noisp_oficioSenatel, estado, tipoNodo,
-        direccion, latitud, longitud, verificado, observacion,
-        regional, fechaModificacion
-    FROM dbo.NodoISP
+        n.noisp_codigo, n.peva_codigo, n.par_codigo, n.noisp_nombre,
+        n.noisp_fechaInicio, n.noisp_oficioSenatel, n.estado, n.tipoNodo,
+        n.direccion, n.latitud, n.longitud, n.verificado, n.observacion,
+        n.regional, n.fechaModificacion,
+        par.par_nombre, par.codigoParroquia AS codigo_parroquia,
+        ciu.ciu_nombre, ciu.codigoCiudad AS codigo_canton,
+        prov.pro_nombre, prov.codigo AS codigo_provincia
+    FROM dbo.NodoISP n
+    LEFT JOIN dbo.Parroquia par ON par.par_codigo = n.par_codigo
+    LEFT JOIN dbo.Ciudad ciu ON ciu.ciu_codigo = par.ciu_codigo
+    LEFT JOIN dbo.Provincia prov ON prov.pro_codigo = ciu.pro_codigo
 """
 
 
@@ -96,8 +115,11 @@ def cargar_dim_nodo_isp():
                             (noisp_codigo, peva_codigo, par_codigo, noisp_nombre,
                              noisp_fechaInicio, noisp_oficioSenatel, estado, tipoNodo,
                              direccion, latitud, longitud, verificado, observacion,
-                             regional, fechaModificacion, fecha_inicio_vigencia)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, '1900-01-01')
+                             regional, fechaModificacion,
+                             par_nombre, codigo_parroquia, ciu_nombre, codigo_canton,
+                             pro_nombre, codigo_provincia, fecha_inicio_vigencia)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s, %s, '1900-01-01')
                         """,
                         (
                             fila["noisp_codigo"], fila["peva_codigo"], fila["par_codigo"],
@@ -106,6 +128,9 @@ def cargar_dim_nodo_isp():
                             fila["direccion"], fila["latitud"], fila["longitud"],
                             fila["verificado"], fila["observacion"], fila["regional"],
                             fila["fechaModificacion"],
+                            fila["par_nombre"], fila["codigo_parroquia"],
+                            fila["ciu_nombre"], fila["codigo_canton"],
+                            fila["pro_nombre"], fila["codigo_provincia"],
                         ),
                     )
                     insertadas += 1
@@ -127,8 +152,11 @@ def cargar_dim_nodo_isp():
                             (noisp_codigo, peva_codigo, par_codigo, noisp_nombre,
                              noisp_fechaInicio, noisp_oficioSenatel, estado, tipoNodo,
                              direccion, latitud, longitud, verificado, observacion,
-                             regional, fechaModificacion)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                             regional, fechaModificacion,
+                             par_nombre, codigo_parroquia, ciu_nombre, codigo_canton,
+                             pro_nombre, codigo_provincia)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             fila["noisp_codigo"], fila["peva_codigo"], fila["par_codigo"],
@@ -137,22 +165,36 @@ def cargar_dim_nodo_isp():
                             fila["direccion"], fila["latitud"], fila["longitud"],
                             fila["verificado"], fila["observacion"], fila["regional"],
                             fila["fechaModificacion"],
+                            fila["par_nombre"], fila["codigo_parroquia"],
+                            fila["ciu_nombre"], fila["codigo_canton"],
+                            fila["pro_nombre"], fila["codigo_provincia"],
                         ),
                     )
                     actualizadas += 1
                 else:
                     # Sin cambio en columnas versionables: actualiza en sitio los
-                    # atributos no versionables (Tipo 1) de la fila vigente.
+                    # atributos no versionables (Tipo 1) de la fila vigente,
+                    # incluidos los códigos INEC -- son metadata derivada de
+                    # par_codigo (que sí es versionable), mismo criterio que
+                    # codigo_provincia/codigo_ciudad/codigo_parroquia en
+                    # va_lineas_dedicadas_resumen: se refrescan libremente, no
+                    # forman parte de ninguna llave natural.
                     pg_cur.execute(
                         """
                         UPDATE staging.dim_nodo_isp
                         SET noisp_nombre = %s, direccion = %s, observacion = %s,
-                            regional = %s, fechaModificacion = %s
+                            regional = %s, fechaModificacion = %s,
+                            par_nombre = %s, codigo_parroquia = %s,
+                            ciu_nombre = %s, codigo_canton = %s,
+                            pro_nombre = %s, codigo_provincia = %s
                         WHERE noisp_sk = %s
                         """,
                         (
                             fila["noisp_nombre"], fila["direccion"], fila["observacion"],
                             fila["regional"], fila["fechaModificacion"],
+                            fila["par_nombre"], fila["codigo_parroquia"],
+                            fila["ciu_nombre"], fila["codigo_canton"],
+                            fila["pro_nombre"], fila["codigo_provincia"],
                             vigente["noisp_sk"],
                         ),
                     )
