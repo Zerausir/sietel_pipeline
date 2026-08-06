@@ -2,11 +2,21 @@
 DAG: sietel_mart_pipeline
 
 Orquesta el refresco del mart analítico consumido por el dashboard:
-  1. detectar_conflictos_peva — detecta y clasifica RUC con múltiples PEVA,
-                                 resuelve automáticamente el Grupo A.
-  2. construir_capa2          — reconstruye capa2.lineas_dedicadas_consolidado
-                                 (reemplaza al antiguo Datos.ipynb).
-  3. aplicar_capa3            — aplica sql/02_ddl_mart.sql completo (mart.*).
+  1. detectar_conflictos_peva      — detecta y clasifica RUC con múltiples
+                                      PEVA, resuelve automáticamente el Grupo A.
+  2. construir_capa2               — reconstruye capa2.lineas_dedicadas_consolidado
+                                      (reemplaza al antiguo Datos.ipynb).
+  3. limpiar_coordenadas_nodo_isp  — Parte A del geoprocesamiento de nodos
+                                      ISP: DMS->decimal + validación de rango
+                                      (capa2.nodo_isp_geocodificado).
+  3b. cargar_parroquias            — carga idempotente del shapefile de
+                                      parroquias CONALI a
+                                      capa2.parroquias_geometria (GeoJSON).
+                                      Solo escribe si la tabla está vacía.
+                                      Cruce espacial en sí (Parte B) aún no
+                                      implementado -- ver
+                                      mart/cargar_parroquias.py.
+  4. aplicar_capa3                 — aplica sql/02_ddl_mart.sql completo (mart.*).
 
 Manual (schedule=None), mismo criterio que sietel_usuarios_cuentas_pipeline.
 Se dispara cuando se quiere refrescar el dashboard, no en cada carga base.
@@ -64,6 +74,18 @@ def sietel_mart_pipeline():
         _run(dry_run=False)
 
     @task
+    def limpiar_coordenadas_nodo_isp():
+        """Parte A del geoprocesamiento de nodos ISP: DMS->decimal + validación de rango."""
+        from limpiar_coordenadas_nodo_isp import limpiar_coordenadas as _run
+        _run(dry_run=False)
+
+    @task
+    def cargar_parroquias():
+        """Carga idempotente del shapefile CONALI a capa2.parroquias_geometria."""
+        from cargar_parroquias import cargar_parroquias as _run
+        _run(forzar=False, dry_run=False)
+
+    @task
     def aplicar_capa3():
         """Aplica sql/02_ddl_mart.sql completo (Capa 3: mart.*)."""
         from aplicar_capa3 import aplicar as _run
@@ -71,9 +93,11 @@ def sietel_mart_pipeline():
 
     deteccion = detectar_conflictos_peva()
     construccion = construir_capa2()
+    geocodificacion = limpiar_coordenadas_nodo_isp()
+    parroquias = cargar_parroquias()
     aplicacion = aplicar_capa3()
 
-    deteccion >> construccion >> aplicacion
+    deteccion >> construccion >> geocodificacion >> parroquias >> aplicacion
 
 
 sietel_mart_pipeline()

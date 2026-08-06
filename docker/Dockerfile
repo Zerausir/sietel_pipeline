@@ -89,4 +89,17 @@ RUN pip install --no-cache-dir \
     "psycopg[binary]==3.3.4" \
     "python-dotenv==1.2.2"
 
+# Geoprocesamiento de nodos ISP (06-ago-2026) -- mart/cargar_parroquias.py y
+# mart/detectar_discrepancias_geografia_nodo.py. A diferencia de todo lo demás
+# en mart/, esta es la primera dependencia de este Dockerfile que NO viene
+# como wheel puro-Python -- geopandas trae GDAL/GEOS/PROJ por debajo. Los
+# wheels manylinux de pip (via pyogrio, el motor de lectura por defecto desde
+# geopandas>=0.14) incluyen esos binarios empaquetados -- no debería requerir
+# paquetes de sistema (gdal-bin/libgdal-dev) adicionales en esta imagen base
+# Debian. Si el build falla aquí, esa es la primera señal a investigar --
+# no asumir automáticamente que hace falta apt-get sin confirmarlo con el
+# log real del error.
+RUN pip install --no-cache-dir \
+    "geopandas==1.1.4"
+
 ENTRYPOINT ["/usr/bin/dumb-init", "--", "/entrypoint"]

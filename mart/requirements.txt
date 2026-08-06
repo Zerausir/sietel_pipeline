@@ -1,3 +1,11 @@
-SQLAlchemy>=2.0,<3
-psycopg[binary]>=3.2,<4
-python-dotenv>=1.0,<2
+SQLAlchemy==2.0.51
+psycopg[binary]==3.3.4
+python-dotenv==1.2.2
+
+# Geoprocesamiento de nodos ISP (06-ago-2026) -- ver mart/cargar_parroquias.py
+# y mart/detectar_discrepancias_geografia_nodo.py. geopandas se usa UNA SOLA
+# VEZ, para cargar el shapefile de parroquias (CONALI) a Postgres como
+# GeoJSON -- el cruce punto-en-polígono en sí, que corre en cada refresco,
+# usa shapely + STRtree sin geopandas de por medio (mismo split que
+# samm_pipeline, ver app/utils/spatial_mapper.py de ese repo).
+geopandas==1.1.4
