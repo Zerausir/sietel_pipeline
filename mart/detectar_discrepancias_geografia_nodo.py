@@ -75,6 +75,16 @@ automática -- mismo criterio ya aplicado a RUC/PEVA.
 Uso:
     python detectar_discrepancias_geografia_nodo.py --dry-run
     python detectar_discrepancias_geografia_nodo.py
+
+AGREGADO 07-ago-2026: además de calidad.discrepancias_geografia_nodo (solo
+discrepancias, con workflow humano), esta corrida ahora persiste TODOS los
+nodos con coordenada válida y match espacial (coincidan o no) en
+capa2.nodo_isp_geografia_resuelta -- necesario para el mapa del dashboard,
+que debe mostrar el universo completo de nodos con su geografía derivada
+(CONALI, autoritativa) y un flag es_discrepancia, no solo los que
+discreparon. Esta tabla se reconstruye completa en cada corrida (TRUNCATE +
+INSERT, no UPSERT) -- a diferencia de calidad.discrepancias_geografia_nodo,
+no tiene workflow humano que preservar.
 """
 from __future__ import annotations
 
@@ -194,6 +204,45 @@ ON CONFLICT (noisp_codigo) DO UPDATE SET
 ;
 """
 
+_SENTENCIAS_DDL_RESUELTA = [
+    "CREATE SCHEMA IF NOT EXISTS capa2;",
+    """
+    CREATE TABLE IF NOT EXISTS capa2.nodo_isp_geografia_resuelta (
+        noisp_codigo       VARCHAR(50) PRIMARY KEY,
+        peva_codigo        VARCHAR(50) NOT NULL,
+        tiponodo           VARCHAR(50),
+        latitud_decimal    DOUBLE PRECISION NOT NULL,
+        longitud_decimal   DOUBLE PRECISION NOT NULL,
+        codigo_provincia   VARCHAR(20) NOT NULL,
+        nombre_provincia   VARCHAR(150) NOT NULL,
+        codigo_canton      VARCHAR(20) NOT NULL,
+        nombre_canton      VARCHAR(150) NOT NULL,
+        codigo_parroquia   VARCHAR(20) NOT NULL,
+        nombre_parroquia   VARCHAR(150) NOT NULL,
+        es_discrepancia    BOOLEAN NOT NULL,
+        fecha_procesado    TIMESTAMP NOT NULL DEFAULT now()
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_nodo_isp_geografia_resuelta_canton ON capa2.nodo_isp_geografia_resuelta (codigo_canton);",
+    "CREATE INDEX IF NOT EXISTS ix_nodo_isp_geografia_resuelta_provincia ON capa2.nodo_isp_geografia_resuelta (codigo_provincia);",
+    """
+    COMMENT ON TABLE capa2.nodo_isp_geografia_resuelta IS
+    'TODOS los nodos con coordenada válida y match espacial (coincidan o no con lo reportado) -- geografía CONALI, autoritativa (ver conversación 07-ago-2026). Se reconstruye completa en cada corrida (TRUNCATE+INSERT), sin workflow humano -- para eso está calidad.discrepancias_geografia_nodo, que solo guarda las discrepancias. Fuente para mart.vw_nodos_isp_mapa (dashboard).';
+    """,
+]
+
+_SQL_INSERT_RESUELTA = text("""
+    INSERT INTO capa2.nodo_isp_geografia_resuelta (
+        noisp_codigo, peva_codigo, tiponodo, latitud_decimal, longitud_decimal,
+        codigo_provincia, nombre_provincia, codigo_canton, nombre_canton,
+        codigo_parroquia, nombre_parroquia, es_discrepancia
+    ) VALUES (
+        :noisp_codigo, :peva_codigo, :tiponodo, :latitud_decimal, :longitud_decimal,
+        :codigo_provincia, :nombre_provincia, :codigo_canton, :nombre_canton,
+        :codigo_parroquia, :nombre_parroquia, :es_discrepancia
+    )
+""")
+
 
 def _cargar_indice_espacial(conn) -> tuple[STRtree, list[dict]]:
     """
@@ -238,6 +287,7 @@ def detectar_discrepancias_geografia_nodo(dry_run: bool = False) -> dict[str, in
 
         sin_match_codigos: list[str] = []
         filas_a_escribir = []
+        filas_resueltas = []
 
         for nodo in nodos:
             resumen["procesados"] += 1
@@ -255,17 +305,44 @@ def detectar_discrepancias_geografia_nodo(dry_run: bool = False) -> dict[str, in
                 sin_match_codigos.append(nodo["noisp_codigo"])
                 continue
 
-            if not nodo["codigo_canton_reportado"]:
-                resumen["sin_codigo_reportado"] += 1
-                continue
-
             # Comparación por CANTÓN, no por parroquia exacta -- ver docstring
             # del módulo. dbo.Parroquia usa una codificación INEC más vieja
             # que CONALI 2026; el cantón se mantiene estable entre ambos
             # vintages, la parroquia exacta no (confirmado con muestra real
             # 07-ago-2026: 91% de las "discrepancias" por parroquia exacta
             # compartían cantón, mismo nombre en ambos lados).
-            if nodo["codigo_canton_reportado"] == parroquia_derivada["codigo_canton"]:
+            es_discrepancia = bool(
+                nodo["codigo_canton_reportado"]
+                and nodo["codigo_canton_reportado"] != parroquia_derivada["codigo_canton"]
+            )
+
+            # Todo nodo con match espacial entra a la tabla de resolución
+            # completa (geografía CONALI, autoritativa) -- coincida o no, y
+            # también los que no tienen codigo_canton_reportado (sin_codigo_
+            # reportado ya no descarta la fila aquí, solo la excluye de la
+            # comparación de discrepancia -- ver docstring, "no hay con qué
+            # comparar el lado reportado" no es lo mismo que "no sé dónde
+            # está el nodo").
+            filas_resueltas.append({
+                "noisp_codigo": nodo["noisp_codigo"],
+                "peva_codigo": nodo["peva_codigo"],
+                "tiponodo": nodo["tiponodo"],
+                "latitud_decimal": nodo["latitud_decimal"],
+                "longitud_decimal": nodo["longitud_decimal"],
+                "codigo_provincia": parroquia_derivada["codigo_provincia"],
+                "nombre_provincia": parroquia_derivada["nombre_provincia"],
+                "codigo_canton": parroquia_derivada["codigo_canton"],
+                "nombre_canton": parroquia_derivada["nombre_canton"],
+                "codigo_parroquia": parroquia_derivada["codigo_parroquia"],
+                "nombre_parroquia": parroquia_derivada["nombre_parroquia"],
+                "es_discrepancia": es_discrepancia,
+            })
+
+            if not nodo["codigo_canton_reportado"]:
+                resumen["sin_codigo_reportado"] += 1
+                continue
+
+            if not es_discrepancia:
                 resumen["coinciden"] += 1
                 continue
 
@@ -318,16 +395,24 @@ def detectar_discrepancias_geografia_nodo(dry_run: bool = False) -> dict[str, in
             logger.warning("... y %d más (truncado a 50 en el log).", len(sin_match_codigos) - 50)
 
     if dry_run:
-        logger.info("--dry-run: no se escribió nada en calidad.discrepancias_geografia_nodo.")
+        logger.info("--dry-run: no se escribió nada en calidad.discrepancias_geografia_nodo "
+                    "ni en capa2.nodo_isp_geografia_resuelta.")
         return resumen
 
     with engine.begin() as conn:
+        for sentencia in _SENTENCIAS_DDL_RESUELTA:
+            conn.execute(text(sentencia))
+        conn.execute(text("TRUNCATE TABLE capa2.nodo_isp_geografia_resuelta;"))
+        if filas_resueltas:
+            conn.execute(_SQL_INSERT_RESUELTA, filas_resueltas)
+
         for fila in filas_a_escribir:
             conn.execute(text(SQL_UPSERT), fila)
 
     logger.info(
+        "capa2.nodo_isp_geografia_resuelta reconstruida: %d nodos (%d con match espacial). "
         "calidad.discrepancias_geografia_nodo actualizado: %d discrepancias.",
-        len(filas_a_escribir),
+        len(filas_resueltas), resumen["procesados"] - resumen["sin_match_espacial"], len(filas_a_escribir),
     )
     return resumen
 

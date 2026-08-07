@@ -2522,6 +2522,124 @@ LEFT JOIN LATERAL (
 WHERE p.primer_periodo_reportado IS NOT NULL;
 
 -- ============================================================
+-- 16b. NODOS ISP -- GEOGRAFIA Y MAPA (07-ago-2026)
+-- ============================================================
+-- Fuente: capa2.nodo_isp_geografia_resuelta (Parte A+B del geoprocesamiento
+-- de nodos ISP -- mart/limpiar_coordenadas_nodo_isp.py +
+-- mart/detectar_discrepancias_geografia_nodo.py). Geografía derivada de la
+-- coordenada real vía shapefile CONALI, tratada como AUTORITATIVA frente a
+-- par_codigo/dbo.Parroquia reportado en SIETEL -- confirmado con Iván
+-- 07-ago-2026: dbo.Parroquia usa codificación INEC más vieja que CONALI
+-- 2026 (ver docstring completo en detectar_discrepancias_geografia_nodo.py).
+--
+-- Universo completamente distinto de mart.dim_territorio/
+-- bridge_geografia_territorio (geografía de LÍNEAS reportadas) -- un nodo
+-- físico puede servir a varias parroquias de líneas, no hay relación 1:1.
+-- Nunca se mezclan (confirmado con Iván 06-ago-2026).
+
+CREATE TABLE mart.dim_territorio_nodo (
+    territorio_id       text PRIMARY KEY,
+    nivel_geografico    text NOT NULL CHECK (
+        nivel_geografico IN ('NACIONAL', 'PROVINCIA', 'CANTON', 'PARROQUIA')
+    ),
+    orden_nivel         integer NOT NULL,
+    codigo_geografico   text,
+    nombre_geografico   text NOT NULL,
+    codigo_provincia    text,
+    nombre_provincia    text,
+    codigo_canton       text,
+    nombre_canton       text,
+    codigo_parroquia    text,
+    nombre_parroquia    text
+);
+
+INSERT INTO mart.dim_territorio_nodo VALUES (
+    'NACIONAL|ECUADOR', 'NACIONAL', 0, 'ECU', 'Ecuador',
+    NULL, NULL, NULL, NULL, NULL, NULL
+);
+
+INSERT INTO mart.dim_territorio_nodo
+SELECT DISTINCT ON (codigo_provincia)
+    'PROVINCIA|' || codigo_provincia,
+    'PROVINCIA', 1,
+    codigo_provincia, COALESCE(nombre_provincia, codigo_provincia),
+    codigo_provincia, nombre_provincia,
+    NULL, NULL, NULL, NULL
+FROM capa2.nodo_isp_geografia_resuelta
+WHERE codigo_provincia IS NOT NULL
+ORDER BY codigo_provincia, nombre_provincia NULLS LAST;
+
+INSERT INTO mart.dim_territorio_nodo
+SELECT DISTINCT ON (codigo_provincia, codigo_canton)
+    'CANTON|' || codigo_provincia || '|' || codigo_canton,
+    'CANTON', 2,
+    codigo_canton, COALESCE(nombre_canton, codigo_canton),
+    codigo_provincia, nombre_provincia,
+    codigo_canton, nombre_canton,
+    NULL, NULL
+FROM capa2.nodo_isp_geografia_resuelta
+WHERE codigo_provincia IS NOT NULL AND codigo_canton IS NOT NULL
+ORDER BY codigo_provincia, codigo_canton, nombre_canton NULLS LAST;
+
+INSERT INTO mart.dim_territorio_nodo
+SELECT DISTINCT ON (codigo_provincia, codigo_canton, codigo_parroquia)
+    'PARROQUIA|' || codigo_provincia || '|' || codigo_canton || '|' || codigo_parroquia,
+    'PARROQUIA', 3,
+    codigo_parroquia, COALESCE(nombre_parroquia, codigo_parroquia),
+    codigo_provincia, nombre_provincia,
+    codigo_canton, nombre_canton,
+    codigo_parroquia, nombre_parroquia
+FROM capa2.nodo_isp_geografia_resuelta
+WHERE codigo_provincia IS NOT NULL AND codigo_canton IS NOT NULL AND codigo_parroquia IS NOT NULL
+ORDER BY codigo_provincia, codigo_canton, codigo_parroquia, nombre_parroquia NULLS LAST;
+
+CREATE INDEX idx_dim_territorio_nodo_nivel ON mart.dim_territorio_nodo (nivel_geografico);
+
+CREATE VIEW mart.vw_dashboard_filtros_geograficos_nodo AS
+SELECT
+    territorio_id, nivel_geografico, orden_nivel, codigo_geografico, nombre_geografico,
+    codigo_provincia, nombre_provincia, codigo_canton, nombre_canton, codigo_parroquia, nombre_parroquia
+FROM mart.dim_territorio_nodo;
+
+-- Vista principal del mapa. LEFT JOIN hacia calidad.discrepancias_geografia_nodo
+-- (no hacia mart) -- funciona porque esta vista corre con los privilegios del
+-- DUEÑO (mart_user), que ya tiene acceso pleno a calidad por ser su dueño
+-- también (ver README, tabla de roles) -- dashboard_lector NUNCA necesita
+-- GRANT directo sobre calidad, solo SELECT sobre esta vista. Primer puente
+-- calidad -> mart -> dashboard de este proyecto (antes no existía ninguno).
+CREATE VIEW mart.vw_nodos_isp_mapa AS
+SELECT
+    r.noisp_codigo,
+    r.peva_codigo,
+    p.isp_nombre,
+    p.opera_actual,
+    r.tiponodo,
+    r.latitud_decimal,
+    r.longitud_decimal,
+    r.codigo_provincia,
+    r.nombre_provincia,
+    r.codigo_canton,
+    r.nombre_canton,
+    r.codigo_parroquia,
+    r.nombre_parroquia,
+    r.es_discrepancia,
+    d.estado_revision,
+    d.par_codigo_reportado,
+    d.parroquia_reportada_nombre,
+    d.canton_reportado_nombre,
+    d.provincia_reportada_nombre,
+    'PROVINCIA|' || r.codigo_provincia AS territorio_id_provincia,
+    'CANTON|' || r.codigo_provincia || '|' || r.codigo_canton AS territorio_id_canton,
+    'PARROQUIA|' || r.codigo_provincia || '|' || r.codigo_canton || '|' || r.codigo_parroquia AS territorio_id_parroquia
+FROM capa2.nodo_isp_geografia_resuelta r
+LEFT JOIN mart.bridge_prestador_peva bp ON bp.peva_codigo = r.peva_codigo
+LEFT JOIN mart.dim_prestador p ON p.prestador_id = bp.prestador_id
+LEFT JOIN calidad.discrepancias_geografia_nodo d ON d.noisp_codigo = r.noisp_codigo;
+
+COMMENT ON VIEW mart.vw_nodos_isp_mapa IS
+'Universo completo de nodos ISP con coordenada válida y match espacial (mart/detectar_discrepancias_geografia_nodo.py). Geografía CONALI, autoritativa. es_discrepancia=true junto con par_codigo_reportado/etc NOT NULL indica que el par_codigo de SIETEL no coincide en cantón -- ver calidad.discrepancias_geografia_nodo para el workflow de revisión (solo lectura desde el dashboard, la revisión real ocurre fuera de OBTEL con el rol calidad_revisor).';
+
+-- ============================================================
 -- 18. RE-OTORGAR ACCESO A dashboard_lector -- sobrevive a la reconstrucción
 -- ============================================================
 -- CRÍTICO: el DROP SCHEMA mart CASCADE del inicio de este archivo borra

@@ -107,6 +107,8 @@ def actualizar_navegacion(pathname: str | None):
         html.Div(className="topbar-sep"),
         dcc.Link("Evolución", href="/sai/evolucion", className="nav-link"),
         dcc.Link("IHH y participación", href="/sai/concentracion", className="nav-link"),
+        dcc.Link("Mapa de nodos", href="/sai/mapa-nodos", className="nav-link"),
+        dcc.Link("Discrepancias de geografía", href="/sai/discrepancias-geografia", className="nav-link"),
     ]
     return nav, "Servicio de Acceso a Internet — SAI"
 
@@ -146,6 +148,23 @@ def serve_layout() -> html.Div:
                 id="shared-filters",
                 storage_type="memory",
                 data={"opera_estados": [], "isp_nombres": []},
+            ),
+            # Store propio para las páginas de nodos ISP (Mapa de Nodos,
+            # Discrepancias de Geografía) -- geografía CONALI derivada de
+            # coordenadas, universo distinto a shared-territory (geografía
+            # de líneas reportadas). Se sincronizan solo entre ellas dos,
+            # nunca con Evolución/Concentración -- ver
+            # components/node_territory_filters.py.
+            dcc.Store(
+                id="nodo-shared-territory",
+                storage_type="memory",
+                data={
+                    "level": "NACIONAL",
+                    "province": None,
+                    "canton": None,
+                    "parish": None,
+                    "territory_id": "NACIONAL|ECUADOR",
+                },
             ),
             html.Main(dash.page_container, className="page-container"),
             html.Footer(

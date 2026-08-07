@@ -831,3 +831,143 @@ def get_ihh_filtrado(
     periods = get_periods()[["periodo_id", "periodo", "anio", "mes", "nombre_mes", "anio_mes"]]
     df = df.merge(periods, on="periodo_id", how="left")
     return df.sort_values("periodo_id").reset_index(drop=True)
+
+
+# ============================================================
+# NODOS ISP -- geografía y discrepancias (07-ago-2026)
+# ============================================================
+# Universo DISTINTO de get_territory_options/get_provider_options -- esos
+# operan sobre geografía de LÍNEAS reportadas (mart.dim_territorio,
+# bridge_geografia_territorio). Un nodo físico puede servir a varias
+# parroquias de líneas, no hay relación 1:1 -- nunca se mezclan (confirmado
+# con Iván 06-ago-2026). Fuente: mart.vw_nodos_isp_mapa, geografía CONALI.
+
+@cache.memoize(timeout=900)
+def get_node_territory_options(
+        level: str,
+        province_code: str | None = None,
+        canton_code: str | None = None,
+) -> list[dict[str, str]]:
+    """Opciones para el filtro geográfico en cascada del mapa de nodos."""
+    clauses = ["nivel_geografico = :level"]
+    params: dict[str, Any] = {"level": level}
+
+    if province_code:
+        clauses.append("codigo_provincia = :province_code")
+        params["province_code"] = province_code
+    if canton_code:
+        clauses.append("codigo_canton = :canton_code")
+        params["canton_code"] = canton_code
+
+    df = _read(
+        f"""
+        SELECT territorio_id, codigo_geografico, nombre_geografico,
+               codigo_provincia, codigo_canton, codigo_parroquia
+        FROM mart.vw_dashboard_filtros_geograficos_nodo
+        WHERE {' AND '.join(clauses)}
+        ORDER BY nombre_geografico
+        """,
+        params,
+    )
+
+    value_column = {
+        "PROVINCIA": "codigo_provincia",
+        "CANTON": "codigo_canton",
+        "PARROQUIA": "codigo_parroquia",
+    }.get(level, "territorio_id")
+
+    return [
+        {"label": str(row["nombre_geografico"]), "value": str(row[value_column])}
+        for _, row in df.iterrows()
+        if pd.notna(row[value_column])
+    ]
+
+
+@cache.memoize(timeout=900)
+def get_node_types() -> list[dict[str, str]]:
+    """Valores distintos de tiponodo, para el filtro 'Tipo de nodo'."""
+    df = _read(
+        "SELECT DISTINCT tiponodo FROM mart.vw_nodos_isp_mapa WHERE tiponodo IS NOT NULL ORDER BY tiponodo"
+    )
+    return [{"label": row["tiponodo"], "value": row["tiponodo"]} for _, row in df.iterrows()]
+
+
+def _node_territory_column(territory_id: str) -> tuple[str, str] | None:
+    """Devuelve (columna, valor) para filtrar mart.vw_nodos_isp_mapa por el
+    territory_id elegido, o None si es Nacional (sin filtro)."""
+    if not territory_id or territory_id == "NACIONAL|ECUADOR":
+        return None
+    nivel = territory_id.split("|", 1)[0]
+    columna = {
+        "PROVINCIA": "territorio_id_provincia",
+        "CANTON": "territorio_id_canton",
+        "PARROQUIA": "territorio_id_parroquia",
+    }.get(nivel)
+    return (columna, territory_id) if columna else None
+
+
+@cache.memoize(timeout=900)
+def get_node_provider_options(territory_id: str) -> list[dict[str, str]]:
+    """Nombres de prestadores con nodos en el territorio, para el filtro 'Prestador'."""
+    filtro = _node_territory_column(territory_id)
+    clauses = ["isp_nombre IS NOT NULL"]
+    params: dict[str, Any] = {}
+    if filtro:
+        columna, valor = filtro
+        clauses.append(f"{columna} = :territory_id")
+        params["territory_id"] = valor
+
+    df = _read(
+        f"""
+        SELECT DISTINCT isp_nombre
+        FROM mart.vw_nodos_isp_mapa
+        WHERE {' AND '.join(clauses)}
+        ORDER BY isp_nombre
+        """,
+        params,
+    )
+    return [{"label": row["isp_nombre"], "value": row["isp_nombre"]} for _, row in df.iterrows()]
+
+
+@cache.memoize(timeout=180)
+def get_nodos_mapa(
+        territory_id: str,
+        tipo_nodos: list[str] | None = None,
+        opera_estados: list[str] | None = None,
+        isp_nombres: list[str] | None = None,
+        solo_discrepancias: bool = False,
+) -> pd.DataFrame:
+    """
+    Universo de nodos para el mapa (o la tabla de discrepancias, con
+    solo_discrepancias=True). opera_actual puede traer varios estados
+    separados por coma para un mismo prestador (mismo caso que
+    dim_prestador.opera_actual en get_operation_states) -- se filtra con
+    ILIKE ANY sobre patrones '%estado%', suficiente para un filtro de UI,
+    sin replicar el UNNEST exacto de las páginas de líneas.
+    """
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+
+    filtro_territorio = _node_territory_column(territory_id)
+    if filtro_territorio:
+        columna, valor = filtro_territorio
+        clauses.append(f"{columna} = :territory_id")
+        params["territory_id"] = valor
+
+    if tipo_nodos:
+        clauses.append("tiponodo = ANY(:tipo_nodos)")
+        params["tipo_nodos"] = tipo_nodos
+
+    if isp_nombres:
+        clauses.append("isp_nombre = ANY(:isp_nombres)")
+        params["isp_nombres"] = isp_nombres
+
+    if opera_estados:
+        clauses.append("opera_actual ILIKE ANY(:opera_patrones)")
+        params["opera_patrones"] = [f"%{estado}%" for estado in opera_estados]
+
+    if solo_discrepancias:
+        clauses.append("es_discrepancia = TRUE")
+
+    where = " AND ".join(clauses) if clauses else "TRUE"
+    return _read(f"SELECT * FROM mart.vw_nodos_isp_mapa WHERE {where}", params)
