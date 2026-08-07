@@ -4,14 +4,42 @@ mart/detectar_discrepancias_geografia_nodo.py
 Parte B del geoprocesamiento de nodos ISP (conversación 06/07-ago-2026):
 cruza la coordenada decimal de cada nodo (capa2.nodo_isp_geocodificado,
 Parte A) contra las geometrías de parroquia (capa2.parroquias_geometria,
-shapefile CONALI) vía punto-en-polígono, y compara la parroquia DERIVADA de
-la coordenada contra la parroquia REPORTADA en SIETEL
-(analitico.v_nodo_isp_vigente.codigo_parroquia, código INEC). Las
-discrepancias quedan en calidad.discrepancias_geografia_nodo con el mismo
-patrón de workflow humano persistente que calidad.conflictos_ruc_peva
+shapefile CONALI) vía punto-en-polígono, y compara el CANTÓN derivado de la
+coordenada contra el cantón reportado en SIETEL
+(analitico.v_nodo_isp_vigente.codigo_canton, código INEC). Las discrepancias
+quedan en calidad.discrepancias_geografia_nodo con el mismo patrón de
+workflow humano persistente que calidad.conflictos_ruc_peva
 (detectar_conflictos_peva.py): columnas derivadas de los datos de origen se
 actualizan en cada corrida, columnas de revisión (estado_revision,
 revisado_por, notas_revision, fecha_revision) solo se fijan la primera vez.
+
+DECISIÓN CLAVE, confirmada con Iván 07-ago-2026: la comparación es por
+CANTÓN, no por parroquia exacta. Diagnóstico real contra los 8606 nodos:
+comparar por código de parroquia completo daba 3976 "discrepancias" sobre
+7021 nodos válidos (56.6%) -- cifra demasiado alta para ser creíble.
+Investigando con muestra real: 3616 de esas 3976 (91%) compartían el mismo
+código de cantón (los primeros 4 dígitos), y en casi todos esos casos
+provincia/cantón/parroquia con el MISMO NOMBRE en ambos lados, solo el
+código de parroquia distinto -- típicamente XX01 (dbo.Parroquia.
+codigoParroquia, en SIETEL) vs XX50 (CONALI) para la cabecera cantonal.
+Causa confirmada: dbo.Parroquia -- la tabla que usa TODO SIETEL, incluida
+la codificación de codigo_parroquia/codigo_canton/codigo_provincia de
+VALineasDedicadas vía sincronizar_codigos_administrativos.py -- tiene una
+codificación INEC más vieja (~2020 o anterior) que el shapefile CONALI
+17.07.2026. Por eso se usa CONALI como fuente autoritativa: el cantón sí
+se mantiene estable entre ambos vintages (confirmado en el 100% de la
+muestra), la parroquia exacta no.
+
+LIMITACIÓN CONOCIDA Y ACEPTADA: esto puede dejar pasar una discrepancia
+real dentro del mismo cantón (ej. un nodo reportado en la cabecera
+cantonal que en realidad está en una parroquia rural distinta del mismo
+cantón -- caso real encontrado: AZUAY/SIGSIG/SIGSIG reportado vs.
+AZUAY/SÍGSIG/SAN JOSÉ DE RARANGA derivado, mismo cantón, parroquia
+genuinamente distinta). Se acepta este costo a cambio de eliminar el ~91%
+de falso positivo por desfase de vintage de código -- capturar ese tipo de
+discrepancia intra-cantón de forma confiable requeriría poder distinguir
+"vintage distinto, mismo lugar" de "vintage distinto, lugar distinto" sin
+un mapeo verificado entre ambas codificaciones, que no existe todavía.
 
 Mismo split que samm_pipeline (app/utils/spatial_mapper.py): geopandas no
 se usa aquí -- las geometrías ya están en Postgres como GeoJSON (cargadas
@@ -28,7 +56,7 @@ calidad.discrepancias_geografia_nodo, se reportan aparte en el log:
   - Coordenada inválida (es_coordenada_valida=false en Parte A): "no sé
     dónde está", no "sé dónde está y no coincide". Ya visible en
     capa2.nodo_isp_geocodificado.
-  - Sin codigo_parroquia reportado (par_codigo huérfano en SIETEL, o nunca
+  - Sin codigo_canton reportado (par_codigo huérfano en SIETEL, o nunca
     capturado): no hay con qué comparar el lado "reportado".
   - Sin match espacial (la coordenada, aunque válida y dentro del bounding
     box de Ecuador, no cae dentro de ningún polígono del shapefile -- ej.
@@ -199,7 +227,6 @@ def detectar_discrepancias_geografia_nodo(dry_run: bool = False) -> dict[str, in
     engine = _engine()
     resumen = {
         "procesados": 0, "coinciden": 0, "discrepancias": 0,
-        "discrepancias_mismo_canton": 0, "discrepancias_canton_distinto": 0,
         "sin_codigo_reportado": 0, "sin_match_espacial": 0,
     }
 
@@ -228,25 +255,22 @@ def detectar_discrepancias_geografia_nodo(dry_run: bool = False) -> dict[str, in
                 sin_match_codigos.append(nodo["noisp_codigo"])
                 continue
 
-            if not nodo["codigo_parroquia_reportado"]:
+            if not nodo["codigo_canton_reportado"]:
                 resumen["sin_codigo_reportado"] += 1
                 continue
 
-            if nodo["codigo_parroquia_reportado"] == parroquia_derivada["codigo_parroquia"]:
+            # Comparación por CANTÓN, no por parroquia exacta -- ver docstring
+            # del módulo. dbo.Parroquia usa una codificación INEC más vieja
+            # que CONALI 2026; el cantón se mantiene estable entre ambos
+            # vintages, la parroquia exacta no (confirmado con muestra real
+            # 07-ago-2026: 91% de las "discrepancias" por parroquia exacta
+            # compartían cantón, mismo nombre en ambos lados).
+            if nodo["codigo_canton_reportado"] == parroquia_derivada["codigo_canton"]:
                 resumen["coinciden"] += 1
                 continue
 
             resumen["discrepancias"] += 1
-            mismo_canton = (
-                    nodo["codigo_canton_reportado"] is not None
-                    and nodo["codigo_canton_reportado"] == parroquia_derivada["codigo_canton"]
-            )
-            if mismo_canton:
-                resumen["discrepancias_mismo_canton"] += 1
-            else:
-                resumen["discrepancias_canton_distinto"] += 1
             filas_a_escribir.append({
-                "mismo_canton": mismo_canton,
                 "noisp_codigo": nodo["noisp_codigo"],
                 "peva_codigo": nodo["peva_codigo"],
                 "isp_nombre": nodo["isp_nombre"],
@@ -267,32 +291,23 @@ def detectar_discrepancias_geografia_nodo(dry_run: bool = False) -> dict[str, in
             })
 
     logger.info(
-        "Resumen: %d procesados -- %d coinciden, %d discrepancias "
-        "(%d mismo cantón/distinto código de parroquia, %d cantón distinto), "
+        "Resumen: %d procesados -- %d coinciden (por cantón), %d discrepancias, "
         "%d sin código reportado, %d sin match espacial",
         resumen["procesados"], resumen["coinciden"], resumen["discrepancias"],
-        resumen["discrepancias_mismo_canton"], resumen["discrepancias_canton_distinto"],
         resumen["sin_codigo_reportado"], resumen["sin_match_espacial"],
     )
     if filas_a_escribir:
-        filas_mismo_canton = [f for f in filas_a_escribir if f["mismo_canton"]]
-        filas_canton_distinto = [f for f in filas_a_escribir if not f["mismo_canton"]]
-
-        def _log_muestra(etiqueta, filas, total_categoria):
-            logger.warning("Muestra -- %s (%d de %d):", etiqueta, len(filas), total_categoria)
-            for f in filas:
-                logger.warning(
-                    "  %s (%s): reportado=%s/%s/%s (cod=%s) -- derivado=%s/%s/%s (cod=%s)",
-                    f["noisp_codigo"], f["isp_nombre"],
-                    f["provincia_reportada_nombre"], f["canton_reportado_nombre"], f["parroquia_reportada_nombre"],
-                    f["codigo_parroquia_reportado"],
-                    f["provincia_derivada_nombre"], f["canton_derivado_nombre"], f["parroquia_derivada_nombre"],
-                    f["codigo_parroquia_derivado"],
-                )
-
-        _log_muestra("mismo cantón, código de parroquia distinto", filas_mismo_canton[:15], len(filas_mismo_canton))
-        _log_muestra("cantón distinto (discrepancia potencialmente real)", filas_canton_distinto[:15],
-                     len(filas_canton_distinto))
+        muestra = filas_a_escribir[:20]
+        logger.warning("Muestra de discrepancias por cantón (%d de %d):", len(muestra), len(filas_a_escribir))
+        for f in muestra:
+            logger.warning(
+                "  %s (%s): reportado=%s/%s/%s (cod=%s) -- derivado=%s/%s/%s (cod=%s)",
+                f["noisp_codigo"], f["isp_nombre"],
+                f["provincia_reportada_nombre"], f["canton_reportado_nombre"], f["parroquia_reportada_nombre"],
+                f["codigo_parroquia_reportado"],
+                f["provincia_derivada_nombre"], f["canton_derivado_nombre"], f["parroquia_derivada_nombre"],
+                f["codigo_parroquia_derivado"],
+            )
     if sin_match_codigos:
         logger.warning(
             "Nodos sin match espacial (coordenada válida pero fuera de todas las "
