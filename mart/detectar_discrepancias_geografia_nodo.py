@@ -262,6 +262,22 @@ def detectar_discrepancias_geografia_nodo(dry_run: bool = False) -> dict[str, in
         resumen["procesados"], resumen["coinciden"], resumen["discrepancias"],
         resumen["sin_codigo_reportado"], resumen["sin_match_espacial"],
     )
+    if filas_a_escribir:
+        muestra = filas_a_escribir[:30]
+        logger.warning(
+            "Muestra de %d discrepancias (de %d totales) -- reportado vs. derivado, "
+            "para verificar plausibilidad antes de confiar en el agregado:",
+            len(muestra), len(filas_a_escribir),
+        )
+        for f in muestra:
+            logger.warning(
+                "  %s (%s): reportado=%s/%s/%s (cod=%s) -- derivado=%s/%s/%s (cod=%s)",
+                f["noisp_codigo"], f["isp_nombre"],
+                f["provincia_reportada_nombre"], f["canton_reportado_nombre"], f["parroquia_reportada_nombre"],
+                f["codigo_parroquia_reportado"],
+                f["provincia_derivada_nombre"], f["canton_derivado_nombre"], f["parroquia_derivada_nombre"],
+                f["codigo_parroquia_derivado"],
+            )
     if sin_match_codigos:
         logger.warning(
             "Nodos sin match espacial (coordenada válida pero fuera de todas las "
