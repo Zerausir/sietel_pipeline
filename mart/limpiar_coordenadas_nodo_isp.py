@@ -178,7 +178,7 @@ def limpiar_coordenadas(dry_run: bool = False) -> None:
     with engine.connect() as conn:
         filas = conn.execute(text("""
             SELECT noisp_codigo, peva_codigo, par_codigo, noisp_nombre,
-                   tipoNodo, estado, direccion, verificado, latitud, longitud
+                   tiponodo, estado, direccion, verificado, latitud, longitud
             FROM analitico.v_nodo_isp_vigente
         """)).mappings().all()
 
@@ -206,7 +206,7 @@ def limpiar_coordenadas(dry_run: bool = False) -> None:
             "peva_codigo": fila["peva_codigo"],
             "par_codigo": fila["par_codigo"],
             "noisp_nombre": fila["noisp_nombre"],
-            "tiponodo": fila["tipoNodo"],
+            "tiponodo": fila["tiponodo"],
             "estado": fila["estado"],
             "direccion": fila["direccion"],
             "verificado_sietel": fila["verificado"],
