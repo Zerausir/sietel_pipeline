@@ -213,7 +213,7 @@ def update_map(territory_id, tipo_nodos, opera_estados, isp_nombres):
             mode="markers",
             marker={"size": 8, "color": color},
             name=tipo.title(),
-            text=subset["isp_nombre"].fillna("Prestador sin reportes de líneas") + " — " + subset[
+            text=subset["isp_nombre"].fillna("Prestador sin nombre registrado") + " — " + subset[
                 "nombre_parroquia"].fillna(""),
             hovertemplate="%{text}<br>Lat: %{lat:.5f} Lon: %{lon:.5f}<extra></extra>",
         ))
@@ -226,7 +226,7 @@ def update_map(territory_id, tipo_nodos, opera_estados, isp_nombres):
             mode="markers",
             marker={"size": 8, "color": PALETTE["muted"]},
             name="Otro / sin tipo",
-            text=otros["isp_nombre"].fillna("Prestador sin reportes de líneas") + " — " + otros[
+            text=otros["isp_nombre"].fillna("Prestador sin nombre registrado") + " — " + otros[
                 "nombre_parroquia"].fillna(""),
             hovertemplate="%{text}<br>Lat: %{lat:.5f} Lon: %{lon:.5f}<extra></extra>",
         ))

@@ -2607,11 +2607,31 @@ FROM mart.dim_territorio_nodo;
 -- también (ver README, tabla de roles) -- dashboard_lector NUNCA necesita
 -- GRANT directo sobre calidad, solo SELECT sobre esta vista. Primer puente
 -- calidad -> mart -> dashboard de este proyecto (antes no existía ninguno).
+-- isp_nombre se resuelve vía analitico.v_ultimo_periodo_reportado_detalle
+-- (mismo patrón que mart/detectar_discrepancias_geografia_nodo.py), NO vía
+-- mart.bridge_prestador_peva/dim_prestador -- esa vista parte de TODO
+-- dim_permiso_va_agregado (LEFT JOIN hacia los reportes), así que
+-- isp_nombre queda poblado aunque el PEVA nunca haya reportado una sola
+-- línea. bridge_prestador_peva/dim_prestador, en cambio, SOLO conoce PEVA
+-- con reportes -- confirmado en producción 07-ago-2026: 515 de 7000 nodos
+-- mostraban isp_nombre nulo (tooltip "null" en el mapa) por esta causa.
+--
+-- opera_actual SÍ sigue viniendo de dim_prestador (línea-reporte) a
+-- propósito -- es un dato genuinamente derivado del último reporte, no un
+-- hecho de identidad como isp_nombre. NULL ahí para quien nunca ha
+-- reportado es correcto y honesto, no el mismo bug.
 CREATE VIEW mart.vw_nodos_isp_mapa AS
+WITH isp_por_peva AS (
+    SELECT DISTINCT ON (v.peva_codigo)
+        v.peva_codigo, v.isp_nombre
+    FROM analitico.v_ultimo_periodo_reportado_detalle v
+    WHERE v.peva_codigo IS NOT NULL
+    ORDER BY v.peva_codigo, v.ultimo_anio DESC NULLS LAST, v.ultimo_periodo_numero DESC NULLS LAST
+)
 SELECT
     r.noisp_codigo,
     r.peva_codigo,
-    p.isp_nombre,
+    i.isp_nombre,
     p.opera_actual,
     r.tiponodo,
     r.latitud_decimal,
@@ -2632,12 +2652,13 @@ SELECT
     'CANTON|' || r.codigo_provincia || '|' || r.codigo_canton AS territorio_id_canton,
     'PARROQUIA|' || r.codigo_provincia || '|' || r.codigo_canton || '|' || r.codigo_parroquia AS territorio_id_parroquia
 FROM capa2.nodo_isp_geografia_resuelta r
+LEFT JOIN isp_por_peva i ON i.peva_codigo = r.peva_codigo
 LEFT JOIN mart.bridge_prestador_peva bp ON bp.peva_codigo = r.peva_codigo
 LEFT JOIN mart.dim_prestador p ON p.prestador_id = bp.prestador_id
 LEFT JOIN calidad.discrepancias_geografia_nodo d ON d.noisp_codigo = r.noisp_codigo;
 
 COMMENT ON VIEW mart.vw_nodos_isp_mapa IS
-'Universo completo de nodos ISP con coordenada válida y match espacial (mart/detectar_discrepancias_geografia_nodo.py). Geografía CONALI, autoritativa. es_discrepancia=true junto con par_codigo_reportado/etc NOT NULL indica que el par_codigo de SIETEL no coincide en cantón -- ver calidad.discrepancias_geografia_nodo para el workflow de revisión (solo lectura desde el dashboard, la revisión real ocurre fuera de OBTEL con el rol calidad_revisor).';
+'Universo completo de nodos ISP con coordenada válida y match espacial (mart/detectar_discrepancias_geografia_nodo.py). Geografía CONALI, autoritativa. isp_nombre viene de analitico.v_ultimo_periodo_reportado_detalle (cubre PEVA sin reportes); opera_actual viene de mart.dim_prestador (línea-reporte, NULL legítimo si nunca reportó). es_discrepancia=true junto con par_codigo_reportado/etc NOT NULL indica que el par_codigo de SIETEL no coincide en cantón -- ver calidad.discrepancias_geografia_nodo para el workflow de revisión (solo lectura desde el dashboard, la revisión real ocurre fuera de OBTEL con el rol calidad_revisor).';
 
 -- Geometría precomputada por nivel (parroquia/cantón/provincia), expuesta a
 -- dashboard_lector (capa2 es privado de mart_user) -- necesaria para
