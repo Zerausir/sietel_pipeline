@@ -2639,18 +2639,23 @@ LEFT JOIN calidad.discrepancias_geografia_nodo d ON d.noisp_codigo = r.noisp_cod
 COMMENT ON VIEW mart.vw_nodos_isp_mapa IS
 'Universo completo de nodos ISP con coordenada válida y match espacial (mart/detectar_discrepancias_geografia_nodo.py). Geografía CONALI, autoritativa. es_discrepancia=true junto con par_codigo_reportado/etc NOT NULL indica que el par_codigo de SIETEL no coincide en cantón -- ver calidad.discrepancias_geografia_nodo para el workflow de revisión (solo lectura desde el dashboard, la revisión real ocurre fuera de OBTEL con el rol calidad_revisor).';
 
--- Geometría por parroquia, expuesta a dashboard_lector (capa2 es privado de
--- mart_user) -- necesaria para dibujar el polígono semi-transparente del
--- territorio seleccionado en el mapa. Solo a nivel parroquia: cantón y
--- provincia se arman uniendo parroquias con shapely EN EL DASHBOARD
--- (services/queries.py:get_territory_geojson), no aquí -- este proyecto no
--- tiene PostGIS, no hay ST_Union disponible en SQL.
-CREATE VIEW mart.vw_geometria_parroquia_nodo AS
-SELECT codigo_parroquia, codigo_canton, codigo_provincia, geometria_geojson
-FROM capa2.parroquias_geometria;
+-- Geometría precomputada por nivel (parroquia/cantón/provincia), expuesta a
+-- dashboard_lector (capa2 es privado de mart_user) -- necesaria para
+-- dibujar el polígono semi-transparente del territorio seleccionado en el
+-- mapa. Cantón y provincia YA vienen disueltas (gdf.dissolve() en
+-- mart/cargar_parroquias.py, una sola vez al cargar el shapefile) -- el
+-- dashboard NO hace ninguna unión de polígonos en tiempo de consulta,
+-- confirmado en producción 07-ago-2026 que unir con shapely en cada
+-- petición era demasiado lento a nivel cantón, y mucho más a nivel
+-- provincia. Este proyecto no tiene PostGIS -- por eso la unión ocurre en
+-- Python (geopandas), no en SQL.
+CREATE VIEW mart.vw_geometria_territorio_nodo AS
+SELECT nivel_geografico, codigo_territorio, nombre_territorio,
+       geometria_geojson, lon_min, lat_min, lon_max, lat_max
+FROM capa2.territorio_geometria_nodo;
 
-COMMENT ON VIEW mart.vw_geometria_parroquia_nodo IS
-'Geometría GeoJSON por parroquia (shapefile CONALI), para el polígono del mapa de nodos. Cantón/provincia se unen en Python (shapely.ops.unary_union) al momento de la consulta -- sin PostGIS en este proyecto.';
+COMMENT ON VIEW mart.vw_geometria_territorio_nodo IS
+'Geometría GeoJSON precomputada por nivel geográfico (parroquia/cantón/provincia), para el polígono del mapa de nodos. Cantón y provincia ya vienen disueltas desde mart/cargar_parroquias.py (gdf.dissolve) -- el dashboard solo hace SELECT, nunca une polígonos en tiempo de consulta.';
 
 -- ============================================================
 -- 18. RE-OTORGAR ACCESO A dashboard_lector -- sobrevive a la reconstrucción

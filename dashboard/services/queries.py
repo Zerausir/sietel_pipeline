@@ -5,8 +5,6 @@ import json
 from typing import Any
 
 import pandas as pd
-from shapely.geometry import mapping, shape
-from shapely.ops import unary_union
 from sqlalchemy import text
 
 from extensions import cache
@@ -981,49 +979,45 @@ def get_territory_geojson(territory_id: str) -> tuple[dict, tuple[float, float, 
     """
     Geometría (GeoJSON) del territorio seleccionado, para el polígono
     semi-transparente del mapa de nodos. Devuelve (geojson, bounds) donde
-    bounds = (lon_min, lat_min, lon_max, lat_max) -- ya calculado aquí para
-    que las páginas no necesiten importar shapely solo para leer .bounds.
+    bounds = (lon_min, lat_min, lon_max, lat_max).
 
     NACIONAL devuelve None (rellenar todo el país no aporta nada). CANTON y
-    PROVINCIA se arman uniendo las parroquias que caen dentro con
-    shapely.ops.unary_union -- mart.vw_geometria_parroquia_nodo solo trae
-    geometría a nivel parroquia, no hay PostGIS en este proyecto para
-    hacer la unión en SQL.
+    PROVINCIA ya vienen disueltas -- mart.vw_geometria_territorio_nodo lee
+    directo de capa2.territorio_geometria_nodo, precalculada UNA VEZ en
+    mart/cargar_parroquias.py (gdf.dissolve, geopandas) al cargar el
+    shapefile. Este dashboard NUNCA une polígonos en tiempo de consulta --
+    confirmado en producción 07-ago-2026 que hacerlo aquí (con shapely, por
+    petición) era demasiado lento a nivel cantón y mucho peor a nivel
+    provincia.
     """
     if not territory_id or territory_id == "NACIONAL|ECUADOR":
         return None
 
     partes = territory_id.split("|")
     nivel = partes[0]
-
     if nivel == "PARROQUIA" and len(partes) == 4:
-        _, _provincia, _canton, parroquia = partes
-        df = _read(
-            "SELECT geometria_geojson FROM mart.vw_geometria_parroquia_nodo WHERE codigo_parroquia = :cod",
-            {"cod": parroquia},
-        )
+        codigo = partes[3]
     elif nivel == "CANTON" and len(partes) == 3:
-        _, provincia, canton = partes
-        df = _read(
-            "SELECT geometria_geojson FROM mart.vw_geometria_parroquia_nodo "
-            "WHERE codigo_provincia = :prov AND codigo_canton = :canton",
-            {"prov": provincia, "canton": canton},
-        )
+        codigo = partes[2]
     elif nivel == "PROVINCIA" and len(partes) == 2:
-        _, provincia = partes
-        df = _read(
-            "SELECT geometria_geojson FROM mart.vw_geometria_parroquia_nodo WHERE codigo_provincia = :prov",
-            {"prov": provincia},
-        )
+        codigo = partes[1]
     else:
         return None
 
+    df = _read(
+        """
+        SELECT geometria_geojson, lon_min, lat_min, lon_max, lat_max
+        FROM mart.vw_geometria_territorio_nodo
+        WHERE nivel_geografico = :nivel AND codigo_territorio = :codigo
+        """,
+        {"nivel": nivel, "codigo": codigo},
+    )
     if df.empty:
         return None
 
-    geometrias = [
-        shape(g if isinstance(g, dict) else json.loads(g))
-        for g in df["geometria_geojson"]
-    ]
-    geometria_unida = unary_union(geometrias) if len(geometrias) > 1 else geometrias[0]
-    return mapping(geometria_unida), geometria_unida.bounds
+    fila = df.iloc[0]
+    geojson = fila["geometria_geojson"]
+    if isinstance(geojson, str):
+        geojson = json.loads(geojson)
+    bounds = (float(fila["lon_min"]), float(fila["lat_min"]), float(fila["lon_max"]), float(fila["lat_max"]))
+    return geojson, bounds

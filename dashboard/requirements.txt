@@ -8,10 +8,3 @@ Flask-Caching==2.4.1
 Flask-Login==0.6.3
 bcrypt==5.0.0
 gunicorn==26.0.0
-
-# Union de poligonos de parroquias -> canton/provincia para el mapa de
-# nodos (mart.vw_geometria_parroquia_nodo solo trae geometria a nivel
-# parroquia -- sin PostGIS, la union se hace aqui, no en SQL). Misma
-# version que ya se confirmo compatible con Python 3.14 en mart/
-# (ver mart/requirements.txt, geopandas==1.1.4 arrastra shapely 2.1.2).
-shapely==2.1.2

@@ -20,6 +20,15 @@ Carga IDEMPOTENTE: si la tabla ya tiene datos, no hace nada -- mismo
 criterio que should_insert_geographic_data() en samm_pipeline. Para forzar
 una recarga (ej. CONALI publica una actualización), usar --forzar.
 
+AGREGADO 07-ago-2026: también precalcula y guarda las geometrías DISUELTAS
+de cantón y provincia (capa2.territorio_geometria_nodo, vía
+gdf.dissolve() de geopandas) -- confirmado en producción que unir decenas/
+cientos de parroquias con shapely EN CADA PETICIÓN del dashboard (nivel
+cantón) o CIENTOS por petición (nivel provincia) era demasiado lento,
+dejando la página del mapa esperando varios segundos. Se calcula una sola
+vez aquí, junto con la carga del shapefile -- el dashboard solo hace un
+SELECT directo (services/queries.py:get_territory_geojson), sin shapely.
+
 Uso:
     python cargar_parroquias.py                # carga solo si está vacía
     python cargar_parroquias.py --forzar        # recarga aunque ya tenga datos
@@ -100,6 +109,24 @@ _SENTENCIAS_DDL = [
     """
     COMMENT ON TABLE capa2.parroquias_geometria IS
     'Geometrías de parroquias de Ecuador, fuente CONALI (ver mart/data/shapefiles/parroquial/README.md para el detalle y la fecha de corte). Cargada una sola vez por mart/cargar_parroquias.py (idempotente) -- no se recarga en cada refresco de mart. Códigos VARCHAR(20), no numéricos de ancho fijo: CONALI incluye zonas especiales (en disputa/en estudio, insulares) con texto en vez de código INEC de 2/4/6 dígitos -- ver log de la carga para el listado de códigos no estándar detectados. Consumida por mart/detectar_discrepancias_geografia_nodo.py via shapely + STRtree, sin geopandas en tiempo de cruce.';
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS capa2.territorio_geometria_nodo (
+        nivel_geografico    VARCHAR(20) NOT NULL,
+        codigo_territorio   VARCHAR(20) NOT NULL,
+        nombre_territorio   VARCHAR(150) NOT NULL,
+        geometria_geojson   JSONB NOT NULL,
+        lon_min DOUBLE PRECISION NOT NULL,
+        lat_min DOUBLE PRECISION NOT NULL,
+        lon_max DOUBLE PRECISION NOT NULL,
+        lat_max DOUBLE PRECISION NOT NULL,
+        fecha_carga         TIMESTAMP NOT NULL DEFAULT now(),
+        PRIMARY KEY (nivel_geografico, codigo_territorio)
+    );
+    """,
+    """
+    COMMENT ON TABLE capa2.territorio_geometria_nodo IS
+    'Geometrías PRECALCULADAS por nivel geográfico (parroquia/cantón/provincia) para el mapa de nodos del dashboard -- cantón y provincia se arman con gdf.dissolve() (geopandas) UNA VEZ AQUÍ, no en cada petición del dashboard. Antes se unían con shapely en services/queries.py al momento de la consulta -- confirmado en producción 07-ago-2026 que era demasiado lento (varios segundos por petición a nivel provincia). Poblada junto con capa2.parroquias_geometria, misma idempotencia.';
     """,
 ]
 
@@ -234,6 +261,49 @@ def cargar_parroquias(forzar: bool = False, dry_run: bool = False) -> None:
 
     logger.info("%s parroquias listas para cargar (tras excluir inválidas).", len(registros))
 
+    # Geometrías disueltas de cantón y provincia -- gdf.dissolve() usa
+    # shapely.ops.unary_union internamente, pero UNA SOLA VEZ aquí, no en
+    # cada petición del dashboard (ver docstring del módulo).
+    logger.info("Disolviendo geometrías por cantón y provincia (gdf.dissolve)...")
+
+    registros_territorio = []
+
+    parroquias_gdf = gdf.copy()
+    parroquias_gdf["nivel_geografico"] = "PARROQUIA"
+    for _, row in parroquias_gdf.iterrows():
+        lon_min, lat_min, lon_max, lat_max = row.geometry.bounds
+        registros_territorio.append({
+            "nivel_geografico": "PARROQUIA",
+            "codigo_territorio": row["DPA_PARROQ"],
+            "nombre_territorio": row["DPA_DESPAR"],
+            "geometria_geojson": json.dumps(row.geometry.__geo_interface__),
+            "lon_min": lon_min, "lat_min": lat_min, "lon_max": lon_max, "lat_max": lat_max,
+        })
+
+    cantones_gdf = gdf.dissolve(by=["DPA_PROVIN", "DPA_CANTON"], aggfunc={"DPA_DESCAN": "first"}).reset_index()
+    for _, row in cantones_gdf.iterrows():
+        lon_min, lat_min, lon_max, lat_max = row.geometry.bounds
+        registros_territorio.append({
+            "nivel_geografico": "CANTON",
+            "codigo_territorio": row["DPA_CANTON"],
+            "nombre_territorio": row["DPA_DESCAN"],
+            "geometria_geojson": json.dumps(row.geometry.__geo_interface__),
+            "lon_min": lon_min, "lat_min": lat_min, "lon_max": lon_max, "lat_max": lat_max,
+        })
+    logger.info("%s cantones disueltos.", len(cantones_gdf))
+
+    provincias_gdf = gdf.dissolve(by="DPA_PROVIN", aggfunc={"DPA_DESPRO": "first"}).reset_index()
+    for _, row in provincias_gdf.iterrows():
+        lon_min, lat_min, lon_max, lat_max = row.geometry.bounds
+        registros_territorio.append({
+            "nivel_geografico": "PROVINCIA",
+            "codigo_territorio": row["DPA_PROVIN"],
+            "nombre_territorio": row["DPA_DESPRO"],
+            "geometria_geojson": json.dumps(row.geometry.__geo_interface__),
+            "lon_min": lon_min, "lat_min": lat_min, "lon_max": lon_max, "lat_max": lat_max,
+        })
+    logger.info("%s provincias disueltas.", len(provincias_gdf))
+
     if dry_run:
         logger.info("--dry-run: shapefile validado, no se escribió nada.")
         return
@@ -254,8 +324,25 @@ def cargar_parroquias(forzar: bool = False, dry_run: bool = False) -> None:
             """),
             registros,
         )
+        conn.execute(text("TRUNCATE TABLE capa2.territorio_geometria_nodo;"))
+        conn.execute(
+            text("""
+                INSERT INTO capa2.territorio_geometria_nodo (
+                    nivel_geografico, codigo_territorio, nombre_territorio,
+                    geometria_geojson, lon_min, lat_min, lon_max, lat_max
+                ) VALUES (
+                    :nivel_geografico, :codigo_territorio, :nombre_territorio,
+                    CAST(:geometria_geojson AS JSONB), :lon_min, :lat_min, :lon_max, :lat_max
+                )
+            """),
+            registros_territorio,
+        )
 
-    logger.info("capa2.parroquias_geometria cargada: %s parroquias.", len(registros))
+    logger.info(
+        "capa2.parroquias_geometria cargada: %s parroquias. "
+        "capa2.territorio_geometria_nodo cargada: %s registros (%s parroquia + %s cantón + %s provincia).",
+        len(registros), len(registros_territorio), len(parroquias_gdf), len(cantones_gdf), len(provincias_gdf),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
