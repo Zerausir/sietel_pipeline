@@ -251,7 +251,22 @@ def _sentencias_construccion() -> list[str]:
         "CREATE INDEX ON capa2._lineas_dedicadas_consolidado_next (periodo);",
         "CREATE INDEX ON capa2._lineas_dedicadas_consolidado_next (peva_codigo);",
         "CREATE INDEX ON capa2._lineas_dedicadas_consolidado_next (isp_ruc);",
-        "DROP TABLE IF EXISTS capa2.lineas_dedicadas_consolidado_prev;",
+        # CASCADE agregado 07-ago-2026: si aplicar_capa3.py falla DESPUÉS de
+        # que este script haga su "swap" (current -> _prev, next -> current)
+        # pero ANTES de reconstruir mart -- confirmado en producción, causa
+        # real: capa2.territorio_geometria_nodo faltante bloqueó
+        # aplicar_capa3 -- las vistas materializadas de mart quedan
+        # apuntando al objeto físico que ahora se llama "_prev" (Postgres
+        # las ata por OID al crearlas, no por nombre; un RENAME no las
+        # "seudo-actualiza"). La siguiente corrida de este script entonces
+        # no puede borrar "_prev" sin CASCADE. Es seguro: TODAS esas vistas
+        # materializadas las reconstruye aplicar_capa3.py desde cero
+        # (DROP SCHEMA mart CASCADE) en cada corrida de todas formas -- este
+        # CASCADE solo adelanta ese mismo borrado, nunca pierde datos reales
+        # (capa2._lineas_dedicadas_consolidado_prev es explícitamente
+        # desechable, "por si hay que comparar o revertir", nunca la única
+        # copia de nada).
+        "DROP TABLE IF EXISTS capa2.lineas_dedicadas_consolidado_prev CASCADE;",
         """ALTER TABLE IF EXISTS capa2.lineas_dedicadas_consolidado
                RENAME TO lineas_dedicadas_consolidado_prev;""",
         """ALTER TABLE capa2._lineas_dedicadas_consolidado_next
