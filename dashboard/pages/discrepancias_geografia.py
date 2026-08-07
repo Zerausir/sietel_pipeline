@@ -204,7 +204,8 @@ def update_discrepancias(territory_id, tipo_nodos, opera_estados, isp_nombres):
         mode="markers",
         marker={"size": 9, "color": PALETTE["red"]},
         text=(
-                df["isp_nombre"] + " — reportado: " + df["canton_reportado_nombre"].fillna("?")
+                df["isp_nombre"].fillna("Prestador sin reportes de líneas") + " — reportado: " + df[
+            "canton_reportado_nombre"].fillna("?")
                 + " / real: " + df["nombre_canton"].fillna("?")
         ),
         hovertemplate="%{text}<br>Lat: %{lat:.5f} Lon: %{lon:.5f}<extra></extra>",
