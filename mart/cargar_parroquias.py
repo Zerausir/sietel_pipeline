@@ -166,7 +166,36 @@ def _reportar_codigos_no_estandar(gdf) -> None:
         )
 
 
-def _tabla_tiene_datos(engine) -> bool:
+def _contar_vertices(geom) -> int:
+    """Cuenta vértices totales de un Polygon/MultiPolygon, para medir el
+    efecto de simplify() antes/después -- no es una estimación, es exacta."""
+    if geom.geom_type == "Polygon":
+        return len(geom.exterior.coords) + sum(len(interior.coords) for interior in geom.interiors)
+    if geom.geom_type == "MultiPolygon":
+        return sum(_contar_vertices(g) for g in geom.geoms)
+    return 0
+
+
+# Tolerancia de simplify() en GRADOS (mismo sistema de coordenadas que el
+# resto del pipeline, WGS84) -- 0.001° ≈ 111 m en el ecuador. Mayor
+# tolerancia en niveles más grandes: una provincia con el detalle de costa
+# completo de CONALI puede tener decenas de miles de vértices -- suficiente
+# para colgar el navegador al dibujarla en Mapbox GL (confirmado en
+# producción 07-ago-2026, "La página no responde" al elegir Provincia,
+# incluso con la consulta SQL ya siendo instantánea). SOLO afecta
+# capa2.territorio_geometria_nodo (geometría de DISPLAY del mapa) -- NUNCA
+# capa2.parroquias_geometria, que alimenta el cruce punto-en-polígono real
+# en mart/detectar_discrepancias_geografia_nodo.py y ahí sí necesita
+# precisión completa, sin simplificar.
+_TOLERANCIA_SIMPLIFY = {"PARROQUIA": 0.0005, "CANTON": 0.001, "PROVINCIA": 0.002}
+
+
+def _geojson_simplificado(geom, nivel: str) -> tuple[str, int, int]:
+    """Simplifica una sola vez y devuelve (geojson, vertices_antes, vertices_despues)."""
+    vertices_antes = _contar_vertices(geom)
+    simplificada = geom.simplify(_TOLERANCIA_SIMPLIFY[nivel], preserve_topology=True)
+    vertices_despues = _contar_vertices(simplificada)
+    return json.dumps(simplificada.__geo_interface__), vertices_antes, vertices_despues
     with engine.connect() as conn:
         existe = conn.execute(
             text("SELECT TO_REGCLASS('capa2.parroquias_geometria') IS NOT NULL")
@@ -267,27 +296,35 @@ def cargar_parroquias(forzar: bool = False, dry_run: bool = False) -> None:
     logger.info("Disolviendo geometrías por cantón y provincia (gdf.dissolve)...")
 
     registros_territorio = []
+    vertices_antes_total = 0
+    vertices_despues_total = 0
 
     parroquias_gdf = gdf.copy()
     parroquias_gdf["nivel_geografico"] = "PARROQUIA"
     for _, row in parroquias_gdf.iterrows():
         lon_min, lat_min, lon_max, lat_max = row.geometry.bounds
+        geojson_simplificado, v_antes, v_despues = _geojson_simplificado(row.geometry, "PARROQUIA")
+        vertices_antes_total += v_antes
+        vertices_despues_total += v_despues
         registros_territorio.append({
             "nivel_geografico": "PARROQUIA",
             "codigo_territorio": row["DPA_PARROQ"],
             "nombre_territorio": row["DPA_DESPAR"],
-            "geometria_geojson": json.dumps(row.geometry.__geo_interface__),
+            "geometria_geojson": geojson_simplificado,
             "lon_min": lon_min, "lat_min": lat_min, "lon_max": lon_max, "lat_max": lat_max,
         })
 
     cantones_gdf = gdf.dissolve(by=["DPA_PROVIN", "DPA_CANTON"], aggfunc={"DPA_DESCAN": "first"}).reset_index()
     for _, row in cantones_gdf.iterrows():
         lon_min, lat_min, lon_max, lat_max = row.geometry.bounds
+        geojson_simplificado, v_antes, v_despues = _geojson_simplificado(row.geometry, "CANTON")
+        vertices_antes_total += v_antes
+        vertices_despues_total += v_despues
         registros_territorio.append({
             "nivel_geografico": "CANTON",
             "codigo_territorio": row["DPA_CANTON"],
             "nombre_territorio": row["DPA_DESCAN"],
-            "geometria_geojson": json.dumps(row.geometry.__geo_interface__),
+            "geometria_geojson": geojson_simplificado,
             "lon_min": lon_min, "lat_min": lat_min, "lon_max": lon_max, "lat_max": lat_max,
         })
     logger.info("%s cantones disueltos.", len(cantones_gdf))
@@ -295,14 +332,26 @@ def cargar_parroquias(forzar: bool = False, dry_run: bool = False) -> None:
     provincias_gdf = gdf.dissolve(by="DPA_PROVIN", aggfunc={"DPA_DESPRO": "first"}).reset_index()
     for _, row in provincias_gdf.iterrows():
         lon_min, lat_min, lon_max, lat_max = row.geometry.bounds
+        geojson_simplificado, v_antes, v_despues = _geojson_simplificado(row.geometry, "PROVINCIA")
+        vertices_antes_total += v_antes
+        vertices_despues_total += v_despues
         registros_territorio.append({
             "nivel_geografico": "PROVINCIA",
             "codigo_territorio": row["DPA_PROVIN"],
             "nombre_territorio": row["DPA_DESPRO"],
-            "geometria_geojson": json.dumps(row.geometry.__geo_interface__),
+            "geometria_geojson": geojson_simplificado,
             "lon_min": lon_min, "lat_min": lat_min, "lon_max": lon_max, "lat_max": lat_max,
         })
     logger.info("%s provincias disueltas.", len(provincias_gdf))
+
+    reduccion_pct = (
+        100 * (1 - vertices_despues_total / vertices_antes_total) if vertices_antes_total else 0
+    )
+    logger.info(
+        "Simplificación de geometría de display: %s vértices -> %s vértices (%.1f%% de reducción). "
+        "capa2.parroquias_geometria (cruce punto-en-polígono) NO se toca -- geometría completa, sin simplificar.",
+        vertices_antes_total, vertices_despues_total, reduccion_pct,
+    )
 
     if dry_run:
         logger.info("--dry-run: shapefile validado, no se escribió nada.")
