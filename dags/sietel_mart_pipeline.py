@@ -13,9 +13,14 @@ Orquesta el refresco del mart analítico consumido por el dashboard:
                                       parroquias CONALI a
                                       capa2.parroquias_geometria (GeoJSON).
                                       Solo escribe si la tabla está vacía.
-                                      Cruce espacial en sí (Parte B) aún no
-                                      implementado -- ver
-                                      mart/cargar_parroquias.py.
+  3c. detectar_discrepancias_geografia_nodo — Parte B: cruce punto-en-
+                                      polígono (shapely + STRtree) contra
+                                      capa2.parroquias_geometria, compara
+                                      contra el codigo_parroquia reportado,
+                                      UPSERT a
+                                      calidad.discrepancias_geografia_nodo
+                                      preservando el workflow de revisión
+                                      humana.
   4. aplicar_capa3                 — aplica sql/02_ddl_mart.sql completo (mart.*).
 
 Manual (schedule=None), mismo criterio que sietel_usuarios_cuentas_pipeline.
@@ -86,6 +91,12 @@ def sietel_mart_pipeline():
         _run(forzar=False, dry_run=False)
 
     @task
+    def detectar_discrepancias_geografia_nodo():
+        """Parte B: cruce punto-en-polígono, UPSERT a calidad.discrepancias_geografia_nodo."""
+        from detectar_discrepancias_geografia_nodo import detectar_discrepancias_geografia_nodo as _run
+        _run(dry_run=False)
+
+    @task
     def aplicar_capa3():
         """Aplica sql/02_ddl_mart.sql completo (Capa 3: mart.*)."""
         from aplicar_capa3 import aplicar as _run
@@ -95,9 +106,10 @@ def sietel_mart_pipeline():
     construccion = construir_capa2()
     geocodificacion = limpiar_coordenadas_nodo_isp()
     parroquias = cargar_parroquias()
+    discrepancias_geo = detectar_discrepancias_geografia_nodo()
     aplicacion = aplicar_capa3()
 
-    deteccion >> construccion >> geocodificacion >> parroquias >> aplicacion
+    deteccion >> construccion >> geocodificacion >> parroquias >> discrepancias_geo >> aplicacion
 
 
 sietel_mart_pipeline()
