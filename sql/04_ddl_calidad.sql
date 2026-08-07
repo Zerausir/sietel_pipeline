@@ -218,6 +218,18 @@ CREATE TABLE IF NOT EXISTS calidad.discrepancias_geografia_nodo (
     fecha_ultima_deteccion        TIMESTAMP NOT NULL DEFAULT now()
 );
 
+-- CRÍTICO, y la causa real del InsufficientPrivilege del 07-ago-2026: este
+-- archivo está diseñado para correr conectado COMO mart_user (ver
+-- encabezado del archivo) -- así CREATE TABLE deja a mart_user como dueño
+-- automáticamente. Pero en la práctica este archivo se ha aplicado con
+-- `sudo -u postgres psql -f ...` durante toda esta conversación, no
+-- conectado como mart_user -- así que esta tabla quedó con dueño
+-- `postgres`, sin ningún permiso implícito para mart_user (que es quien
+-- realmente necesita escribir aquí, desde
+-- mart/detectar_discrepancias_geografia_nodo.py). ALTER OWNER es idempotente
+-- y corrige esto sin importar qué rol haya ejecutado el CREATE TABLE.
+ALTER TABLE calidad.discrepancias_geografia_nodo OWNER TO mart_user;
+
 COMMENT ON TABLE calidad.discrepancias_geografia_nodo IS
 'Nodos ISP donde la parroquia derivada de latitud/longitud (shapefile CONALI, punto-en-poligono) no coincide con la parroquia reportada en SIETEL. Recalculado en cada refresco via UPSERT (mart/detectar_discrepancias_geografia_nodo.py, Parte B, pendiente del shapefile) -- columnas de workflow preservadas entre corridas, igual que calidad.conflictos_ruc_peva. No incluye nodos con coordenada invalida (ver capa2.nodo_isp_geocodificado.es_coordenada_valida) -- causa raiz distinta.';
 
