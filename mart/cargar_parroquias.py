@@ -157,6 +157,23 @@ def cargar_parroquias(forzar: bool = False, dry_run: bool = False) -> None:
             f"para el comando scp de transferencia -- el shapefile nunca viaja por Git."
         )
 
+    # Verificación idempotente PRIMERO, antes de leer el shapefile -- no
+    # después. Confirmado en producción 07-ago-2026: la versión anterior
+    # leía/reproyectaba el .shp de 223 MB completo (~35-40s) y RECIÉN
+    # entonces comprobaba si hacía falta -- desperdiciando ese trabajo en
+    # cada corrida mensual del DAG una vez que la tabla ya tiene datos.
+    # --dry-run sigue leyendo el shapefile igual (para eso sirve: validar
+    # sin escribir), pero una corrida normal ya cargada debe salir casi
+    # instantáneo, sin tocar el archivo.
+    if not dry_run:
+        engine = _engine()
+        if _tabla_tiene_datos(engine) and not forzar:
+            logger.info(
+                "capa2.parroquias_geometria ya tiene datos -- carga omitida (idempotente), "
+                "sin leer el shapefile. Usa --forzar para recargar."
+            )
+            return
+
     logger.info("Leyendo shapefile: %s", RUTA_SHAPEFILE)
     gdf = gpd.read_file(RUTA_SHAPEFILE)
     logger.info("Shapefile leído: %s parroquias, CRS declarado: %s", len(gdf), gdf.crs)
@@ -219,15 +236,6 @@ def cargar_parroquias(forzar: bool = False, dry_run: bool = False) -> None:
 
     if dry_run:
         logger.info("--dry-run: shapefile validado, no se escribió nada.")
-        return
-
-    engine = _engine()
-
-    if _tabla_tiene_datos(engine) and not forzar:
-        logger.info(
-            "capa2.parroquias_geometria ya tiene datos -- carga omitida (idempotente). "
-            "Usa --forzar para recargar."
-        )
         return
 
     with engine.begin() as conn:
