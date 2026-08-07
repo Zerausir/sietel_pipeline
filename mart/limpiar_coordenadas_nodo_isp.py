@@ -127,6 +127,42 @@ def _validar_rango(lat: float | None, lon: float | None) -> tuple[bool, str | No
     return True, None
 
 
+_PATRON_LETRA_HEMISFERIO = re.compile(r"[NSOEW]", re.IGNORECASE)
+
+
+def inferir_hemisferio_longitud_faltante(texto_original: str, lon_decimal: float | None) -> tuple[float | None, bool]:
+    """
+    CASO DISTINTO de una "corrección automática" (ver principio del
+    docstring del módulo) -- esto no es adivinar la intención de una
+    captura ambigua, es aplicar un hecho geográfico verdadero el 100% de
+    las veces para este dataset: SIETEL es exclusivamente Ecuador, y
+    Ecuador está enteramente al oeste del meridiano de Greenwich (longitud
+    siempre negativa, continental e insular). Si el texto original NO trae
+    ninguna letra de hemisferio (N/S/E/O/W en ninguna posición) y el valor
+    convertido salió positivo, se infiere el signo negativo.
+
+    NUNCA se aplica si el texto SÍ trae una letra de hemisferio, aunque esa
+    letra produzca un valor fuera de rango (ej. alguien escribió "E" por
+    error) -- ahí hay una señal explícita de la persona que capturó el
+    dato, y confiamos en ella tal cual, correcta o no; solo se completa la
+    ausencia total de señal, nunca se corrige una señal presente.
+
+    Confirmado en producción 07-ago-2026: 54 nodos con longitud sin letra
+    de hemisferio (de 159 inválidos por rango) -- ver diagnóstico manual
+    contra capa2.nodo_isp_geocodificado.longitud_original. Deliberadamente
+    NO se aplica el mismo criterio a latitud: Ecuador cruza la línea
+    ecuatorial, así que una latitud positiva cerca de 0 sin letra puede ser
+    Norte genuino -- ahí sí sería adivinar, no aplicar un hecho.
+
+    Devuelve (valor_corregido, se_infirio_signo).
+    """
+    if lon_decimal is None or lon_decimal <= 0:
+        return lon_decimal, False
+    if _PATRON_LETRA_HEMISFERIO.search(texto_original or ""):
+        return lon_decimal, False
+    return -lon_decimal, True
+
+
 def _sentencias_ddl() -> list[str]:
     return [
         "CREATE SCHEMA IF NOT EXISTS capa2;",
@@ -145,6 +181,7 @@ def _sentencias_ddl() -> list[str]:
             longitud_original     VARCHAR(20),
             latitud_decimal       DOUBLE PRECISION,
             longitud_decimal      DOUBLE PRECISION,
+            hemisferio_longitud_inferido BOOLEAN NOT NULL DEFAULT false,
             es_coordenada_valida  BOOLEAN NOT NULL,
             motivo_invalida       TEXT,
             fecha_procesado       TIMESTAMP NOT NULL DEFAULT now()
@@ -154,7 +191,7 @@ def _sentencias_ddl() -> list[str]:
         "CREATE INDEX ON capa2.nodo_isp_geocodificado (es_coordenada_valida);",
         """
         COMMENT ON TABLE capa2.nodo_isp_geocodificado IS
-        'Parte A del geoprocesamiento de nodos ISP: latitud/longitud de dbo.NodoISP convertidas de DMS a decimal, validadas contra el bounding box de Ecuador. Sin cruce espacial contra parroquias todavia (Parte B, pendiente shapefile CONALI ORGANIZACION_TERRITORIAL_PARROQUIAL). Ninguna coordenada fuera de rango se corrige automaticamente -- se marca es_coordenada_valida=false con motivo_invalida, para revision, nunca se adivina un valor.';
+        'Parte A del geoprocesamiento de nodos ISP: latitud/longitud de dbo.NodoISP convertidas de DMS a decimal, validadas contra el bounding box de Ecuador. Sin cruce espacial contra parroquias todavia (Parte B, pendiente shapefile CONALI ORGANIZACION_TERRITORIAL_PARROQUIAL). Ninguna coordenada fuera de rango se corrige automaticamente -- se marca es_coordenada_valida=false con motivo_invalida, para revision, nunca se adivina un valor. EXCEPCION explicita: hemisferio_longitud_inferido=true marca nodos donde la longitud no traia letra de hemisferio y se infirio negativa por ser Ecuador (hecho geografico, no suposicion) -- ver inferir_hemisferio_longitud_faltante().';
         """,
     ]
 
@@ -163,11 +200,13 @@ _SQL_INSERT = text("""
     INSERT INTO capa2.nodo_isp_geocodificado (
         noisp_codigo, peva_codigo, par_codigo, noisp_nombre, tiponodo, estado,
         direccion, verificado_sietel, latitud_original, longitud_original,
-        latitud_decimal, longitud_decimal, es_coordenada_valida, motivo_invalida
+        latitud_decimal, longitud_decimal, hemisferio_longitud_inferido,
+        es_coordenada_valida, motivo_invalida
     ) VALUES (
         :noisp_codigo, :peva_codigo, :par_codigo, :noisp_nombre, :tiponodo, :estado,
         :direccion, :verificado_sietel, :latitud_original, :longitud_original,
-        :latitud_decimal, :longitud_decimal, :es_coordenada_valida, :motivo_invalida
+        :latitud_decimal, :longitud_decimal, :hemisferio_longitud_inferido,
+        :es_coordenada_valida, :motivo_invalida
     )
 """)
 
@@ -186,10 +225,17 @@ def limpiar_coordenadas(dry_run: bool = False) -> None:
 
     registros = []
     validas = 0
+    hemisferios_inferidos = 0
     motivos_invalidez: dict[str, int] = {}
     for fila in filas:
         lat_dec, motivo_lat = convertir_dms_a_decimal(fila["latitud"])
         lon_dec, motivo_lon = convertir_dms_a_decimal(fila["longitud"])
+
+        lon_dec, se_infirio_hemisferio = inferir_hemisferio_longitud_faltante(fila["longitud"], lon_dec)
+        if se_infirio_hemisferio:
+            motivo_lon = None  # la conversión original fue exitosa, solo faltaba el signo
+            hemisferios_inferidos += 1
+
         es_valida, motivo_rango = _validar_rango(lat_dec, lon_dec)
 
         motivo = None
@@ -214,6 +260,7 @@ def limpiar_coordenadas(dry_run: bool = False) -> None:
             "longitud_original": fila["longitud"],
             "latitud_decimal": lat_dec if es_valida else None,
             "longitud_decimal": lon_dec if es_valida else None,
+            "hemisferio_longitud_inferido": se_infirio_hemisferio,
             "es_coordenada_valida": es_valida,
             "motivo_invalida": motivo,
         })
@@ -223,6 +270,12 @@ def limpiar_coordenadas(dry_run: bool = False) -> None:
         "Procesados %s nodos: %s con coordenada válida (%.1f%%), %s inválida/no convertible.",
         total, validas, 100 * validas / total if total else 0, total - validas,
     )
+    if hemisferios_inferidos:
+        logger.info(
+            "De las válidas, %s tuvieron el hemisferio de longitud inferido "
+            "(texto sin letra N/S/E/O/W -- Ecuador es 100%% longitud oeste, no es una suposición).",
+            hemisferios_inferidos,
+        )
     for motivo_resumen, cantidad in sorted(motivos_invalidez.items(), key=lambda kv: -kv[1]):
         logger.info("  motivo=%s -> %s nodos", motivo_resumen, cantidad)
 
