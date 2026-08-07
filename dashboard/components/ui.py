@@ -135,6 +135,53 @@ def empty_figure(message: str = "No hay datos para los filtros seleccionados") -
     return fig
 
 
+def compute_mapbox_view(
+        lat_min: float, lat_max: float, lon_min: float, lon_max: float,
+        default_zoom: float = 5.2,
+) -> tuple[dict[str, float], float]:
+    """
+    Centro y zoom aproximados de un mapbox a partir de un rango de
+    coordenadas -- Scattermapbox no tiene un "fit bounds" automático como
+    Leaflet, así que se estima el zoom por el tamaño del rango (heurística
+    simple, no exacta, pero suficiente para que el mapa quede centrado y a
+    una escala razonable al elegir un territorio).
+    """
+    if not all(map(lambda v: v is not None and not pd.isna(v), (lat_min, lat_max, lon_min, lon_max))):
+        return {"lat": -1.5, "lon": -78.5}, default_zoom
+
+    center = {"lat": (lat_min + lat_max) / 2, "lon": (lon_min + lon_max) / 2}
+    rango = max(lat_max - lat_min, lon_max - lon_min)
+    if rango < 0.02:
+        zoom = 13.0
+    elif rango < 0.05:
+        zoom = 12.0
+    elif rango < 0.1:
+        zoom = 11.0
+    elif rango < 0.2:
+        zoom = 10.0
+    elif rango < 0.5:
+        zoom = 9.0
+    elif rango < 1:
+        zoom = 8.0
+    elif rango < 2:
+        zoom = 7.0
+    elif rango < 4:
+        zoom = 6.3
+    else:
+        zoom = default_zoom
+    return center, zoom
+
+
+def mapbox_polygon_layers(geojson: dict, color: str) -> list[dict[str, Any]]:
+    """Relleno semi-transparente + borde del territorio seleccionado, para
+    layout.mapbox.layers. Dos capas separadas (fill + line) porque un solo
+    layer de tipo 'fill' en Plotly no dibuja borde propio."""
+    return [
+        {"source": geojson, "type": "fill", "color": color, "opacity": 0.16, "below": "traces"},
+        {"source": geojson, "type": "line", "color": color, "line": {"width": 1.5}, "below": "traces"},
+    ]
+
+
 def style_figure(fig: go.Figure, *, height: int = 380, hovermode: str = "x unified") -> go.Figure:
     fig.update_layout(
         template="plotly_white",

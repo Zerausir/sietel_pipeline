@@ -22,8 +22,11 @@ from dash import Input, Output, callback, dcc, html, register_page
 import dash_ag_grid as dag
 
 from components.node_territory_filters import node_territory_filter_layout, register_node_territory_callbacks
-from components.ui import PALETTE, clean_records, empty_figure, error_panel, page_header
-from services.queries import get_node_provider_options, get_node_types, get_nodos_mapa, get_operation_states
+from components.ui import PALETTE, clean_records, compute_mapbox_view, empty_figure, error_panel, mapbox_polygon_layers, \
+    page_header
+from services.queries import (
+    get_node_provider_options, get_node_types, get_nodos_mapa, get_operation_states, get_territory_geojson,
+)
 
 register_page(__name__, path="/sai/mapa-nodos", name="Mapa de nodos", order=2)
 PREFIX = "mnodo"
@@ -114,7 +117,13 @@ def layout():
                             ),
                         ],
                     ),
-                    dcc.Loading(dcc.Graph(id=f"{PREFIX}-map", config={"displaylogo": False}), type="circle"),
+                    dcc.Loading(
+                        dcc.Graph(
+                            id=f"{PREFIX}-map",
+                            config={"displaylogo": False, "scrollZoom": True},
+                        ),
+                        type="circle",
+                    ),
                 ],
             ),
             html.Section(
@@ -220,8 +229,30 @@ def update_map(territory_id, tipo_nodos, opera_estados, isp_nombres):
             hovertemplate="%{text}<br>Lat: %{lat:.5f} Lon: %{lon:.5f}<extra></extra>",
         ))
 
+    # Auto-zoom: si hay un territorio distinto de Nacional, se centra y
+    # ajusta el zoom al polígono real del territorio (provincia/cantón/
+    # parroquia), no solo a los nodos visibles -- así el mapa no queda
+    # descentrado si el filtro deja pocos puntos en una esquina del
+    # territorio. A nivel Nacional, sin polígono (rellenar todo el país no
+    # aporta nada visualmente), se usa el rango de los nodos mostrados.
+    resultado_geojson = get_territory_geojson(territory_id)
+    mapbox_layout: dict = {"style": "open-street-map"}
+    if resultado_geojson:
+        geojson, (lon_min, lat_min, lon_max, lat_max) = resultado_geojson
+        center, zoom = compute_mapbox_view(lat_min, lat_max, lon_min, lon_max)
+        mapbox_layout["layers"] = mapbox_polygon_layers(geojson, PALETTE["navy"])
+    elif not df.empty:
+        center, zoom = compute_mapbox_view(
+            df["latitud_decimal"].min(), df["latitud_decimal"].max(),
+            df["longitud_decimal"].min(), df["longitud_decimal"].max(),
+        )
+    else:
+        center, zoom = {"lat": -1.5, "lon": -78.5}, 5.2
+    mapbox_layout["center"] = center
+    mapbox_layout["zoom"] = zoom
+
     fig.update_layout(
-        mapbox={"style": "open-street-map", "zoom": 5.2, "center": {"lat": -1.5, "lon": -78.5}},
+        mapbox=mapbox_layout,
         margin={"l": 0, "r": 0, "t": 0, "b": 0},
         height=560,
         legend={"orientation": "h", "y": 1.02, "x": 0},
