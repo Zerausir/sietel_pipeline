@@ -196,6 +196,9 @@ def _geojson_simplificado(geom, nivel: str) -> tuple[str, int, int]:
     simplificada = geom.simplify(_TOLERANCIA_SIMPLIFY[nivel], preserve_topology=True)
     vertices_despues = _contar_vertices(simplificada)
     return json.dumps(simplificada.__geo_interface__), vertices_antes, vertices_despues
+
+
+def _tabla_tiene_datos(engine) -> bool:
     with engine.connect() as conn:
         existe = conn.execute(
             text("SELECT TO_REGCLASS('capa2.parroquias_geometria') IS NOT NULL")
