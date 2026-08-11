@@ -21,9 +21,23 @@ un corte fijo escondido en SQL -- mismo principio que las vistas fuente
 (vw_prestadores_sin_reportar/vw_prestadores_reporte_detenido), que
 deliberadamente no filtran nada por sí mismas.
 
-Solo lectura, sin territorio (estas tres inconsistencias son a nivel
-Nacional -- ver el límite ya documentado en vw_prestadores_sin_reportar:
-SIETEL no conoce la geografía de quien nunca reportó).
+FILTROS (12-ago-2026, a pedido de Iván): panel único arriba de la página
+-- territory_filter_layout/shared_filters_layout, MISMOS componentes que
+Evolución/Concentración (comparten "shared-territory"/"shared-filters" en
+app.py: elegir un territorio o prestador en cualquiera de esas páginas ya
+llega preseleccionado aquí). Aplican de forma DESIGUAL entre las tres
+secciones, porque las fuentes de datos no son simétricas -- no es un
+descuido, está documentado en cada función de services/queries.py:
+  - "Nunca han reportado": SOLO Estado/Prestador. La vista fuente no tiene
+    columna de geografía (SIETEL no conoce la ubicación de quien nunca
+    reportó) ni de período (es "alguna vez, sí/no", no una serie de tiempo).
+  - "Reporte detenido": territorio = "reportó alguna vez ahí" (no la
+    geografía de su último reporte, la vista no la tiene por prestador);
+    Desde/Hasta filtra por fecha del ÚLTIMO reporte, no por "meses mínimos
+    sin reportar" (ese sigue siendo su propio control, con otro sentido).
+  - "Variación mensual": los cinco filtros aplican tal cual, recalculando
+    la suma de cuentas EN el territorio elegido antes de comparar mes a
+    mes (mismo principio que get_evolution_filtrado).
 """
 from __future__ import annotations
 
@@ -34,10 +48,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 from dash import Input, Output, callback, dcc, html, register_page
 
+from components.filters_shared import register_shared_filters_callbacks, shared_filters_layout
+from components.territory_filters import register_territory_callbacks, territory_filter_layout
 from components.ui import (
-    PALETTE, chart_card, clean_records, empty_figure, error_panel, excel_download_button, format_number,
-    month_year_picker, numeric_stepper, page_header, register_excel_download_callback,
-    register_month_year_picker_callback, style_figure,
+    PALETTE, chart_card, clean_records, empty_figure, error_panel, excel_download_button, filters_summary_bar,
+    format_number, kpi_card, month_year_picker, numeric_stepper, page_header, register_excel_download_callback,
+    register_filters_summary_callback, register_month_year_picker_callback, style_figure,
 )
 from services.queries import (
     get_periods, get_prestadores_nunca_reportaron_detalle, get_prestadores_reporte_detenido_detalle,
@@ -46,34 +62,6 @@ from services.queries import (
 
 register_page(__name__, path="/sai/control", name="Control", order=4)
 PREFIX = "ctrl"
-
-
-def _kpi_card_static(title: str, value: str, note: str = "") -> html.Div:
-    """
-    Igual que components/ui.py:kpi_card(), pero con el valor ya resuelto
-    en vez de un placeholder "—" a la espera de un callback -- estas
-    cuatro cifras se calculan una sola vez al construir el layout (no
-    dependen de ningún filtro de la página), así que no necesitan
-    Output/Input propios.
-    """
-    title_row = [html.Span(title, className="kpi-title-text")]
-    if note:
-        title_row.append(
-            html.Div(
-                className="kpi-info",
-                children=[
-                    html.Span("i", className="kpi-info-icon"),
-                    html.Div(note, className="kpi-info-tooltip"),
-                ],
-            )
-        )
-    return html.Div(
-        className="kpi-card",
-        children=[
-            html.Div(title_row, className="kpi-title-row"),
-            html.Div(value, className="kpi-value"),
-        ],
-    )
 
 
 def _period_options():
@@ -91,66 +79,6 @@ def layout():
     except Exception as exc:
         return html.Div([page_header("Control", ""), error_panel(str(exc))])
 
-    # "Prestadores que nunca han reportado" no depende de ningún filtro de
-    # la página -- se calcula una sola vez al construir el layout, igual
-    # que min_period/max_period arriba. CORRECCIÓN (11-ago-2026): antes
-    # vivía en un @callback disparado con Input("ctrl-nunca-grid", "id"),
-    # que NUNCA se ejecuta -- "id" no es una prop observable por el motor
-    # de callbacks de Dash (a diferencia de "data"/"value"/"children").
-    # Confirmado en producción: las 4 tarjetas KPI quedaban en "—" y la
-    # tabla en "No Rows To Show" porque la función nunca corría.
-    try:
-        df_nunca = get_prestadores_nunca_reportaron_detalle()
-    except Exception as exc:
-        df_nunca = None
-        error_nunca = str(exc)
-    else:
-        error_nunca = None
-
-    if df_nunca is None:
-        kpi_activo = kpi_no_operativo = kpi_zona_gris = kpi_total = "—"
-        nota_kpi = f"No se pudo calcular: {error_nunca}"
-        nunca_fig = empty_figure("No se pudo consultar PostgreSQL")
-    elif df_nunca.empty:
-        kpi_activo = kpi_no_operativo = kpi_zona_gris = kpi_total = "0"
-        nota_kpi = ""
-        nunca_fig = empty_figure("No hay prestadores sin reportar")
-    else:
-        conteos = df_nunca["clasificacion_incumplimiento"].value_counts()
-        kpi_activo = format_number(int(conteos.get("activo_sin_reportar", 0)))
-        kpi_no_operativo = format_number(int(conteos.get("no_operativo", 0)))
-        kpi_zona_gris = format_number(int(conteos.get("zona_gris", 0)))
-        kpi_total = format_number(len(df_nunca))
-        nota_kpi = ""
-
-        # Barras horizontales, no dona/pastel -- con solo 3 categorías el
-        # objetivo es comparar magnitudes con precisión (104 vs 125 vs 56),
-        # algo que un gráfico circular hace mal por diseño (el ojo humano
-        # compara longitudes mucho mejor que ángulos/áreas). Orden fijo
-        # (no por magnitud) para que la lectura sea siempre la misma:
-        # el caso de incumplimiento real primero.
-        categorias = ["activo_sin_reportar", "no_operativo", "zona_gris"]
-        etiquetas = {
-            "activo_sin_reportar": "Activo sin reportar",
-            "no_operativo": "No operativo",
-            "zona_gris": "Zona gris",
-        }
-        colores = {
-            "activo_sin_reportar": PALETTE["red"],
-            "no_operativo": PALETTE["muted"],
-            "zona_gris": PALETTE["cyan"],
-        }
-        valores = [int(conteos.get(c, 0)) for c in categorias]
-        nunca_fig = go.Figure(go.Bar(
-            x=valores, y=[etiquetas[c] for c in categorias], orientation="h",
-            marker_color=[colores[c] for c in categorias],
-            text=valores, textposition="outside",
-            hovertemplate="%{y}: %{x}<extra></extra>",
-        ))
-        style_figure(nunca_fig, height=230, hovermode="closest")
-        nunca_fig.update_xaxes(title="Prestadores")
-        nunca_fig.update_yaxes(title="")
-
     return html.Div(
         children=[
             page_header(
@@ -158,26 +86,36 @@ def layout():
                 "Inconsistencias de reporte para seguimiento regulatorio -- prestadores sin reportar, "
                 "reportes detenidos y variaciones mensuales fuera de lo normal.",
             ),
-            html.H3("Prestadores que nunca han reportado"),
+            html.Section(
+                className="filter-panel",
+                children=[
+                    territory_filter_layout(PREFIX),
+                    html.Div(
+                        className="period-grid four-periods",
+                        children=[
+                            month_year_picker("ctrl-start-period", "Desde", min_period, min_period, max_period),
+                            month_year_picker("ctrl-end-period", "Hasta", max_period, min_period, max_period),
+                        ],
+                    ),
+                    shared_filters_layout(PREFIX),
+                ],
+            ),
+            filters_summary_bar("ctrl-filters-summary"),
+            html.P(
+                "Los filtros de arriba no aplican igual a las tres secciones -- 'Nunca han reportado' solo usa "
+                "Estado/Prestador (sin geografía ni período: la fuente no los tiene); 'Reporte detenido' usa "
+                "Desde/Hasta sobre la fecha del último reporte, no sobre 'meses mínimos sin reportar'.",
+                className="chart-subtitle",
+            ),
+
+            html.H3("Prestadores que nunca han reportado", style={"marginTop": "20px"}),
             html.Section(
                 className="kpi-grid four",
                 children=[
-                    _kpi_card_static(
-                        "Activo sin reportar", kpi_activo,
-                        nota_kpi or "Título vigente, opera, cero reportes -- el caso de incumplimiento real",
-                    ),
-                    _kpi_card_static(
-                        "No operativo", kpi_no_operativo,
-                        nota_kpi or "Cancelado/revocado -- nunca llegó a operar, universo administrativo distinto",
-                    ),
-                    _kpi_card_static(
-                        "Zona gris", kpi_zona_gris,
-                        nota_kpi or "Estado ambiguo en 'opera' -- requiere revisión caso por caso",
-                    ),
-                    _kpi_card_static(
-                        "Total", kpi_total,
-                        nota_kpi or "Total de prestadores con título habilitante y cero reportes en toda su historia",
-                    ),
+                    kpi_card("Activo sin reportar", "ctrl-kpi-activo", "ctrl-kpi-activo-note"),
+                    kpi_card("No operativo", "ctrl-kpi-no-operativo", "ctrl-kpi-no-operativo-note"),
+                    kpi_card("Zona gris", "ctrl-kpi-zona-gris", "ctrl-kpi-zona-gris-note"),
+                    kpi_card("Total", "ctrl-kpi-total-nunca", "ctrl-kpi-total-nunca-note"),
                 ],
             ),
             html.Section(
@@ -187,7 +125,7 @@ def layout():
                         className="chart-header",
                         children=[html.H3("Distribución por clasificación", className="chart-title")],
                     ),
-                    dcc.Graph(figure=nunca_fig, config={"displaylogo": False}),
+                    dcc.Graph(id="ctrl-nunca-chart", config={"displaylogo": False}),
                 ],
             ),
             html.Section(
@@ -204,7 +142,7 @@ def layout():
                             {"field": "fuera_de_gracia", "headerName": "Fuera de año de gracia", "minWidth": 170},
                             {"field": "clasificacion_incumplimiento", "headerName": "Clasificación", "minWidth": 170},
                         ],
-                        rowData=clean_records(df_nunca) if df_nunca is not None and not df_nunca.empty else [],
+                        rowData=[],
                         defaultColDef={"sortable": True, "filter": True, "resizable": True},
                         dashGridOptions={"theme": "themeBalham", "pagination": True, "paginationPageSize": 10,
                                          "animateRows": True},
@@ -270,11 +208,7 @@ def layout():
                 children=[
                     html.Div(
                         className="period-grid four-periods",
-                        children=[
-                            month_year_picker("ctrl-start-period", "Desde", min_period, min_period, max_period),
-                            month_year_picker("ctrl-end-period", "Hasta", max_period, min_period, max_period),
-                            numeric_stepper("ctrl-umbral-variacion", "Umbral de variación (%)", 30, min_value=1),
-                        ],
+                        children=[numeric_stepper("ctrl-umbral-variacion", "Umbral de variación (%)", 30, min_value=1)],
                     ),
                 ],
             ),
@@ -334,11 +268,74 @@ def layout():
     )
 
 
+register_territory_callbacks(PREFIX)
+register_shared_filters_callbacks(PREFIX)
+register_filters_summary_callback(PREFIX)
+register_month_year_picker_callback("ctrl-start-period")
+register_month_year_picker_callback("ctrl-end-period")
 register_excel_download_callback("ctrl-nunca-grid", "prestadores_sin_reportar.xlsx")
 register_excel_download_callback("ctrl-detenido-grid", "prestadores_reporte_detenido.xlsx")
 register_excel_download_callback("ctrl-variacion-grid", "variacion_mensual_anomala.xlsx")
-register_month_year_picker_callback("ctrl-start-period")
-register_month_year_picker_callback("ctrl-end-period")
+
+
+@callback(
+    Output("ctrl-kpi-activo", "children"),
+    Output("ctrl-kpi-activo-note", "children"),
+    Output("ctrl-kpi-no-operativo", "children"),
+    Output("ctrl-kpi-no-operativo-note", "children"),
+    Output("ctrl-kpi-zona-gris", "children"),
+    Output("ctrl-kpi-zona-gris-note", "children"),
+    Output("ctrl-kpi-total-nunca", "children"),
+    Output("ctrl-kpi-total-nunca-note", "children"),
+    Output("ctrl-nunca-chart", "figure"),
+    Output("ctrl-nunca-grid", "rowData"),
+    Input("ctrl-opera-estado", "value"),
+    Input("ctrl-isp-nombre", "value"),
+)
+def update_nunca_reportaron(opera_estados, isp_nombres):
+    try:
+        df = get_prestadores_nunca_reportaron_detalle(tuple(opera_estados or ()), tuple(isp_nombres or ()))
+    except Exception as exc:
+        vacio_txt = ("—", f"No se pudo calcular: {exc}")
+        return (*vacio_txt, *vacio_txt, *vacio_txt, *vacio_txt, empty_figure("No se pudo consultar PostgreSQL"), [])
+
+    if df.empty:
+        vacio_txt = ("0", "")
+        return (*vacio_txt, *vacio_txt, *vacio_txt, *vacio_txt, empty_figure("No hay prestadores sin reportar"), [])
+
+    conteos = df["clasificacion_incumplimiento"].value_counts()
+    activo = int(conteos.get("activo_sin_reportar", 0))
+    no_operativo = int(conteos.get("no_operativo", 0))
+    zona_gris = int(conteos.get("zona_gris", 0))
+    total = len(df)
+
+    # Barras horizontales, no dona/pastel -- con solo 3 categorías el
+    # objetivo es comparar magnitudes con precisión, algo que un gráfico
+    # circular hace mal por diseño. Orden fijo (no por magnitud) para que
+    # la lectura sea siempre la misma: el caso de incumplimiento real
+    # primero.
+    categorias = ["activo_sin_reportar", "no_operativo", "zona_gris"]
+    etiquetas = {
+        "activo_sin_reportar": "Activo sin reportar", "no_operativo": "No operativo", "zona_gris": "Zona gris",
+    }
+    colores = {"activo_sin_reportar": PALETTE["red"], "no_operativo": PALETTE["muted"], "zona_gris": PALETTE["cyan"]}
+    valores = [int(conteos.get(c, 0)) for c in categorias]
+    nunca_fig = go.Figure(go.Bar(
+        x=valores, y=[etiquetas[c] for c in categorias], orientation="h",
+        marker_color=[colores[c] for c in categorias], text=valores, textposition="outside",
+        hovertemplate="%{y}: %{x}<extra></extra>",
+    ))
+    style_figure(nunca_fig, height=230, hovermode="closest")
+    nunca_fig.update_xaxes(title="Prestadores")
+    nunca_fig.update_yaxes(title="")
+
+    return (
+        format_number(activo), "Título vigente, opera, cero reportes -- el caso de incumplimiento real",
+        format_number(no_operativo), "Cancelado/revocado -- nunca llegó a operar, universo administrativo distinto",
+        format_number(zona_gris), "Estado ambiguo en 'opera' -- requiere revisión caso por caso",
+        format_number(total), "Total de prestadores con título habilitante y cero reportes en toda su historia",
+        nunca_fig, clean_records(df),
+    )
 
 
 @callback(
@@ -346,18 +343,31 @@ register_month_year_picker_callback("ctrl-end-period")
     Output("ctrl-detenido-message", "children"),
     Output("ctrl-detenido-hist", "figure"),
     Output("ctrl-detenido-scatter", "figure"),
+    Input("ctrl-territory-id", "data"),
+    Input("ctrl-start-period", "data"),
+    Input("ctrl-end-period", "data"),
+    Input("ctrl-opera-estado", "value"),
+    Input("ctrl-isp-nombre", "value"),
     Input("ctrl-meses-minimo", "value"),
 )
-def update_reporte_detenido(meses_minimo):
+def update_reporte_detenido(territory_id, start_period, end_period, opera_estados, isp_nombres, meses_minimo):
     meses_minimo = int(meses_minimo) if meses_minimo else 1
+    start_period = int(start_period) if start_period is not None else None
+    end_period = int(end_period) if end_period is not None else None
+    if start_period is not None and end_period is not None:
+        start_period, end_period = sorted((start_period, end_period))
+
     try:
-        df = get_prestadores_reporte_detenido_detalle(meses_minimo)
+        df = get_prestadores_reporte_detenido_detalle(
+            meses_minimo, territory_id, start_period, end_period,
+            tuple(opera_estados or ()), tuple(isp_nombres or ()),
+        )
     except Exception as exc:
         vacio = empty_figure("Error al consultar PostgreSQL")
         return [], f"Error al consultar PostgreSQL: {exc}", vacio, vacio
     if df.empty:
         vacio = empty_figure(f"Ningún prestador con {meses_minimo} o más meses sin reportar")
-        return [], f"Ningún prestador con {meses_minimo} o más meses sin reportar.", vacio, vacio
+        return [], f"Ningún prestador con {meses_minimo} o más meses sin reportar para estos filtros.", vacio, vacio
 
     df = df.copy()
     df["meses_desde_ultimo_reporte"] = pd.to_numeric(df["meses_desde_ultimo_reporte"], errors="coerce")
@@ -399,18 +409,23 @@ def update_reporte_detenido(meses_minimo):
     Output("ctrl-variacion-message", "children"),
     Output("ctrl-variacion-ranking", "figure"),
     Output("ctrl-variacion-tiempo", "figure"),
+    Input("ctrl-territory-id", "data"),
     Input("ctrl-start-period", "data"),
     Input("ctrl-end-period", "data"),
+    Input("ctrl-opera-estado", "value"),
+    Input("ctrl-isp-nombre", "value"),
     Input("ctrl-umbral-variacion", "value"),
 )
-def update_variacion(start_period, end_period, umbral):
+def update_variacion(territory_id, start_period, end_period, opera_estados, isp_nombres, umbral):
     if start_period is None or end_period is None:
         vacio = empty_figure("Seleccione un rango de períodos")
         return [], "Seleccione un rango de períodos", vacio, vacio
     start_period, end_period = sorted((int(start_period), int(end_period)))
     umbral = float(umbral) if umbral else 30.0
     try:
-        df = get_variacion_mensual_anomala(start_period, end_period, umbral)
+        df = get_variacion_mensual_anomala(
+            start_period, end_period, umbral, territory_id, tuple(opera_estados or ()), tuple(isp_nombres or ()),
+        )
     except Exception as exc:
         vacio = empty_figure("Error al consultar PostgreSQL")
         return [], f"Error al consultar PostgreSQL: {exc}", vacio, vacio
@@ -427,7 +442,7 @@ def update_variacion(start_period, end_period, umbral):
     df["periodo"] = pd.to_datetime(df["periodo"])
 
     # Ranking: las 15 variaciones más extremas en valor absoluto -- punto
-    # de partida de triage, más accionable que una tabla de 6.000 filas
+    # de partida de triage, más accionable que una tabla de miles de filas
     # ordenada por fecha.
     top = df.reindex(df["variacion_porcentaje"].abs().sort_values(ascending=False).index).head(15)
     top = top.sort_values("variacion_porcentaje")

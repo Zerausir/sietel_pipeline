@@ -1084,41 +1084,111 @@ def get_territory_geojson_multi(
 # en mart, solo lectura sobre lo que ya existe.
 
 @cache.memoize(timeout=300)
-def get_prestadores_nunca_reportaron_detalle() -> pd.DataFrame:
+def get_prestadores_nunca_reportaron_detalle(
+        opera_estados: tuple[str, ...] = (),
+        isp_nombres: tuple[str, ...] = (),
+) -> pd.DataFrame:
     """
     Detalle completo (no solo el conteo) de mart.vw_prestadores_sin_reportar,
     para la tabla de Control -- get_prestadores_sin_reportar() (más arriba)
     ya existía para el KPI de Evolución, pero solo devuelve un COUNT.
+
+    SOLO acepta Estado de operación / Prestador -- NO territorio ni período.
+    La vista fuente no tiene columna de geografía (SIETEL no conoce la
+    ubicación de un prestador que nunca reportó, documentado en la propia
+    vista) ni de período (es "alguna vez reportó, sí/no", no una serie de
+    tiempo) -- no son columnas que falten agregar aquí, son datos que
+    genuinamente no existen para filtrar.
     """
+    clauses = ["1 = 1"]
+    params: dict[str, Any] = {}
+    if opera_estados:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
+            "WHERE opera ILIKE '%' || estado || '%')"
+        )
+        params["opera_estados"] = list(opera_estados)
+    if isp_nombres:
+        clauses.append("isp_nombre = ANY(:isp_nombres)")
+        params["isp_nombres"] = list(isp_nombres)
+
     return _read(
-        """
+        f"""
         SELECT peva_codigo, isp_nombre, isp_ruc, isp_tipopersona, opera,
                resolucion, fechapermiso, fuera_de_gracia, clasificacion_incumplimiento
         FROM mart.vw_prestadores_sin_reportar
+        WHERE {' AND '.join(clauses)}
         ORDER BY fuera_de_gracia DESC NULLS LAST, fechapermiso NULLS LAST
-        """
+        """,
+        params,
     )
 
 
 @cache.memoize(timeout=300)
-def get_prestadores_reporte_detenido_detalle(meses_minimo: int = 1) -> pd.DataFrame:
+def get_prestadores_reporte_detenido_detalle(
+        meses_minimo: int = 1,
+        territory_id: str | None = None,
+        start_period: int | None = None,
+        end_period: int | None = None,
+        opera_estados: tuple[str, ...] = (),
+        isp_nombres: tuple[str, ...] = (),
+) -> pd.DataFrame:
     """
     Detalle de mart.vw_prestadores_reporte_detenido, filtrado por
     meses_desde_ultimo_reporte >= meses_minimo -- la vista misma NO trae
     umbral (documentado en su propio COMMENT), a propósito, para que cada
     consumidor decida su corte; este es el corte del módulo Control, no un
     valor fijo en mart.
+
+    territory_id filtra por "reportó AL MENOS UNA VEZ en ese territorio"
+    (EXISTS contra fact_lineas_geografia_mes/bridge_geografia_territorio)
+    -- la vista fuente no tiene geografía propia (es un resumen por
+    prestador, sin desglose geográfico), así que esto es una aproximación
+    razonable, no la geografía de su último reporte específico.
+
+    start_period/end_period filtran por ultimo_periodo_reportado dentro
+    del rango (vía mart.dim_periodo.periodo, la fecha real del período) --
+    "¿prestadores cuyo último reporte cayó en esta ventana?", distinto de
+    "meses_minimo" (que es cuánto tiempo llevan detenidos desde HOY).
     """
+    clauses = ["meses_desde_ultimo_reporte >= :meses_minimo"]
+    params: dict[str, Any] = {"meses_minimo": meses_minimo}
+
+    if territory_id and territory_id != "NACIONAL|ECUADOR":
+        clauses.append(
+            "EXISTS (SELECT 1 FROM mart.fact_lineas_geografia_mes f "
+            "JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id "
+            "WHERE f.prestador_id = prestador_id AND b.territorio_id = :territory_id)"
+        )
+        params["territory_id"] = territory_id
+    if start_period is not None and end_period is not None:
+        clauses.append(
+            "ultimo_periodo_reportado BETWEEN "
+            "(SELECT periodo FROM mart.dim_periodo WHERE periodo_id = :start_period) "
+            "AND (SELECT periodo FROM mart.dim_periodo WHERE periodo_id = :end_period)"
+        )
+        params["start_period"] = start_period
+        params["end_period"] = end_period
+    if opera_estados:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
+            "WHERE opera_actual ILIKE '%' || estado || '%')"
+        )
+        params["opera_estados"] = list(opera_estados)
+    if isp_nombres:
+        clauses.append("isp_nombre = ANY(:isp_nombres)")
+        params["isp_nombres"] = list(isp_nombres)
+
     return _read(
-        """
+        f"""
         SELECT prestador_id, isp_nombre, ruc_limpio, opera_actual, es_cancelado_actual,
                primer_periodo_reportado, ultimo_periodo_reportado,
                lineas_ultimo_reporte, total_lineas_historico, meses_desde_ultimo_reporte
         FROM mart.vw_prestadores_reporte_detenido
-        WHERE meses_desde_ultimo_reporte >= :meses_minimo
+        WHERE {' AND '.join(clauses)}
         ORDER BY meses_desde_ultimo_reporte DESC, total_lineas_historico DESC
         """,
-        {"meses_minimo": meses_minimo},
+        params,
     )
 
 
@@ -1127,6 +1197,9 @@ def get_variacion_mensual_anomala(
         start_period: int,
         end_period: int,
         umbral_porcentaje: float = 30.0,
+        territory_id: str | None = None,
+        opera_estados: tuple[str, ...] = (),
+        isp_nombres: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     """
     Variación mes a mes de cuentas reportadas, por prestador, dentro del
@@ -1142,9 +1215,36 @@ def get_variacion_mensual_anomala(
     la tabla no se llene de ruido de variaciones normales -- 30% es un
     punto de partida razonable para señalar algo revisable, no un límite
     validado estadísticamente; el filtro de la página permite ajustarlo.
+
+    territory_id, si se pasa, RECALCULA la suma de cuentas dentro de ese
+    territorio antes de comparar mes a mes (no filtra después) -- mismo
+    principio que get_evolution_filtrado: la variación detectada es "¿este
+    prestador cambió mucho lo que reporta EN ESE TERRITORIO?", no su total
+    nacional. opera_estados/isp_nombres sí filtran por identidad del
+    prestador después de calcular (no cambian la suma).
     """
+    territory_join = ""
+    territory_where = ""
+    params: dict[str, Any] = {"start_period": start_period, "end_period": end_period, "umbral": umbral_porcentaje}
+    if territory_id and territory_id != "NACIONAL|ECUADOR":
+        territory_join = "JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id"
+        territory_where = "AND b.territorio_id = :territory_id"
+        params["territory_id"] = territory_id
+
+    outer_clauses = []
+    if opera_estados:
+        outer_clauses.append(
+            "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
+            "WHERE p.opera_actual ILIKE '%' || estado || '%')"
+        )
+        params["opera_estados"] = list(opera_estados)
+    if isp_nombres:
+        outer_clauses.append("p.isp_nombre = ANY(:isp_nombres)")
+        params["isp_nombres"] = list(isp_nombres)
+    outer_where = ("AND " + " AND ".join(outer_clauses)) if outer_clauses else ""
+
     df = _read(
-        """
+        f"""
         WITH serie AS (
             SELECT
                 f.prestador_id,
@@ -1153,7 +1253,9 @@ def get_variacion_mensual_anomala(
                 SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas,
                 BOOL_OR(f.tiene_reportado) AS tiene_reportado
             FROM mart.fact_lineas_geografia_mes f
+            {territory_join}
             WHERE f.periodo_id BETWEEN :start_period AND :end_period
+            {territory_where}
             GROUP BY f.prestador_id, f.periodo_id, f.periodo
         ),
         con_lag AS (
@@ -1181,9 +1283,10 @@ def get_variacion_mensual_anomala(
           AND c.lineas_mes_anterior IS NOT NULL
           AND c.lineas_mes_anterior > 0
           AND ABS(100.0 * (c.lineas_reportadas - c.lineas_mes_anterior) / c.lineas_mes_anterior) >= :umbral
+          {outer_where}
         ORDER BY ABS(c.lineas_reportadas - c.lineas_mes_anterior) DESC
         """,
-        {"start_period": start_period, "end_period": end_period, "umbral": umbral_porcentaje},
+        params,
     )
     if df.empty:
         return df
