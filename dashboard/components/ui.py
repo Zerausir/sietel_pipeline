@@ -242,6 +242,30 @@ def register_filters_summary_callback(prefix: str) -> None:
         return chips
 
 
+def numeric_stepper(id_: str, label: str, value: int, min_value: int = 1, step: int = 1) -> html.Div:
+    """
+    Selector numérico con botones +/- (pages/control.py) -- dmc.NumberInput,
+    NO dcc.Input(type="number").
+
+    CORRECCIÓN (11-ago-2026): dcc.Input(type="number") usa el spinner nativo
+    del navegador -- reportado en producción que el valor desaparece del
+    recuadro al usar las flechas +/-. Es un problema conocido de ese tipo de
+    input en Dash cuando el valor viaja de ida y vuelta por un callback
+    Python sin `debounce`: el DOM y el estado controlado de React pueden
+    desincronizarse a media pulsación. dmc.NumberInput evita esto por
+    diseño -- ya es dependencia de la app (calendarios de período), no es
+    una librería nueva.
+    """
+    return html.Div(
+        className="filter-field",
+        style={"maxWidth": "220px"},
+        children=[
+            html.Label(label),
+            dmc.NumberInput(id=id_, value=value, min=min_value, step=step, clampBehavior="strict"),
+        ],
+    )
+
+
 def excel_download_button(grid_id: str) -> html.Div:
     """
     Botón "Descargar Excel" para un dash_ag_grid.AgGrid -- exporta

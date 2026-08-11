@@ -36,8 +36,8 @@ from dash import Input, Output, callback, dcc, html, register_page
 
 from components.ui import (
     PALETTE, chart_card, clean_records, empty_figure, error_panel, excel_download_button, format_number,
-    month_year_picker, page_header, register_excel_download_callback, register_month_year_picker_callback,
-    style_figure,
+    month_year_picker, numeric_stepper, page_header, register_excel_download_callback,
+    register_month_year_picker_callback, style_figure,
 )
 from services.queries import (
     get_periods, get_prestadores_nunca_reportaron_detalle, get_prestadores_reporte_detenido_detalle,
@@ -218,19 +218,7 @@ def layout():
             html.H3("Prestadores con reporte detenido", style={"marginTop": "28px"}),
             html.Div(
                 className="filter-panel",
-                children=[
-                    html.Div(
-                        className="filter-field",
-                        style={"maxWidth": "260px"},
-                        children=[
-                            html.Label("Meses mínimos sin reportar"),
-                            dcc.Input(
-                                id="ctrl-meses-minimo", type="number", min=1, step=1, value=3,
-                                className="numeric-input",
-                            ),
-                        ],
-                    ),
-                ],
+                children=[numeric_stepper("ctrl-meses-minimo", "Meses mínimos sin reportar", 3, min_value=1)],
             ),
             html.Div(id="ctrl-detenido-message", className="data-message"),
             html.Section(
@@ -285,17 +273,7 @@ def layout():
                         children=[
                             month_year_picker("ctrl-start-period", "Desde", min_period, min_period, max_period),
                             month_year_picker("ctrl-end-period", "Hasta", max_period, min_period, max_period),
-                            html.Div(
-                                className="filter-field",
-                                style={"maxWidth": "220px"},
-                                children=[
-                                    html.Label("Umbral de variación (%)"),
-                                    dcc.Input(
-                                        id="ctrl-umbral-variacion", type="number", min=1, step=1, value=30,
-                                        className="numeric-input",
-                                    ),
-                                ],
-                            ),
+                            numeric_stepper("ctrl-umbral-variacion", "Umbral de variación (%)", 30, min_value=1),
                         ],
                     ),
                 ],

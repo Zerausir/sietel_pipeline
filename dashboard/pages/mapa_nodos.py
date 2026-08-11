@@ -28,8 +28,8 @@ import dash_ag_grid as dag
 
 from components.node_territory_filters import node_territory_filter_layout, register_node_territory_callbacks
 from components.ui import (
-    PALETTE, clean_records, compute_mapbox_view, empty_figure, error_panel, excel_download_button,
-    mapbox_polygon_layers, page_header, register_excel_download_callback,
+    PALETTE, chart_card, clean_records, compute_mapbox_view, empty_figure, error_panel, excel_download_button,
+    mapbox_polygon_layers, page_header, register_excel_download_callback, style_figure,
 )
 from services.queries import (
     get_node_provider_options, get_node_types, get_nodos_mapa, get_operation_states, get_territory_geojson_multi,
@@ -133,6 +133,15 @@ def layout():
                     ),
                 ],
             ),
+            html.Div(
+                style={"marginTop": "20px"},
+                children=[
+                    chart_card(
+                        "Nodos por provincia (Top 15)", f"{PREFIX}-provincia-bar",
+                        "Un mapa muestra densidad, no compara magnitudes con precisión -- esta barra sí.",
+                    ),
+                ],
+            ),
             html.Section(
                 className="chart-card",
                 style={"marginTop": "20px"},
@@ -188,6 +197,7 @@ def update_isp_options(seleccion):
 
 @callback(
     Output(f"{PREFIX}-map", "figure"),
+    Output(f"{PREFIX}-provincia-bar", "figure"),
     Output(f"{PREFIX}-grid", "rowData"),
     Output(f"{PREFIX}-message", "children"),
     Input(f"{PREFIX}-territory-selection", "data"),
@@ -212,14 +222,16 @@ def update_map(seleccion, tipo_nodos, opera_estados, isp_nombres):
             solo_discrepancias=False,
         )
     except Exception as exc:
-        return empty_figure(f"No fue posible consultar los nodos: {exc}"), [], ""
+        vacio = empty_figure(f"No fue posible consultar los nodos: {exc}")
+        return vacio, vacio, [], ""
 
     # Esta página solo muestra geografía "en orden" -- las discrepancias
     # tienen su propia página, con el detalle reportado-vs-derivado.
     df = df[df["es_discrepancia"] == False]  # noqa: E712 -- comparación explícita con booleano de pandas/SQL
 
     if df.empty:
-        return empty_figure("No hay nodos para los filtros seleccionados"), [], "0 nodos"
+        vacio = empty_figure("No hay nodos para los filtros seleccionados")
+        return vacio, vacio, [], "0 nodos"
 
     fig = go.Figure()
     for tipo, color in COLOR_TIPO_NODO.items():
@@ -288,4 +300,21 @@ def update_map(seleccion, tipo_nodos, opera_estados, isp_nombres):
         if (provincias or cantones or parroquias) else "Nacional"
     )
     message = f"{len(df):,} nodos mostrados · Territorio: {territorio_txt}".replace(",", ".")
-    return fig, clean_records(df), message
+
+    # Barra horizontal, no otro mapa/torta -- un mapa comunica densidad
+    # espacial bien, pero compara MAGNITUDES mal (el ojo no mide área/
+    # densidad de puntos con precisión); una barra ordenada sí permite
+    # comparar "¿cuánto más tiene Pichincha que Guayas?" de un vistazo.
+    conteo_provincia = (
+        df["nombre_provincia"].value_counts().head(15).sort_values()
+    )
+    provincia_fig = go.Figure(go.Bar(
+        x=conteo_provincia.values, y=conteo_provincia.index, orientation="h",
+        marker_color=PALETTE["blue"],
+        hovertemplate="%{y}: %{x}<extra></extra>",
+    ))
+    style_figure(provincia_fig, height=420, hovermode="closest")
+    provincia_fig.update_xaxes(title="Nodos")
+    provincia_fig.update_yaxes(title="")
+
+    return fig, provincia_fig, clean_records(df), message

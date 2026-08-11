@@ -24,8 +24,8 @@ import dash_ag_grid as dag
 
 from components.node_territory_filters import node_territory_filter_layout, register_node_territory_callbacks
 from components.ui import (
-    PALETTE, clean_records, compute_mapbox_view, empty_figure, error_panel, excel_download_button,
-    mapbox_polygon_layers, page_header, register_excel_download_callback,
+    PALETTE, chart_card, clean_records, compute_mapbox_view, empty_figure, error_panel, excel_download_button,
+    mapbox_polygon_layers, page_header, register_excel_download_callback, style_figure,
 )
 from services.queries import (
     get_node_provider_options, get_node_types, get_nodos_mapa, get_operation_states, get_territory_geojson_multi,
@@ -123,6 +123,21 @@ def layout():
                 ],
             ),
             html.Section(
+                className="chart-grid two",
+                style={"marginTop": "20px"},
+                children=[
+                    chart_card(
+                        "Discrepancias por provincia real (Top 15)", f"{PREFIX}-provincia-bar",
+                        "Un mapa muestra densidad, no compara magnitudes con precisión -- esta barra sí.",
+                    ),
+                    chart_card(
+                        "Estado de revisión", f"{PREFIX}-estado-bar",
+                        "Cuánto de la cola pendiente ya se procesó -- revisión ocurre fuera de OBTEL "
+                        "(rol calidad_revisor), esto es solo el conteo.",
+                    ),
+                ],
+            ),
+            html.Section(
                 className="chart-card",
                 style={"marginTop": "20px"},
                 children=[
@@ -186,6 +201,8 @@ def update_isp_options(seleccion):
 
 @callback(
     Output(f"{PREFIX}-map", "figure"),
+    Output(f"{PREFIX}-provincia-bar", "figure"),
+    Output(f"{PREFIX}-estado-bar", "figure"),
     Output(f"{PREFIX}-grid", "rowData"),
     Output(f"{PREFIX}-message", "children"),
     Input(f"{PREFIX}-territory-selection", "data"),
@@ -210,10 +227,12 @@ def update_discrepancias(seleccion, tipo_nodos, opera_estados, isp_nombres):
             solo_discrepancias=True,
         )
     except Exception as exc:
-        return empty_figure(f"No fue posible consultar las discrepancias: {exc}"), [], ""
+        vacio = empty_figure(f"No fue posible consultar las discrepancias: {exc}")
+        return vacio, vacio, vacio, [], ""
 
     if df.empty:
-        return empty_figure("No hay discrepancias para los filtros seleccionados"), [], "0 discrepancias"
+        vacio = empty_figure("No hay discrepancias para los filtros seleccionados")
+        return vacio, vacio, vacio, [], "0 discrepancias"
 
     fig = go.Figure(go.Scattermapbox(
         lat=df["latitud_decimal"],
@@ -256,4 +275,29 @@ def update_discrepancias(seleccion, tipo_nodos, opera_estados, isp_nombres):
         if (provincias or cantones or parroquias) else "Nacional"
     )
     message = f"{len(df):,} discrepancias mostradas · Territorio: {territorio_txt}".replace(",", ".")
-    return fig, clean_records(df), message
+
+    conteo_provincia = df["nombre_provincia"].value_counts().head(15).sort_values()
+    provincia_fig = go.Figure(go.Bar(
+        x=conteo_provincia.values, y=conteo_provincia.index, orientation="h",
+        marker_color=PALETTE["red"],
+        hovertemplate="%{y}: %{x}<extra></extra>",
+    ))
+    style_figure(provincia_fig, height=380, hovermode="closest")
+    provincia_fig.update_xaxes(title="Discrepancias")
+    provincia_fig.update_yaxes(title="")
+
+    # Categórica, pocos valores esperados (PENDIENTE y los estados que
+    # calidad_revisor haya usado) -- barras, mismo criterio que la
+    # distribución por clasificación en Control: comparar conteos exactos,
+    # no proporciones de un círculo.
+    conteo_estado = df["estado_revision"].fillna("Sin estado").value_counts().sort_values()
+    estado_fig = go.Figure(go.Bar(
+        x=conteo_estado.values, y=conteo_estado.index, orientation="h",
+        marker_color=PALETTE["cyan"],
+        hovertemplate="%{y}: %{x}<extra></extra>",
+    ))
+    style_figure(estado_fig, height=380, hovermode="closest")
+    estado_fig.update_xaxes(title="Discrepancias")
+    estado_fig.update_yaxes(title="")
+
+    return fig, provincia_fig, estado_fig, clean_records(df), message

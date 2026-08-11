@@ -111,8 +111,15 @@ def layout():
                                "Principales prestadores del período seleccionado, solo datos reales."),
                     chart_card("Aporte individual al IHH", "con-contribution-chart",
                                "Contribución de cada prestador al índice del mercado."),
-                    chart_card("Evolución del prestador seleccionado", "con-provider-history-chart",
-                               "Participación y cuentas dentro del territorio seleccionado."),
+                ],
+            ),
+            html.Section(
+                className="chart-grid two",
+                children=[
+                    chart_card("Participación del prestador seleccionado", "con-provider-participation-chart",
+                               "Participación %, dentro del territorio seleccionado -- solo datos reales."),
+                    chart_card("Cuentas del prestador seleccionado", "con-provider-lines-chart",
+                               "Volumen de cuentas reportadas, misma serie que el gráfico de al lado."),
                 ],
             ),
             html.Section(
@@ -391,7 +398,8 @@ def update_concentration(
 
 
 @callback(
-    Output("con-provider-history-chart", "figure"),
+    Output("con-provider-participation-chart", "figure"),
+    Output("con-provider-lines-chart", "figure"),
     Input("con-territory-id", "data"),
     Input("con-provider", "value"),
     Input("con-start-period", "data"),
@@ -400,38 +408,42 @@ def update_concentration(
 def update_provider_history(territory_id: str, provider_id: str | None, start_period: int | None,
                             end_period: int | None):
     if not territory_id or not provider_id or start_period is None or end_period is None:
-        return empty_figure("Seleccione un prestador")
+        vacio = empty_figure("Seleccione un prestador")
+        return vacio, vacio
 
     start_period, end_period = sorted((int(start_period), int(end_period)))
     try:
         history = get_provider_history(territory_id, provider_id, start_period, end_period)
     except Exception:
-        return empty_figure("Error al consultar la historia del prestador")
+        vacio = empty_figure("Error al consultar la historia del prestador")
+        return vacio, vacio
     if history.empty:
-        return empty_figure("El prestador no tiene registros en el período")
+        vacio = empty_figure("El prestador no tiene registros en el período")
+        return vacio, vacio
 
     history = history.copy()
     history["periodo"] = pd.to_datetime(history["periodo"])
     history["participacion_porcentaje"] = pd.to_numeric(history["participacion_porcentaje"], errors="coerce")
     history["total_lineas_prestador"] = pd.to_numeric(history["total_lineas_prestador"], errors="coerce")
 
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=history["periodo"], y=history["participacion_porcentaje"], mode="lines+markers",
-            name="Participación (%, solo reportadas)", line={"color": PALETTE["blue"], "width": 3}, yaxis="y",
-        )
-    )
-    fig.add_trace(
-        go.Bar(
-            x=history["periodo"], y=history["total_lineas_prestador"], name="Cuentas",
-            marker_color="rgba(0, 167, 196, 0.30)", yaxis="y2",
-        )
-    )
-    style_figure(fig)
-    fig.update_layout(
-        yaxis={"title": "Participación (%)", "gridcolor": "#e6edf4"},
-        yaxis2={"title": "Cuentas", "overlaying": "y", "side": "right", "showgrid": False},
-        barmode="overlay",
-    )
-    return fig
+    # Dos gráficos de un solo eje cada uno, no uno de doble eje -- un
+    # doble eje con escalas arbitrarias (% vs. cuentas) invita a leer una
+    # correlación visual entre las dos series que puede no existir; son
+    # dos preguntas distintas ("¿qué tan grande es respecto al mercado?"
+    # vs. "¿cuántas cuentas reporta en términos absolutos?"), mejor
+    # respondidas por separado.
+    participation_fig = go.Figure(go.Scatter(
+        x=history["periodo"], y=history["participacion_porcentaje"], mode="lines+markers",
+        line={"color": PALETTE["blue"], "width": 3}, fill="tozeroy", fillcolor="rgba(20, 100, 244, 0.08)",
+    ))
+    style_figure(participation_fig, hovermode="x unified")
+    participation_fig.update_yaxes(title="Participación (%)", rangemode="tozero")
+
+    lines_fig = go.Figure(go.Scatter(
+        x=history["periodo"], y=history["total_lineas_prestador"], mode="lines+markers",
+        line={"color": PALETTE["cyan"], "width": 3},
+    ))
+    style_figure(lines_fig, hovermode="x unified")
+    lines_fig.update_yaxes(title="Cuentas", tickformat=",", rangemode="tozero")
+
+    return participation_fig, lines_fig

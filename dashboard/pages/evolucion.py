@@ -254,19 +254,26 @@ def update_evolution(
     except Exception:
         churn_value, churn_note = "—", "No se pudo calcular"
 
-    lines_fig = px.bar(
-        evolution, x="periodo", y="lineas_reportadas",
+    # Líneas, no barras -- son series mensuales de hasta 180 puntos (15
+    # años); una barra por mes en un rango así es ruido visual, la línea
+    # es la elección estándar para tendencia-en-el-tiempo (misma razón por
+    # la que "Evolución histórica del IHH" en Concentración ya es línea).
+    # Con marcadores porque en rangos cortos (pocos meses) una línea sola,
+    # sin puntos, se ve vacía.
+    lines_fig = px.line(
+        evolution, x="periodo", y="lineas_reportadas", markers=True,
         labels={"lineas_reportadas": "Cuentas reportadas", "periodo": "Período"},
     )
-    lines_fig.update_traces(marker_color=PALETTE["blue"])
+    lines_fig.update_traces(line_color=PALETTE["blue"], marker_color=PALETTE["blue"], fill="tozeroy",
+                            fillcolor="rgba(20, 100, 244, 0.08)")
     style_figure(lines_fig, hovermode="x unified")
-    lines_fig.update_yaxes(title="Cuentas reportadas", tickformat=",")
+    lines_fig.update_yaxes(title="Cuentas reportadas", tickformat=",", rangemode="tozero")
 
-    providers_fig = px.bar(
-        evolution, x="periodo", y="numero_prestadores",
+    providers_fig = px.line(
+        evolution, x="periodo", y="numero_prestadores", markers=True,
         labels={"numero_prestadores": "Prestadores que reportaron", "periodo": "Período"},
     )
-    providers_fig.update_traces(marker_color=PALETTE["blue"])
+    providers_fig.update_traces(line_color=PALETTE["blue"], marker_color=PALETTE["blue"])
     style_figure(providers_fig, hovermode="x unified")
     providers_fig.update_yaxes(title="Prestadores", rangemode="tozero")
 
