@@ -56,6 +56,55 @@ def resolve_period_id(date_value: str | None) -> int | None:
     return int(ultimo["periodo_id"])
 
 
+def _lines_territory_clauses(
+        geografia_column: str,
+        provincias: tuple[str, ...],
+        cantones: tuple[str, ...],
+        parroquias: tuple[str, ...],
+) -> tuple[str, dict[str, Any]]:
+    """
+    Fragmento EXISTS para filtrar mart.fact_lineas_geografia_mes (u otra
+    tabla con columna geografia_id) por Provincia/Cantón/Parroquia,
+    selección múltiple e independiente (AND entre dimensiones, OR dentro
+    de cada lista) -- mismo principio que _node_territory_clauses(), pero
+    correlacionado vía bridge_geografia_territorio + dim_territorio en vez
+    de columnas planas (fact_lineas_geografia_mes no las tiene).
+
+    UN SOLO EXISTS combinando las tres condiciones activas, no tres EXISTS
+    separados -- mart.dim_territorio denormaliza codigo_provincia/canton
+    hacia abajo (una fila de nivel PARROQUIA también trae su
+    codigo_provincia y codigo_canton), así que un EXISTS combinado
+    encuentra correctamente la fila más específica que satisface todos los
+    filtros activos a la vez, sin multiplicar geografia_column (que sí
+    ocurriría con un JOIN plano, porque bridge_geografia_territorio tiene
+    una fila por NIVEL para el mismo geografia_id).
+
+    Devuelve ("", {}) si no hay ningún filtro activo -- el llamador debe
+    omitir la cláusula en ese caso (no agregar "AND EXISTS(...)" vacío).
+    """
+    condiciones = []
+    params: dict[str, Any] = {}
+    if provincias:
+        condiciones.append("dt.codigo_provincia = ANY(:territorio_provincias)")
+        params["territorio_provincias"] = list(provincias)
+    if cantones:
+        condiciones.append("dt.codigo_canton = ANY(:territorio_cantones)")
+        params["territorio_cantones"] = list(cantones)
+    if parroquias:
+        condiciones.append("dt.codigo_parroquia = ANY(:territorio_parroquias)")
+        params["territorio_parroquias"] = list(parroquias)
+
+    if not condiciones:
+        return "", {}
+
+    fragmento = (
+        f"EXISTS (SELECT 1 FROM mart.bridge_geografia_territorio b "
+        f"JOIN mart.dim_territorio dt ON dt.territorio_id = b.territorio_id "
+        f"WHERE b.geografia_id = {geografia_column} AND {' AND '.join(condiciones)})"
+    )
+    return fragmento, params
+
+
 @cache.memoize(timeout=900)
 def get_territory_options(
         level: str,
@@ -1127,7 +1176,9 @@ def get_prestadores_nunca_reportaron_detalle(
 @cache.memoize(timeout=300)
 def get_prestadores_reporte_detenido_detalle(
         meses_minimo: int = 1,
-        territory_id: str | None = None,
+        provincias: tuple[str, ...] = (),
+        cantones: tuple[str, ...] = (),
+        parroquias: tuple[str, ...] = (),
         start_period: int | None = None,
         end_period: int | None = None,
         opera_estados: tuple[str, ...] = (),
@@ -1140,8 +1191,10 @@ def get_prestadores_reporte_detenido_detalle(
     consumidor decida su corte; este es el corte del módulo Control, no un
     valor fijo en mart.
 
-    territory_id filtra por "reportó AL MENOS UNA VEZ en ese territorio"
-    (EXISTS contra fact_lineas_geografia_mes/bridge_geografia_territorio)
+    provincias/cantones/parroquias filtran por "reportó AL MENOS UNA VEZ
+    en algún geografia_id de ese territorio" (EXISTS contra
+    fact_lineas_geografia_mes/bridge_geografia_territorio/dim_territorio,
+    selección múltiple e independiente -- ver _lines_territory_clauses())
     -- la vista fuente no tiene geografía propia (es un resumen por
     prestador, sin desglose geográfico), así que esto es una aproximación
     razonable, no la geografía de su último reporte específico.
@@ -1154,13 +1207,15 @@ def get_prestadores_reporte_detenido_detalle(
     clauses = ["meses_desde_ultimo_reporte >= :meses_minimo"]
     params: dict[str, Any] = {"meses_minimo": meses_minimo}
 
-    if territory_id and territory_id != "NACIONAL|ECUADOR":
+    territorio_sql, territorio_params = _lines_territory_clauses(
+        "f.geografia_id", provincias, cantones, parroquias,
+    )
+    if territorio_sql:
         clauses.append(
-            "EXISTS (SELECT 1 FROM mart.fact_lineas_geografia_mes f "
-            "JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id "
-            "WHERE f.prestador_id = prestador_id AND b.territorio_id = :territory_id)"
+            f"EXISTS (SELECT 1 FROM mart.fact_lineas_geografia_mes f "
+            f"WHERE f.prestador_id = prestador_id AND {territorio_sql})"
         )
-        params["territory_id"] = territory_id
+        params.update(territorio_params)
     if start_period is not None and end_period is not None:
         clauses.append(
             "ultimo_periodo_reportado BETWEEN "
@@ -1197,7 +1252,9 @@ def get_variacion_mensual_anomala(
         start_period: int,
         end_period: int,
         umbral_porcentaje: float = 30.0,
-        territory_id: str | None = None,
+        provincias: tuple[str, ...] = (),
+        cantones: tuple[str, ...] = (),
+        parroquias: tuple[str, ...] = (),
         opera_estados: tuple[str, ...] = (),
         isp_nombres: tuple[str, ...] = (),
 ) -> pd.DataFrame:
@@ -1216,20 +1273,19 @@ def get_variacion_mensual_anomala(
     punto de partida razonable para señalar algo revisable, no un límite
     validado estadísticamente; el filtro de la página permite ajustarlo.
 
-    territory_id, si se pasa, RECALCULA la suma de cuentas dentro de ese
-    territorio antes de comparar mes a mes (no filtra después) -- mismo
-    principio que get_evolution_filtrado: la variación detectada es "¿este
-    prestador cambió mucho lo que reporta EN ESE TERRITORIO?", no su total
-    nacional. opera_estados/isp_nombres sí filtran por identidad del
-    prestador después de calcular (no cambian la suma).
+    provincias/cantones/parroquias (selección múltiple e independiente,
+    ver _lines_territory_clauses()) RECALCULAN la suma de cuentas dentro
+    de ese territorio antes de comparar mes a mes (no filtran después) --
+    mismo principio que get_evolution_filtrado: la variación detectada es
+    "¿este prestador cambió mucho lo que reporta EN ESE TERRITORIO?", no
+    su total nacional. opera_estados/isp_nombres sí filtran por identidad
+    del prestador después de calcular (no cambian la suma).
     """
-    territory_join = ""
-    territory_where = ""
     params: dict[str, Any] = {"start_period": start_period, "end_period": end_period, "umbral": umbral_porcentaje}
-    if territory_id and territory_id != "NACIONAL|ECUADOR":
-        territory_join = "JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id"
-        territory_where = "AND b.territorio_id = :territory_id"
-        params["territory_id"] = territory_id
+
+    territorio_sql, territorio_params = _lines_territory_clauses("f.geografia_id", provincias, cantones, parroquias)
+    territorio_where = f"AND {territorio_sql}" if territorio_sql else ""
+    params.update(territorio_params)
 
     outer_clauses = []
     if opera_estados:
@@ -1253,9 +1309,8 @@ def get_variacion_mensual_anomala(
                 SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas,
                 BOOL_OR(f.tiene_reportado) AS tiene_reportado
             FROM mart.fact_lineas_geografia_mes f
-            {territory_join}
             WHERE f.periodo_id BETWEEN :start_period AND :end_period
-            {territory_where}
+            {territorio_where}
             GROUP BY f.prestador_id, f.periodo_id, f.periodo
         ),
         con_lag AS (

@@ -48,16 +48,15 @@ import plotly.express as px
 import plotly.graph_objects as go
 from dash import Input, Output, callback, dcc, html, register_page
 
-from components.filters_shared import register_shared_filters_callbacks, shared_filters_layout
-from components.territory_filters import register_territory_callbacks, territory_filter_layout
+from components.lines_territory_filters import lines_territory_filter_layout, register_lines_territory_callbacks
 from components.ui import (
-    PALETTE, chart_card, clean_records, empty_figure, error_panel, excel_download_button, filters_summary_bar,
-    format_number, kpi_card, month_year_picker, numeric_stepper, page_header, register_excel_download_callback,
-    register_filters_summary_callback, register_month_year_picker_callback, style_figure,
+    PALETTE, chart_card, clean_records, empty_figure, error_panel, excel_download_button, format_number, kpi_card,
+    month_year_picker, numeric_stepper, page_header, register_excel_download_callback,
+    register_month_year_picker_callback, style_figure,
 )
 from services.queries import (
-    get_periods, get_prestadores_nunca_reportaron_detalle, get_prestadores_reporte_detenido_detalle,
-    get_variacion_mensual_anomala,
+    get_operation_states, get_periods, get_prestadores_nunca_reportaron_detalle,
+    get_prestadores_reporte_detenido_detalle, get_provider_options, get_variacion_mensual_anomala,
 )
 
 register_page(__name__, path="/sai/control", name="Control", order=4)
@@ -89,7 +88,32 @@ def layout():
             html.Section(
                 className="filter-panel",
                 children=[
-                    territory_filter_layout(PREFIX),
+                    lines_territory_filter_layout(PREFIX),
+                    html.Div(
+                        className="territory-grid",
+                        children=[
+                            html.Div(
+                                className="filter-field",
+                                children=[
+                                    html.Label("Estado de operación"),
+                                    dcc.Dropdown(
+                                        id="ctrl-opera-estado", options=get_operation_states(), value=[],
+                                        multi=True, placeholder="Todos",
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                className="filter-field",
+                                children=[
+                                    html.Label("Prestador"),
+                                    dcc.Dropdown(
+                                        id="ctrl-isp-nombre", options=get_provider_options("NACIONAL|ECUADOR"),
+                                        value=[], multi=True, placeholder="Todos",
+                                    ),
+                                ],
+                            ),
+                        ],
+                    ),
                     html.Div(
                         className="period-grid four-periods",
                         children=[
@@ -97,10 +121,8 @@ def layout():
                             month_year_picker("ctrl-end-period", "Hasta", max_period, min_period, max_period),
                         ],
                     ),
-                    shared_filters_layout(PREFIX),
                 ],
             ),
-            filters_summary_bar("ctrl-filters-summary"),
             html.P(
                 "Los filtros de arriba no aplican igual a las tres secciones -- 'Nunca han reportado' solo usa "
                 "Estado/Prestador (sin geografía ni período: la fuente no los tiene); 'Reporte detenido' usa "
@@ -268,9 +290,7 @@ def layout():
     )
 
 
-register_territory_callbacks(PREFIX)
-register_shared_filters_callbacks(PREFIX)
-register_filters_summary_callback(PREFIX)
+register_lines_territory_callbacks(PREFIX)
 register_month_year_picker_callback("ctrl-start-period")
 register_month_year_picker_callback("ctrl-end-period")
 register_excel_download_callback("ctrl-nunca-grid", "prestadores_sin_reportar.xlsx")
@@ -343,14 +363,15 @@ def update_nunca_reportaron(opera_estados, isp_nombres):
     Output("ctrl-detenido-message", "children"),
     Output("ctrl-detenido-hist", "figure"),
     Output("ctrl-detenido-scatter", "figure"),
-    Input("ctrl-territory-id", "data"),
+    Input("ctrl-territory-selection", "data"),
     Input("ctrl-start-period", "data"),
     Input("ctrl-end-period", "data"),
     Input("ctrl-opera-estado", "value"),
     Input("ctrl-isp-nombre", "value"),
     Input("ctrl-meses-minimo", "value"),
 )
-def update_reporte_detenido(territory_id, start_period, end_period, opera_estados, isp_nombres, meses_minimo):
+def update_reporte_detenido(seleccion, start_period, end_period, opera_estados, isp_nombres, meses_minimo):
+    seleccion = seleccion or {}
     meses_minimo = int(meses_minimo) if meses_minimo else 1
     start_period = int(start_period) if start_period is not None else None
     end_period = int(end_period) if end_period is not None else None
@@ -359,7 +380,11 @@ def update_reporte_detenido(territory_id, start_period, end_period, opera_estado
 
     try:
         df = get_prestadores_reporte_detenido_detalle(
-            meses_minimo, territory_id, start_period, end_period,
+            meses_minimo,
+            tuple(seleccion.get("provincias") or ()),
+            tuple(seleccion.get("cantones") or ()),
+            tuple(seleccion.get("parroquias") or ()),
+            start_period, end_period,
             tuple(opera_estados or ()), tuple(isp_nombres or ()),
         )
     except Exception as exc:
@@ -409,14 +434,15 @@ def update_reporte_detenido(territory_id, start_period, end_period, opera_estado
     Output("ctrl-variacion-message", "children"),
     Output("ctrl-variacion-ranking", "figure"),
     Output("ctrl-variacion-tiempo", "figure"),
-    Input("ctrl-territory-id", "data"),
+    Input("ctrl-territory-selection", "data"),
     Input("ctrl-start-period", "data"),
     Input("ctrl-end-period", "data"),
     Input("ctrl-opera-estado", "value"),
     Input("ctrl-isp-nombre", "value"),
     Input("ctrl-umbral-variacion", "value"),
 )
-def update_variacion(territory_id, start_period, end_period, opera_estados, isp_nombres, umbral):
+def update_variacion(seleccion, start_period, end_period, opera_estados, isp_nombres, umbral):
+    seleccion = seleccion or {}
     if start_period is None or end_period is None:
         vacio = empty_figure("Seleccione un rango de períodos")
         return [], "Seleccione un rango de períodos", vacio, vacio
@@ -424,7 +450,11 @@ def update_variacion(territory_id, start_period, end_period, opera_estados, isp_
     umbral = float(umbral) if umbral else 30.0
     try:
         df = get_variacion_mensual_anomala(
-            start_period, end_period, umbral, territory_id, tuple(opera_estados or ()), tuple(isp_nombres or ()),
+            start_period, end_period, umbral,
+            tuple(seleccion.get("provincias") or ()),
+            tuple(seleccion.get("cantones") or ()),
+            tuple(seleccion.get("parroquias") or ()),
+            tuple(opera_estados or ()), tuple(isp_nombres or ()),
         )
     except Exception as exc:
         vacio = empty_figure("Error al consultar PostgreSQL")
