@@ -656,3 +656,45 @@ h3[id^="evo-titulo-"] {
     color: var(--muted);
     margin-top: 4px;
 }
+
+/* ---------- Botón de descarga a Excel (components/ui.py:excel_download_button) ---------- */
+.excel-download-row {
+    display: flex;
+    justify-content: flex-end;
+    margin: 10px 2px 0;
+}
+
+.btn-secondary {
+    padding: 7px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--white);
+    color: var(--navy);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .15s ease, border-color .15s ease;
+}
+
+.btn-secondary:hover {
+    background: #eaf1fe;
+    border-color: var(--blue);
+}
+
+/* ---------- Input numérico simple (pages/control.py) ---------- */
+.numeric-input {
+    width: 100%;
+    padding: 8px 11px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 14px;
+    color: var(--text);
+    background: var(--white);
+    box-sizing: border-box;
+}
+
+.numeric-input:focus {
+    border-color: var(--blue);
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(20, 100, 244, 0.15);
+}

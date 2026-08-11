@@ -1,4 +1,4 @@
-"""dashboard/pages/evolucion.py — Evolución del mercado: líneas, prestadores, velocidades."""
+"""dashboard/pages/evolucion.py — Evolución del mercado: cuentas, prestadores, velocidades."""
 from __future__ import annotations
 
 import pandas as pd
@@ -58,7 +58,7 @@ def layout():
         children=[
             page_header(
                 "Evolución del mercado",
-                "Líneas reportadas, prestadores y cambios en la composición por velocidad.",
+                "Cuentas reportadas, prestadores y cambios en la composición por velocidad.",
             ),
             html.Section(
                 className="filter-panel",
@@ -97,7 +97,7 @@ def layout():
             html.Section(
                 className="kpi-grid four",
                 children=[
-                    kpi_card("Líneas reportadas (último período)", "evo-kpi-lines", "evo-kpi-lines-note"),
+                    kpi_card("Cuentas reportadas (último período)", "evo-kpi-lines", "evo-kpi-lines-note"),
                     kpi_card("Prestadores que reportaron", "evo-kpi-providers", "evo-kpi-providers-note"),
                     kpi_card("Cambio mensual (reportadas)", "evo-kpi-change", "evo-kpi-change-note"),
                     kpi_card("Dejaron de reportar este mes", "evo-kpi-churn", "evo-kpi-churn-note"),
@@ -120,7 +120,7 @@ def layout():
             html.Section(
                 className="chart-grid two",
                 children=[
-                    chart_card("Líneas reportadas por mes", "evo-lines-chart",
+                    chart_card("Cuentas reportadas por mes", "evo-lines-chart",
                                "Solo datos reales (reportados) -- no incluye relleno interior (imputado)."),
                     chart_card("Prestadores que reportaron", "evo-providers-chart",
                                "Cantidad de prestadores con al menos un reporte real cada mes."),
@@ -256,11 +256,11 @@ def update_evolution(
 
     lines_fig = px.bar(
         evolution, x="periodo", y="lineas_reportadas",
-        labels={"lineas_reportadas": "Líneas reportadas", "periodo": "Período"},
+        labels={"lineas_reportadas": "Cuentas reportadas", "periodo": "Período"},
     )
     lines_fig.update_traces(marker_color=PALETTE["blue"])
     style_figure(lines_fig, hovermode="x unified")
-    lines_fig.update_yaxes(title="Líneas reportadas", tickformat=",")
+    lines_fig.update_yaxes(title="Cuentas reportadas", tickformat=",")
 
     providers_fig = px.bar(
         evolution, x="periodo", y="numero_prestadores",
@@ -284,7 +284,7 @@ def update_evolution(
             category_orders={
                 "rango_velocidad": velocities.sort_values("orden_rango")["rango_velocidad"].drop_duplicates().tolist()
             },
-            labels={"total_lineas": "Líneas", "periodo": "Período", "rango_velocidad": "Rango"},
+            labels={"total_lineas": "Cuentas", "periodo": "Período", "rango_velocidad": "Rango"},
         )
         style_figure(speed_comp_fig)
         speed_comp_fig.update_yaxes(tickformat=",")

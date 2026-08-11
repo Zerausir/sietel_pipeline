@@ -117,6 +117,7 @@ def actualizar_navegacion(pathname: str | None):
         dcc.Link("IHH y participación", href="/sai/concentracion", className="nav-link"),
         dcc.Link("Mapa de nodos", href="/sai/mapa-nodos", className="nav-link"),
         dcc.Link("Discrepancias de geografía", href="/sai/discrepancias-geografia", className="nav-link"),
+        dcc.Link("Control", href="/sai/control", className="nav-link"),
     ]
     return nav, "Servicio de Acceso a Internet — SAI"
 
@@ -163,16 +164,14 @@ def serve_layout() -> html.Div:
             # de líneas reportadas). Se sincronizan solo entre ellas dos,
             # nunca con Evolución/Concentración -- ver
             # components/node_territory_filters.py.
+            # Forma REDISEÑADA 11-ago-2026: listas de códigos (selección
+            # múltiple e independiente por Provincia/Cantón/Parroquia), ya
+            # no {level, province, canton, parish, territory_id} de un
+            # solo valor por nivel.
             dcc.Store(
                 id="nodo-shared-territory",
                 storage_type="memory",
-                data={
-                    "level": "NACIONAL",
-                    "province": None,
-                    "canton": None,
-                    "parish": None,
-                    "territory_id": "NACIONAL|ECUADOR",
-                },
+                data={"provincias": [], "cantones": [], "parroquias": []},
             ),
             html.Main(dash.page_container, className="page-container"),
             html.Footer(

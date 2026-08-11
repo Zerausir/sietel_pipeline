@@ -886,37 +886,74 @@ def get_node_territory_options(
 
 @cache.memoize(timeout=900)
 def get_node_types() -> list[dict[str, str]]:
-    """Valores distintos de tiponodo, para el filtro 'Tipo de nodo'."""
+    """
+    Valores distintos de tiponodo, para el filtro 'Tipo de nodo'.
+
+    CORRECCIÓN (11-ago-2026): el dropdown mostraba "PRIMARIO"/"SECUNDARIO"
+    duplicados -- confirmado que la causa es variación de mayúsculas/
+    espacios en blanco en el propio dato (ej. "PRIMARIO" vs "PRIMARIO " o
+    "Primario"), que SQL DISTINCT trata como valores genuinamente distintos
+    aunque se vean iguales en pantalla. BTRIM+UPPER normaliza para la LISTA
+    de opciones -- el valor real sigue siendo el original, así que el
+    filtro en get_nodos_mapa normaliza de la misma forma al comparar, no
+    solo al listar (ver ese WHERE). Esto NO altera el dato fuente
+    (capa2.nodo_isp_geografia_resuelta) -- solo cómo se agrupa para
+    mostrar y filtrar, igual que ya se hace con opera_actual en
+    get_operation_states.
+    """
     df = _read(
-        "SELECT DISTINCT tiponodo FROM mart.vw_nodos_isp_mapa WHERE tiponodo IS NOT NULL ORDER BY tiponodo"
+        """
+        SELECT DISTINCT UPPER(BTRIM(tiponodo)) AS tiponodo
+        FROM mart.vw_nodos_isp_mapa
+        WHERE tiponodo IS NOT NULL AND BTRIM(tiponodo) <> ''
+        ORDER BY 1
+        """
     )
     return [{"label": row["tiponodo"], "value": row["tiponodo"]} for _, row in df.iterrows()]
 
 
-def _node_territory_column(territory_id: str) -> tuple[str, str] | None:
-    """Devuelve (columna, valor) para filtrar mart.vw_nodos_isp_mapa por el
-    territory_id elegido, o None si es Nacional (sin filtro)."""
-    if not territory_id or territory_id == "NACIONAL|ECUADOR":
-        return None
-    nivel = territory_id.split("|", 1)[0]
-    columna = {
-        "PROVINCIA": "territorio_id_provincia",
-        "CANTON": "territorio_id_canton",
-        "PARROQUIA": "territorio_id_parroquia",
-    }.get(nivel)
-    return (columna, territory_id) if columna else None
+def _node_territory_clauses(
+        provincias: list[str] | None,
+        cantones: list[str] | None,
+        parroquias: list[str] | None,
+) -> tuple[list[str], dict[str, Any]]:
+    """
+    Cláusulas SQL para el filtro geográfico de nodos, REDISEÑADO 11-ago-2026:
+    Provincia/Cantón/Parroquia ya no son una jerarquía de un solo nivel
+    (antes: territory_id como "CANTON|17|1701") -- son tres listas
+    independientes, cada una de selección múltiple. AND entre las tres
+    dimensiones, OR dentro de cada lista (mismo patrón que tipo_nodos/
+    isp_nombres en get_nodos_mapa) -- estilo segmentadores de Power BI.
+    Una lista vacía o None no filtra por esa dimensión.
+    """
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+    if provincias:
+        clauses.append("codigo_provincia = ANY(:provincias)")
+        params["provincias"] = list(provincias)
+    if cantones:
+        clauses.append("codigo_canton = ANY(:cantones)")
+        params["cantones"] = list(cantones)
+    if parroquias:
+        clauses.append("codigo_parroquia = ANY(:parroquias)")
+        params["parroquias"] = list(parroquias)
+    return clauses, params
 
 
 @cache.memoize(timeout=900)
-def get_node_provider_options(territory_id: str) -> list[dict[str, str]]:
-    """Nombres de prestadores con nodos en el territorio, para el filtro 'Prestador'."""
-    filtro = _node_territory_column(territory_id)
-    clauses = ["isp_nombre IS NOT NULL"]
-    params: dict[str, Any] = {}
-    if filtro:
-        columna, valor = filtro
-        clauses.append(f"{columna} = :territory_id")
-        params["territory_id"] = valor
+def get_node_provider_options(
+        provincias: tuple[str, ...] = (),
+        cantones: tuple[str, ...] = (),
+        parroquias: tuple[str, ...] = (),
+) -> list[dict[str, str]]:
+    """
+    Nombres de prestadores con nodos en el territorio, para el filtro
+    'Prestador'. Los argumentos son tuplas (no listas) porque
+    @cache.memoize necesita argumentos hasheables -- el llamador convierte
+    con tuple(lista) antes de invocar.
+    """
+    clauses, params = _node_territory_clauses(list(provincias), list(cantones), list(parroquias))
+    clauses.insert(0, "isp_nombre IS NOT NULL")
 
     df = _read(
         f"""
@@ -932,36 +969,41 @@ def get_node_provider_options(territory_id: str) -> list[dict[str, str]]:
 
 @cache.memoize(timeout=180)
 def get_nodos_mapa(
-        territory_id: str,
-        tipo_nodos: list[str] | None = None,
-        opera_estados: list[str] | None = None,
-        isp_nombres: list[str] | None = None,
+        provincias: tuple[str, ...] = (),
+        cantones: tuple[str, ...] = (),
+        parroquias: tuple[str, ...] = (),
+        tipo_nodos: tuple[str, ...] = (),
+        opera_estados: tuple[str, ...] = (),
+        isp_nombres: tuple[str, ...] = (),
         solo_discrepancias: bool = False,
 ) -> pd.DataFrame:
     """
     Universo de nodos para el mapa (o la tabla de discrepancias, con
-    solo_discrepancias=True). opera_actual puede traer varios estados
-    separados por coma para un mismo prestador (mismo caso que
-    dim_prestador.opera_actual en get_operation_states) -- se filtra con
-    ILIKE ANY sobre patrones '%estado%', suficiente para un filtro de UI,
-    sin replicar el UNNEST exacto de las páginas de líneas.
-    """
-    clauses: list[str] = []
-    params: dict[str, Any] = {}
+    solo_discrepancias=True). Todos los argumentos de lista son tuplas (no
+    listas) por el mismo motivo que get_node_provider_options --
+    @cache.memoize exige argumentos hasheables.
 
-    filtro_territorio = _node_territory_column(territory_id)
-    if filtro_territorio:
-        columna, valor = filtro_territorio
-        clauses.append(f"{columna} = :territory_id")
-        params["territory_id"] = valor
+    tipo_nodos compara contra UPPER(BTRIM(tiponodo)) -- igual que
+    get_node_types(), para que un valor elegido en el dropdown (ya
+    normalizado) encuentre TODAS sus variantes de mayúsculas/espacios en
+    el dato real, no solo la variante exacta que quedó cacheada en la
+    lista de opciones.
+
+    opera_actual puede traer varios estados separados por coma para un
+    mismo prestador (mismo caso que dim_prestador.opera_actual en
+    get_operation_states) -- se filtra con ILIKE ANY sobre patrones
+    '%estado%', suficiente para un filtro de UI, sin replicar el UNNEST
+    exacto de las páginas de líneas.
+    """
+    clauses, params = _node_territory_clauses(list(provincias), list(cantones), list(parroquias))
 
     if tipo_nodos:
-        clauses.append("tiponodo = ANY(:tipo_nodos)")
-        params["tipo_nodos"] = tipo_nodos
+        clauses.append("UPPER(BTRIM(tiponodo)) = ANY(:tipo_nodos)")
+        params["tipo_nodos"] = list(tipo_nodos)
 
     if isp_nombres:
         clauses.append("isp_nombre = ANY(:isp_nombres)")
-        params["isp_nombres"] = isp_nombres
+        params["isp_nombres"] = list(isp_nombres)
 
     if opera_estados:
         clauses.append("opera_actual ILIKE ANY(:opera_patrones)")
@@ -975,32 +1017,34 @@ def get_nodos_mapa(
 
 
 @cache.memoize(timeout=900)
-def get_territory_geojson(territory_id: str) -> tuple[dict, tuple[float, float, float, float]] | None:
+def get_territory_geojson_multi(
+        provincias: tuple[str, ...] = (),
+        cantones: tuple[str, ...] = (),
+        parroquias: tuple[str, ...] = (),
+) -> tuple[list[dict], tuple[float, float, float, float]] | None:
     """
-    Geometría (GeoJSON) del territorio seleccionado, para el polígono
-    semi-transparente del mapa de nodos. Devuelve (geojson, bounds) donde
-    bounds = (lon_min, lat_min, lon_max, lat_max).
+    Geometría (GeoJSON) de TODOS los territorios seleccionados, para los
+    polígonos semi-transparentes del mapa de nodos -- rediseñado 11-ago-2026
+    para selección múltiple (antes: un solo territory_id). Devuelve
+    (lista_de_geojson, bounds combinados) o None si no hay nada seleccionado
+    (a nivel Nacional no se dibuja polígono -- rellenar todo el país no
+    aporta nada visualmente).
 
-    NACIONAL devuelve None (rellenar todo el país no aporta nada). CANTON y
-    PROVINCIA ya vienen disueltas -- mart.vw_geometria_territorio_nodo lee
-    directo de capa2.territorio_geometria_nodo, precalculada UNA VEZ en
-    mart/cargar_parroquias.py (gdf.dissolve, geopandas) al cargar el
-    shapefile. Este dashboard NUNCA une polígonos en tiempo de consulta --
-    confirmado en producción 07-ago-2026 que hacerlo aquí (con shapely, por
-    petición) era demasiado lento a nivel cantón y mucho peor a nivel
-    provincia.
+    Precedencia "el nivel más específico elegido gana": si hay parroquias
+    elegidas, se dibujan esas parroquias (ignorando cantones/provincias
+    elegidos como polígono -- igual se siguen aplicando como filtro de
+    datos en get_nodos_mapa, esto es solo la capa visual); si no, cantones;
+    si no, provincias. Elegir combinaciones inconsistentes (ej. una
+    parroquia que no pertenece a la provincia también elegida) es válido
+    para el filtro AND de datos, pero aquí solo se dibuja el nivel más
+    fino -- una limitación visual aceptada, no un bug del filtro de datos.
     """
-    if not territory_id or territory_id == "NACIONAL|ECUADOR":
-        return None
-
-    partes = territory_id.split("|")
-    nivel = partes[0]
-    if nivel == "PARROQUIA" and len(partes) == 4:
-        codigo = partes[3]
-    elif nivel == "CANTON" and len(partes) == 3:
-        codigo = partes[2]
-    elif nivel == "PROVINCIA" and len(partes) == 2:
-        codigo = partes[1]
+    if parroquias:
+        nivel, codigos = "PARROQUIA", list(parroquias)
+    elif cantones:
+        nivel, codigos = "CANTON", list(cantones)
+    elif provincias:
+        nivel, codigos = "PROVINCIA", list(provincias)
     else:
         return None
 
@@ -1008,16 +1052,142 @@ def get_territory_geojson(territory_id: str) -> tuple[dict, tuple[float, float, 
         """
         SELECT geometria_geojson, lon_min, lat_min, lon_max, lat_max
         FROM mart.vw_geometria_territorio_nodo
-        WHERE nivel_geografico = :nivel AND codigo_territorio = :codigo
+        WHERE nivel_geografico = :nivel AND codigo_territorio = ANY(:codigos)
         """,
-        {"nivel": nivel, "codigo": codigo},
+        {"nivel": nivel, "codigos": codigos},
     )
     if df.empty:
         return None
 
-    fila = df.iloc[0]
-    geojson = fila["geometria_geojson"]
-    if isinstance(geojson, str):
-        geojson = json.loads(geojson)
-    bounds = (float(fila["lon_min"]), float(fila["lat_min"]), float(fila["lon_max"]), float(fila["lat_max"]))
-    return geojson, bounds
+    geojsons = []
+    lon_min = lat_min = float("inf")
+    lon_max = lat_max = float("-inf")
+    for _, fila in df.iterrows():
+        geojson = fila["geometria_geojson"]
+        if isinstance(geojson, str):
+            geojson = json.loads(geojson)
+        geojsons.append(geojson)
+        lon_min = min(lon_min, float(fila["lon_min"]))
+        lat_min = min(lat_min, float(fila["lat_min"]))
+        lon_max = max(lon_max, float(fila["lon_max"]))
+        lat_max = max(lat_max, float(fila["lat_max"]))
+
+    return geojsons, (lon_min, lat_min, lon_max, lat_max)
+
+
+# ============================================================
+# CONTROL -- inconsistencias para revisión (11-ago-2026)
+# ============================================================
+# Reutiliza vistas ya existentes y probadas en producción
+# (vw_prestadores_sin_reportar, vw_prestadores_reporte_detenido) más una
+# consulta nueva de variación mes a mes -- ninguna requiere cambios de DDL
+# en mart, solo lectura sobre lo que ya existe.
+
+@cache.memoize(timeout=300)
+def get_prestadores_nunca_reportaron_detalle() -> pd.DataFrame:
+    """
+    Detalle completo (no solo el conteo) de mart.vw_prestadores_sin_reportar,
+    para la tabla de Control -- get_prestadores_sin_reportar() (más arriba)
+    ya existía para el KPI de Evolución, pero solo devuelve un COUNT.
+    """
+    return _read(
+        """
+        SELECT peva_codigo, isp_nombre, isp_ruc, isp_tipopersona, opera,
+               resolucion, fechapermiso, fuera_de_gracia, clasificacion_incumplimiento
+        FROM mart.vw_prestadores_sin_reportar
+        ORDER BY fuera_de_gracia DESC NULLS LAST, fechapermiso NULLS LAST
+        """
+    )
+
+
+@cache.memoize(timeout=300)
+def get_prestadores_reporte_detenido_detalle(meses_minimo: int = 1) -> pd.DataFrame:
+    """
+    Detalle de mart.vw_prestadores_reporte_detenido, filtrado por
+    meses_desde_ultimo_reporte >= meses_minimo -- la vista misma NO trae
+    umbral (documentado en su propio COMMENT), a propósito, para que cada
+    consumidor decida su corte; este es el corte del módulo Control, no un
+    valor fijo en mart.
+    """
+    return _read(
+        """
+        SELECT prestador_id, isp_nombre, ruc_limpio, opera_actual, es_cancelado_actual,
+               primer_periodo_reportado, ultimo_periodo_reportado,
+               lineas_ultimo_reporte, total_lineas_historico, meses_desde_ultimo_reporte
+        FROM mart.vw_prestadores_reporte_detenido
+        WHERE meses_desde_ultimo_reporte >= :meses_minimo
+        ORDER BY meses_desde_ultimo_reporte DESC, total_lineas_historico DESC
+        """,
+        {"meses_minimo": meses_minimo},
+    )
+
+
+@cache.memoize(timeout=300)
+def get_variacion_mensual_anomala(
+        start_period: int,
+        end_period: int,
+        umbral_porcentaje: float = 30.0,
+) -> pd.DataFrame:
+    """
+    Variación mes a mes de cuentas reportadas, por prestador, dentro del
+    rango -- SOLO entre pares de meses consecutivos donde el prestador
+    tiene_reportado=TRUE en AMBOS meses (mismo principio metodológico que
+    IHH/participación: nunca mezclar "dejó de reportar" -- ya cubierto por
+    get_prestadores_reporte_detenido_detalle -- con "reportó de verdad un
+    cambio real"). Un salto grande entre un mes reportado y uno imputado no
+    es una variación real, es artefacto del relleno LOCF -- se excluye
+    explícitamente filtrando por tiene_reportado en ambos extremos del par.
+
+    umbral_porcentaje filtra el resultado a |variación| >= umbral, para que
+    la tabla no se llene de ruido de variaciones normales -- 30% es un
+    punto de partida razonable para señalar algo revisable, no un límite
+    validado estadísticamente; el filtro de la página permite ajustarlo.
+    """
+    df = _read(
+        """
+        WITH serie AS (
+            SELECT
+                f.prestador_id,
+                f.periodo_id,
+                f.periodo,
+                SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas,
+                BOOL_OR(f.tiene_reportado) AS tiene_reportado
+            FROM mart.fact_lineas_geografia_mes f
+            WHERE f.periodo_id BETWEEN :start_period AND :end_period
+            GROUP BY f.prestador_id, f.periodo_id, f.periodo
+        ),
+        con_lag AS (
+            SELECT
+                s.*,
+                LAG(s.lineas_reportadas) OVER (PARTITION BY s.prestador_id ORDER BY s.periodo_id) AS lineas_mes_anterior,
+                LAG(s.tiene_reportado) OVER (PARTITION BY s.prestador_id ORDER BY s.periodo_id) AS reporto_mes_anterior
+            FROM serie s
+        )
+        SELECT
+            c.prestador_id,
+            p.isp_nombre,
+            p.ruc_limpio,
+            c.periodo,
+            c.lineas_mes_anterior,
+            c.lineas_reportadas,
+            (c.lineas_reportadas - c.lineas_mes_anterior) AS diferencia,
+            CASE WHEN c.lineas_mes_anterior > 0
+                THEN ROUND(100.0 * (c.lineas_reportadas - c.lineas_mes_anterior) / c.lineas_mes_anterior, 2)
+            END AS variacion_porcentaje
+        FROM con_lag c
+        JOIN mart.dim_prestador p ON p.prestador_id = c.prestador_id
+        WHERE c.tiene_reportado = TRUE
+          AND c.reporto_mes_anterior = TRUE
+          AND c.lineas_mes_anterior IS NOT NULL
+          AND c.lineas_mes_anterior > 0
+          AND ABS(100.0 * (c.lineas_reportadas - c.lineas_mes_anterior) / c.lineas_mes_anterior) >= :umbral
+        ORDER BY ABS(c.lineas_reportadas - c.lineas_mes_anterior) DESC
+        """,
+        {"start_period": start_period, "end_period": end_period, "umbral": umbral_porcentaje},
+    )
+    if df.empty:
+        return df
+    periods = get_periods()[["periodo_id", "anio_mes"]]
+    df["periodo_id"] = pd.to_datetime(df["periodo"]).dt.year * 100 + pd.to_datetime(df["periodo"]).dt.month
+    df = df.merge(periods, on="periodo_id", how="left")
+    return df

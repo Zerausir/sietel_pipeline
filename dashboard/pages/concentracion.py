@@ -14,11 +14,13 @@ from components.ui import (
     clean_records,
     empty_figure,
     error_panel,
+    excel_download_button,
     filters_summary_bar,
     format_number,
     kpi_card,
     month_year_picker,
     page_header,
+    register_excel_download_callback,
     register_filters_summary_callback,
     register_month_year_picker_callback,
     style_figure,
@@ -110,7 +112,7 @@ def layout():
                     chart_card("Aporte individual al IHH", "con-contribution-chart",
                                "Contribución de cada prestador al índice del mercado."),
                     chart_card("Evolución del prestador seleccionado", "con-provider-history-chart",
-                               "Participación y líneas dentro del territorio seleccionado."),
+                               "Participación y cuentas dentro del territorio seleccionado."),
                 ],
             ),
             html.Section(
@@ -135,9 +137,9 @@ def layout():
                             {"field": "isp_nombre", "headerName": "Prestador", "minWidth": 260, "flex": 2},
                             {"field": "ruc_limpio", "headerName": "RUC", "minWidth": 150},
                             {"field": "cantidad_peva", "headerName": "PEVA", "width": 95},
-                            {"field": "total_lineas_prestador", "headerName": "Líneas (real + imputado)",
+                            {"field": "total_lineas_prestador", "headerName": "Cuentas (real + imputado)",
                              "type": "numericColumn", "minWidth": 170},
-                            {"field": "lineas_reportadas", "headerName": "Líneas reportadas",
+                            {"field": "lineas_reportadas", "headerName": "Cuentas reportadas",
                              "type": "numericColumn", "minWidth": 150},
                             {"field": "participacion_porcentaje", "headerName": "Participación %",
                              "type": "numericColumn", "minWidth": 150},
@@ -152,6 +154,7 @@ def layout():
                         columnSize="responsiveSizeToFit",
                         style={"height": "560px", "width": "100%"},
                     ),
+                    excel_download_button("con-participation-grid"),
                 ],
             ),
         ]
@@ -164,6 +167,7 @@ register_month_year_picker_callback("con-start-period")
 register_month_year_picker_callback("con-end-period")
 register_month_year_picker_callback("con-current-period")
 register_filters_summary_callback(PREFIX)
+register_excel_download_callback("con-participation-grid", "detalle_de_participacion.xlsx")
 
 
 @callback(
@@ -280,7 +284,7 @@ def update_concentration(
 
     ihh_value = format_number(selected_row.get("ihh"), 1)
     ihh_note = (
-        f"Período {selected_label} · Calculado exclusivamente sobre líneas reportadas (dato real) -- "
+        f"Período {selected_label} · Calculado exclusivamente sobre cuentas reportadas (dato real) -- "
         "ningún prestador sin reporte ese mes entra al cálculo, ni en cero ni con su último valor conocido."
     )
 
@@ -420,14 +424,14 @@ def update_provider_history(territory_id: str, provider_id: str | None, start_pe
     )
     fig.add_trace(
         go.Bar(
-            x=history["periodo"], y=history["total_lineas_prestador"], name="Líneas",
+            x=history["periodo"], y=history["total_lineas_prestador"], name="Cuentas",
             marker_color="rgba(0, 167, 196, 0.30)", yaxis="y2",
         )
     )
     style_figure(fig)
     fig.update_layout(
         yaxis={"title": "Participación (%)", "gridcolor": "#e6edf4"},
-        yaxis2={"title": "Líneas", "overlaying": "y", "side": "right", "showgrid": False},
+        yaxis2={"title": "Cuentas", "overlaying": "y", "side": "right", "showgrid": False},
         barmode="overlay",
     )
     return fig

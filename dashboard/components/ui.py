@@ -6,7 +6,7 @@ from typing import Any
 import dash_mantine_components as dmc
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Input, Output, callback, dcc, html, no_update
+from dash import Input, Output, State, callback, dcc, html, no_update
 
 PALETTE = {
     "navy": "#0b1f33",
@@ -240,6 +240,44 @@ def register_filters_summary_callback(prefix: str) -> None:
         chips.append(_filter_chip("Prestador", texto_isp))
 
         return chips
+
+
+def excel_download_button(grid_id: str) -> html.Div:
+    """
+    Botón "Descargar Excel" para un dash_ag_grid.AgGrid -- exporta
+    exactamente lo que el usuario tiene en pantalla (rowData actual del
+    grid, ya filtrado/ordenado por los selectores de la página), no una
+    consulta nueva a PostgreSQL. Ver register_excel_download_callback().
+    """
+    return html.Div(
+        className="excel-download-row",
+        children=[
+            html.Button(
+                "⬇ Descargar Excel", id=f"{grid_id}-download-btn", n_clicks=0, className="btn-secondary",
+            ),
+            dcc.Download(id=f"{grid_id}-download"),
+        ],
+    )
+
+
+def register_excel_download_callback(grid_id: str, filename: str) -> None:
+    """
+    Registrar UNA VEZ por grid -- toma el rowData actual del AgGrid
+    (State, no Input: solo se dispara al hacer clic) y lo manda como .xlsx
+    vía dcc.send_data_frame. filename debe terminar en .xlsx.
+    """
+
+    @callback(
+        Output(f"{grid_id}-download", "data"),
+        Input(f"{grid_id}-download-btn", "n_clicks"),
+        State(grid_id, "rowData"),
+        prevent_initial_call=True,
+    )
+    def _descargar(n_clicks, row_data):
+        if not row_data:
+            return no_update
+        df = pd.DataFrame(row_data)
+        return dcc.send_data_frame(df.to_excel, filename, index=False, engine="openpyxl")
 
 
 def chart_card(title: str, graph_id: str, subtitle: str | None = None) -> html.Div:
