@@ -205,18 +205,28 @@ body {
     letter-spacing: 0;
 }
 
-/* dcc.DatePickerSingle (react-dates) -- alinear al ancho de la celda, igual que los Dropdown */
-.filter-field .SingleDatePicker,
-.filter-field .SingleDatePickerInput,
-.filter-field .DateInput {
+/* dmc.MonthPickerInput (components/ui.py:month_year_picker) -- alinear al
+   ancho de la celda y al look de los dcc.Dropdown que reemplaza (11-ago-2026).
+   Reemplaza el CSS muerto de dcc.DatePickerSingle (react-dates), descartado
+   el 31-jul-2026 y nunca limpiado de esta hoja. */
+.filter-field .month-year-picker {
     width: 100%;
 }
 
-.filter-field .DateInput_input {
+.filter-field .month-year-picker input {
     font-size: 14px;
+    min-height: 38px;
     padding: 8px 11px;
     border: 1px solid var(--border);
     border-radius: 6px;
+    color: var(--text);
+    background: var(--white);
+}
+
+.filter-field .month-year-picker input:focus {
+    border-color: var(--blue);
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(20, 100, 244, 0.15);
 }
 
 .data-message {
@@ -224,6 +234,32 @@ body {
     margin: 2px 2px 12px;
     color: var(--muted);
     font-size: 13px;
+}
+
+/* ---------- Resumen de filtros activos (breadcrumb estilo Power BI) ---------- */
+.filters-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0 2px 14px;
+}
+
+.filter-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 5px 12px;
+    border-radius: 999px;
+    background: #eaf1fe;
+    border: 1px solid #d3e2fd;
+    color: var(--navy);
+    font-size: 12.5px;
+    font-weight: 550;
+    white-space: nowrap;
+}
+
+.filter-chip-label {
+    color: var(--blue);
+    font-weight: 750;
 }
 
 /* ---------- KPIs ---------- */

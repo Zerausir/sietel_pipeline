@@ -1,5 +1,6 @@
 dash==4.4.1
 dash-ag-grid==35.3.0
+dash-mantine-components==2.8.0
 pandas==3.0.5
 SQLAlchemy==2.0.51
 psycopg[binary]==3.3.4

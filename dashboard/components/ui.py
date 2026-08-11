@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import dash_mantine_components as dmc
 import pandas as pd
 import plotly.graph_objects as go
-from dash import dcc, html
+from dash import Input, Output, callback, dcc, html, no_update
 
 PALETTE = {
     "navy": "#0b1f33",
@@ -66,21 +67,179 @@ def kpi_card(title: str, value_id: str, note_id: str | None = None) -> html.Div:
     return html.Div(children, className="kpi-card")
 
 
-def month_year_dropdown(id_: str, label: str, options: list[dict[str, Any]], value: int) -> html.Div:
+def _periodo_id_to_iso(periodo_id: int) -> str:
+    """periodo_id en mart.dim_periodo es SIEMPRE anio*100+mes (ver
+    sql/02_ddl_mart.sql, INSERT de dim_periodo) -- la conversión es
+    aritmética directa, no requiere consultar la tabla. Se ancla al día 01
+    porque MonthPickerInput exige una fecha ISO completa como value/minDate/
+    maxDate, aunque en el calendario no se muestre ni se pueda elegir día."""
+    anio, mes = divmod(int(periodo_id), 100)
+    return f"{anio:04d}-{mes:02d}-01"
+
+
+def _iso_to_periodo_id(iso_value: str) -> int:
+    anio, mes = (int(parte) for parte in iso_value.split("-")[:2])
+    return anio * 100 + mes
+
+
+def month_year_picker(id_: str, label: str, value: int, min_period: int, max_period: int) -> html.Div:
     """
-    Selector de PERÍODO MENSUAL -- solo mes y año, sin días (a pedido del
-    usuario, 31-jul-2026: el dcc.DatePickerSingle con calendario completo
-    sugería una precisión diaria que los datos no tienen -- son mensuales).
-    El valor es directamente periodo_id (entero AAAAMM), no una fecha --
-    quien llama ya no necesita resolve_period_id() para estos selectores.
+    Selector de PERÍODO MENSUAL con calendario de meses (dash-mantine-
+    components MonthPickerInput): cuadrícula de 12 meses por año,
+    navegación año a año con flechas -- SIN nivel de día.
+
+    Reemplaza la lista plana de ~180 opciones (dcc.Dropdown) que obligaba a
+    hacer scroll desde 2011-01 hasta el período más reciente (a pedido del
+    usuario, 11-ago-2026). No es un regreso al dcc.DatePickerSingle
+    descartado el 31-jul-2026 -- aquel exponía un calendario de DÍAS, que
+    sugería una precisión que los datos mensuales no tienen; este solo
+    navega por año y mes, igual que la lista que reemplaza.
+
+    Contrato externo: `id_` sigue siendo el id que leen las demás
+    callbacks de la página, pero ahora vía la propiedad "data" de un
+    dcc.Store (no "value" de un dcc.Dropdown) -- quien lo consuma debe usar
+    Input(id_, "data") / State(id_, "data"). Ver
+    register_month_year_picker_callback() para el callback que traduce la
+    fecha elegida a periodo_id (entero AAAAMM) y alimenta ese Store.
     """
     return html.Div(
         className="filter-field",
         children=[
             html.Label(label),
-            dcc.Dropdown(id=id_, options=options, value=value, clearable=False),
+            dmc.MonthPickerInput(
+                id=f"{id_}-picker",
+                value=_periodo_id_to_iso(value),
+                minDate=_periodo_id_to_iso(min_period),
+                maxDate=_periodo_id_to_iso(max_period),
+                valueFormat="MMMM YYYY",
+                clearable=False,
+                className="month-year-picker",
+            ),
+            dcc.Store(id=id_, data=value),
         ],
     )
+
+
+def register_month_year_picker_callback(id_: str) -> None:
+    """Registrar UNA VEZ por cada selector creado con month_year_picker()
+    -- mismo patrón que register_shared_filters_callbacks() /
+    register_territory_callbacks(): función que registra un @callback,
+    llamada a nivel de módulo en cada página que la usa."""
+
+    @callback(
+        Output(id_, "data"),
+        Input(f"{id_}-picker", "value"),
+    )
+    def _sincronizar_periodo(iso_value: str | None):
+        if not iso_value:
+            # clearable=False debería impedir esto en la práctica; se deja
+            # como defensa explícita en vez de asumir que nunca ocurre.
+            return no_update
+        return _iso_to_periodo_id(iso_value)
+
+
+def filters_summary_bar(id_: str) -> html.Div:
+    """
+    Resumen visual ("breadcrumb") de los filtros activos, estilo el panel
+    de filtros de Power BI -- evita que el usuario tenga que revisar los
+    6+ selectores de arriba para saber qué está mirando en los gráficos.
+    Se actualiza vía register_filters_summary_callback(); esta función
+    solo crea el contenedor vacío que la callback rellena.
+    """
+    return html.Div(id=id_, className="filters-summary")
+
+
+def _filter_chip(label: str, value: str) -> html.Span:
+    return html.Span(
+        className="filter-chip",
+        children=[html.Span(f"{label}: ", className="filter-chip-label"), value],
+    )
+
+
+NIVEL_LABELS = {"NACIONAL": "Nacional", "PROVINCIA": "Provincia", "CANTON": "Cantón", "PARROQUIA": "Parroquia"}
+
+
+def register_filters_summary_callback(prefix: str) -> None:
+    """
+    Registrar UNA VEZ por página -- arma la barra de chips a partir de los
+    Inputs de territorio (components/territory_filters.py), período
+    (month_year_picker) y estado/prestador (components/filters_shared.py)
+    de esa misma página. Lee las ETIQUETAS desde la propiedad "options" de
+    cada Dropdown ya montado -- no vuelve a consultar PostgreSQL para
+    territorio ni prestador; para período sí usa get_periods(), pero esa
+    consulta ya está cacheada 15 min (services/queries.py).
+
+    Alcance deliberadamente limitado a los filtros COMUNES a ambas páginas
+    (territorio, rango de período, estado, prestador). "Período de
+    participación" y "Prestador para evolución" -- exclusivos de
+    Concentración -- no están en este resumen; ya son visibles en su propio
+    selector, a un clic de los KPIs que afectan.
+    """
+    from services.queries import get_periods  # import perezoso: evita ciclo de imports con services.queries
+
+    @callback(
+        Output(f"{prefix}-filters-summary", "children"),
+        Input(f"{prefix}-level", "value"),
+        Input(f"{prefix}-province", "value"),
+        Input(f"{prefix}-province", "options"),
+        Input(f"{prefix}-canton", "value"),
+        Input(f"{prefix}-canton", "options"),
+        Input(f"{prefix}-parish", "value"),
+        Input(f"{prefix}-parish", "options"),
+        Input(f"{prefix}-start-period", "data"),
+        Input(f"{prefix}-end-period", "data"),
+        Input(f"{prefix}-opera-estado", "value"),
+        Input(f"{prefix}-isp-nombre", "value"),
+        Input(f"{prefix}-isp-nombre", "options"),
+    )
+    def _actualizar_resumen(
+            level: str | None,
+            province: str | None, province_opts: list[dict[str, str]] | None,
+            canton: str | None, canton_opts: list[dict[str, str]] | None,
+            parish: str | None, parish_opts: list[dict[str, str]] | None,
+            start_period: int | None, end_period: int | None,
+            opera_estados: list[str] | None,
+            isp_nombres: list[str] | None, isp_opts: list[dict[str, str]] | None,
+    ):
+        def _etiqueta(valor: str | None, opciones: list[dict[str, str]] | None) -> str:
+            return next((o["label"] for o in (opciones or []) if o["value"] == valor), valor or "")
+
+        if not level or level == "NACIONAL":
+            territorio_label = "Nacional"
+        else:
+            partes = [NIVEL_LABELS.get(level, level)]
+            if province:
+                partes.append(_etiqueta(province, province_opts))
+            if canton and level in {"CANTON", "PARROQUIA"}:
+                partes.append(_etiqueta(canton, canton_opts))
+            if parish and level == "PARROQUIA":
+                partes.append(_etiqueta(parish, parish_opts))
+            territorio_label = " › ".join(p for p in partes if p)
+
+        chips = [_filter_chip("Territorio", territorio_label)]
+
+        if start_period and end_period:
+            periods = get_periods()
+
+            def _periodo_label(periodo_id: int) -> str:
+                fila = periods[periods["periodo_id"] == int(periodo_id)]
+                return str(fila.iloc[0]["anio_mes"]) if not fila.empty else str(periodo_id)
+
+            inicio, fin = sorted((int(start_period), int(end_period)))
+            chips.append(_filter_chip("Período", f"{_periodo_label(inicio)} – {_periodo_label(fin)}"))
+
+        chips.append(_filter_chip("Estado", ", ".join(opera_estados) if opera_estados else "Todos"))
+
+        if isp_nombres:
+            etiquetas = [_etiqueta(v, isp_opts) for v in isp_nombres]
+            texto_isp = ", ".join(etiquetas[:2])
+            if len(etiquetas) > 2:
+                texto_isp += f" y {len(etiquetas) - 2} más"
+        else:
+            texto_isp = "Todos"
+        chips.append(_filter_chip("Prestador", texto_isp))
+
+        return chips
 
 
 def chart_card(title: str, graph_id: str, subtitle: str | None = None) -> html.Div:
@@ -133,53 +292,6 @@ def empty_figure(message: str = "No hay datos para los filtros seleccionados") -
         yaxis={"visible": False},
     )
     return fig
-
-
-def compute_mapbox_view(
-        lat_min: float, lat_max: float, lon_min: float, lon_max: float,
-        default_zoom: float = 5.2,
-) -> tuple[dict[str, float], float]:
-    """
-    Centro y zoom aproximados de un mapbox a partir de un rango de
-    coordenadas -- Scattermapbox no tiene un "fit bounds" automático como
-    Leaflet, así que se estima el zoom por el tamaño del rango (heurística
-    simple, no exacta, pero suficiente para que el mapa quede centrado y a
-    una escala razonable al elegir un territorio).
-    """
-    if not all(map(lambda v: v is not None and not pd.isna(v), (lat_min, lat_max, lon_min, lon_max))):
-        return {"lat": -1.5, "lon": -78.5}, default_zoom
-
-    center = {"lat": (lat_min + lat_max) / 2, "lon": (lon_min + lon_max) / 2}
-    rango = max(lat_max - lat_min, lon_max - lon_min)
-    if rango < 0.02:
-        zoom = 13.0
-    elif rango < 0.05:
-        zoom = 12.0
-    elif rango < 0.1:
-        zoom = 11.0
-    elif rango < 0.2:
-        zoom = 10.0
-    elif rango < 0.5:
-        zoom = 9.0
-    elif rango < 1:
-        zoom = 8.0
-    elif rango < 2:
-        zoom = 7.0
-    elif rango < 4:
-        zoom = 6.3
-    else:
-        zoom = default_zoom
-    return center, zoom
-
-
-def mapbox_polygon_layers(geojson: dict, color: str) -> list[dict[str, Any]]:
-    """Relleno semi-transparente + borde del territorio seleccionado, para
-    layout.mapbox.layers. Dos capas separadas (fill + line) porque un solo
-    layer de tipo 'fill' en Plotly no dibuja borde propio."""
-    return [
-        {"source": geojson, "type": "fill", "color": color, "opacity": 0.16, "below": "traces"},
-        {"source": geojson, "type": "line", "color": color, "line": {"width": 1.5}, "below": "traces"},
-    ]
 
 
 def style_figure(fig: go.Figure, *, height: int = 380, hovermode: str = "x unified") -> go.Figure:

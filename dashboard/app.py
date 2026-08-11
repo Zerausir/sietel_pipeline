@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import dash
-from dash import Dash, Input, Output, callback, dcc, html
+import dash_mantine_components as dmc
+from dash import Dash, Input, Output, _dash_renderer, callback, dcc, html
 from flask_login import current_user
 
 from config import settings
 from extensions import cache
 from auth import init_auth
+
+# Debe fijarse ANTES de instanciar Dash() -- dash-mantine-components 2.x
+# (ver dashboard/requirements.txt) requiere React 18.2.0 explícitamente;
+# sin esto los selectores de calendario (dmc.MonthPickerInput, ver
+# components/ui.py:month_year_picker) no renderizan.
+_dash_renderer._set_react_version("18.2.0")
 
 app = Dash(
     __name__,
@@ -15,6 +22,7 @@ app = Dash(
     suppress_callback_exceptions=True,
     title="OBTEL — Observatorio de Telecomunicaciones",
     update_title="Actualizando…",
+    external_stylesheets=dmc.styles.ALL,
 )
 server = app.server
 server.config["SECRET_KEY"] = settings.secret_key
@@ -107,8 +115,6 @@ def actualizar_navegacion(pathname: str | None):
         html.Div(className="topbar-sep"),
         dcc.Link("Evolución", href="/sai/evolucion", className="nav-link"),
         dcc.Link("IHH y participación", href="/sai/concentracion", className="nav-link"),
-        dcc.Link("Mapa de nodos", href="/sai/mapa-nodos", className="nav-link"),
-        dcc.Link("Discrepancias de geografía", href="/sai/discrepancias-geografia", className="nav-link"),
     ]
     return nav, "Servicio de Acceso a Internet — SAI"
 
@@ -149,23 +155,6 @@ def serve_layout() -> html.Div:
                 storage_type="memory",
                 data={"opera_estados": [], "isp_nombres": []},
             ),
-            # Store propio para las páginas de nodos ISP (Mapa de Nodos,
-            # Discrepancias de Geografía) -- geografía CONALI derivada de
-            # coordenadas, universo distinto a shared-territory (geografía
-            # de líneas reportadas). Se sincronizan solo entre ellas dos,
-            # nunca con Evolución/Concentración -- ver
-            # components/node_territory_filters.py.
-            dcc.Store(
-                id="nodo-shared-territory",
-                storage_type="memory",
-                data={
-                    "level": "NACIONAL",
-                    "province": None,
-                    "canton": None,
-                    "parish": None,
-                    "territory_id": "NACIONAL|ECUADOR",
-                },
-            ),
             html.Main(dash.page_container, className="page-container"),
             html.Footer(
                 "Fuente: vistas analíticas del esquema mart en PostgreSQL.",
@@ -175,7 +164,34 @@ def serve_layout() -> html.Div:
     )
 
 
-app.layout = serve_layout
+# dmc.MantineProvider es obligatorio para que CUALQUIER componente
+# dash-mantine-components funcione (documentado por la propia librería) --
+# envuelve serve_layout() en vez de reemplazarlo, así current_user se sigue
+# leyendo en cada request (ver el comentario dentro de navigation()).
+# theme alinea los componentes Mantine (el MonthPickerInput de los
+# selectores de período) con la paleta navy/azul ya definida en
+# assets/styles.css, en vez de dejar los colores por defecto de Mantine.
+MANTINE_THEME = {
+    "primaryColor": "blue",
+    "colors": {
+        # Mantine exige exactamente 10 tonos (índice 0 = más claro, 9 = más
+        # oscuro). Interpolado a mano entre --blue (#1464f4) y --navy
+        # (#0b1f33) de assets/styles.css -- misma paleta, no la de Mantine
+        # por defecto.
+        "blue": [
+            "#eaf1fe", "#d3e2fd", "#a7c5fb", "#7aa8f9", "#4d8bf7",
+            "#1464f4", "#0f50c3", "#0b1f33", "#0a1c2e", "#081824",
+        ],
+    },
+    "fontFamily": "Inter, Segoe UI, Arial, sans-serif",
+}
+
+
+def serve_layout_with_theme() -> dmc.MantineProvider:
+    return dmc.MantineProvider(serve_layout(), theme=MANTINE_THEME, id="obtel-mantine-provider")
+
+
+app.layout = serve_layout_with_theme
 
 if __name__ == "__main__":
     app.run(host=settings.app_host, port=settings.app_port, debug=settings.app_debug)

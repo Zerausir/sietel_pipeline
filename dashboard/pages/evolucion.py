@@ -13,11 +13,14 @@ from components.ui import (
     chart_card,
     empty_figure,
     error_panel,
+    filters_summary_bar,
     format_number,
     format_signed,
     kpi_card,
-    month_year_dropdown,
+    month_year_picker,
     page_header,
+    register_filters_summary_callback,
+    register_month_year_picker_callback,
     style_figure,
 )
 from services.queries import (
@@ -47,7 +50,7 @@ def _period_options():
 
 def layout():
     try:
-        period_options, min_period, max_period = _period_options()
+        _, min_period, max_period = _period_options()
     except Exception as exc:
         return html.Div([page_header("Evolución del mercado", ""), error_panel(str(exc))])
 
@@ -64,8 +67,8 @@ def layout():
                     html.Div(
                         className="period-grid four-periods",
                         children=[
-                            month_year_dropdown("evo-start-period", "Desde", period_options, min_period),
-                            month_year_dropdown("evo-end-period", "Hasta", period_options, max_period),
+                            month_year_picker("evo-start-period", "Desde", min_period, min_period, max_period),
+                            month_year_picker("evo-end-period", "Hasta", max_period, min_period, max_period),
                         ],
                     ),
                     shared_filters_layout(PREFIX),
@@ -88,6 +91,7 @@ def layout():
                     ),
                 ],
             ),
+            filters_summary_bar("evo-filters-summary"),
             html.Div(id="evo-message", className="data-message"),
             html.H3(id="evo-titulo-estado-actual", children="Estado actual"),
             html.Section(
@@ -132,6 +136,9 @@ def layout():
 
 register_territory_callbacks(PREFIX)
 register_shared_filters_callbacks(PREFIX)
+register_month_year_picker_callback("evo-start-period")
+register_month_year_picker_callback("evo-end-period")
+register_filters_summary_callback(PREFIX)
 
 
 @callback(
@@ -159,8 +166,8 @@ register_shared_filters_callbacks(PREFIX)
     Output("evo-kpi-nunca-reportaron", "children"),
     Output("evo-kpi-nunca-reportaron-note", "children"),
     Input("evo-territory-id", "data"),
-    Input("evo-start-period", "value"),
-    Input("evo-end-period", "value"),
+    Input("evo-start-period", "data"),
+    Input("evo-end-period", "data"),
     Input("evo-speed-type", "value"),
     Input("evo-opera-estado", "value"),
     Input("evo-isp-nombre", "value"),

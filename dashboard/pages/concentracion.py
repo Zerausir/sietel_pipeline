@@ -14,10 +14,13 @@ from components.ui import (
     clean_records,
     empty_figure,
     error_panel,
+    filters_summary_bar,
     format_number,
     kpi_card,
-    month_year_dropdown,
+    month_year_picker,
     page_header,
+    register_filters_summary_callback,
+    register_month_year_picker_callback,
     style_figure,
 )
 from services.queries import (
@@ -45,7 +48,7 @@ def _period_options():
 
 def layout():
     try:
-        period_options, min_period, max_period = _period_options()
+        _, min_period, max_period = _period_options()
     except Exception as exc:
         return html.Div([page_header("Concentración de mercado", ""), error_panel(str(exc))])
 
@@ -63,16 +66,12 @@ def layout():
                     html.Div(
                         className="period-grid four-periods",
                         children=[
-                            month_year_dropdown("con-start-period", "Historia desde", period_options, min_period),
-                            month_year_dropdown("con-end-period", "Historia hasta", period_options, max_period),
-                            html.Div(
-                                className="filter-field",
-                                children=[
-                                    html.Label("Período de participación"),
-                                    dcc.Dropdown(id="con-current-period", options=period_options, value=max_period,
-                                                 clearable=False),
-                                ],
-                            ),
+                            month_year_picker("con-start-period", "Historia desde", min_period, min_period,
+                                              max_period),
+                            month_year_picker("con-end-period", "Historia hasta", max_period, min_period,
+                                              max_period),
+                            month_year_picker("con-current-period", "Período de participación", max_period,
+                                              min_period, max_period),
                             html.Div(
                                 className="filter-field",
                                 children=[
@@ -88,6 +87,7 @@ def layout():
                     shared_filters_layout(PREFIX),
                 ],
             ),
+            filters_summary_bar("con-filters-summary"),
             html.Div(id="con-message", className="data-message"),
             html.Section(
                 className="kpi-grid six",
@@ -147,7 +147,7 @@ def layout():
                         ],
                         rowData=[],
                         defaultColDef={"sortable": True, "filter": True, "resizable": True},
-                        dashGridOptions={"theme": "themeBalham", "pagination": True, "paginationPageSize": 20,
+                        dashGridOptions={"theme": "themeBalham", "pagination": True, "paginationPageSize": 10,
                                          "animateRows": True},
                         columnSize="responsiveSizeToFit",
                         style={"height": "560px", "width": "100%"},
@@ -160,13 +160,17 @@ def layout():
 
 register_territory_callbacks(PREFIX)
 register_shared_filters_callbacks(PREFIX)
+register_month_year_picker_callback("con-start-period")
+register_month_year_picker_callback("con-end-period")
+register_month_year_picker_callback("con-current-period")
+register_filters_summary_callback(PREFIX)
 
 
 @callback(
     Output("con-provider", "options"),
     Output("con-provider", "value"),
     Input("con-territory-id", "data"),
-    Input("con-current-period", "value"),
+    Input("con-current-period", "data"),
     Input("con-opera-estado", "value"),
     Input("con-isp-nombre", "value"),
 )
@@ -213,9 +217,9 @@ def update_provider_options(territory_id: str, period_id: int, opera_estados: li
     Output("con-participation-grid", "rowData"),
     Output("con-message", "children"),
     Input("con-territory-id", "data"),
-    Input("con-start-period", "value"),
-    Input("con-end-period", "value"),
-    Input("con-current-period", "value"),
+    Input("con-start-period", "data"),
+    Input("con-end-period", "data"),
+    Input("con-current-period", "data"),
     Input("con-opera-estado", "value"),
     Input("con-isp-nombre", "value"),
 )
@@ -386,8 +390,8 @@ def update_concentration(
     Output("con-provider-history-chart", "figure"),
     Input("con-territory-id", "data"),
     Input("con-provider", "value"),
-    Input("con-start-period", "value"),
-    Input("con-end-period", "value"),
+    Input("con-start-period", "data"),
+    Input("con-end-period", "data"),
 )
 def update_provider_history(territory_id: str, provider_id: str | None, start_period: int | None,
                             end_period: int | None):
