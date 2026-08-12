@@ -25,20 +25,22 @@ Desarrollado por la **Dirección de Mercados — ARCOTEL**.
 
 **Capa 2/3** — `mart/requirements.txt`
 
-[![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.x-D71F00)](https://www.sqlalchemy.org/)
-[![psycopg](https://img.shields.io/badge/psycopg%5Bbinary%5D-3.x-336791?logo=postgresql&logoColor=white)](https://www.psycopg.org/psycopg3/)
-[![python-dotenv](https://img.shields.io/badge/python--dotenv-1.x-ECD53F)](https://pypi.org/project/python-dotenv/)
+[![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0.51-D71F00)](https://www.sqlalchemy.org/)
+[![psycopg](https://img.shields.io/badge/psycopg%5Bbinary%5D-3.3.4-336791?logo=postgresql&logoColor=white)](https://www.psycopg.org/psycopg3/)
+[![python-dotenv](https://img.shields.io/badge/python--dotenv-1.2.2-ECD53F)](https://pypi.org/project/python-dotenv/)
 [![geopandas](https://img.shields.io/badge/geopandas-1.1.4-139C5A)](https://geopandas.org/)
-[![shapely](https://img.shields.io/badge/shapely-2.1.2-139C5A)](https://shapely.readthedocs.io/)
 
-> Rangos exactos: `SQLAlchemy>=2.0,<3`, `psycopg[binary]>=3.2,<4`, `python-dotenv>=1.0,<2`. `geopandas`/`shapely` se
-> usan **solo** en `mart/cargar_parroquias.py` (lectura del shapefile CONALI, una sola vez) — el resto de `mart/`
-> nunca los importa.
+> `shapely` **no** está pinneado explícitamente en `mart/requirements.txt` — llega como dependencia transitiva de
+> `geopandas`. Se usa directamente (`shapely.geometry`, `shapely.strtree.STRtree`) en
+> `mart/detectar_discrepancias_geografia_nodo.py`. `geopandas` en sí se usa **solo** en `mart/cargar_parroquias.py`
+> (lectura del shapefile CONALI, una sola vez) — el resto de `mart/` nunca lo importa.
 
 **Dashboard** — `dashboard/requirements.txt`
 
 [![Dash](https://img.shields.io/badge/Dash-4.4.1-008DE4?logo=plotly&logoColor=white)](https://dash.plotly.com/)
 [![dash-ag-grid](https://img.shields.io/badge/dash--ag--grid-35.3.0-1D1D1D)](https://github.com/plotly/dash-ag-grid)
+[![dash-mantine-components](https://img.shields.io/badge/dash--mantine--components-2.8.0-339AF0)](https://www.dash-mantine-components.com/)
+[![openpyxl](https://img.shields.io/badge/openpyxl-3.1.5-217346?logo=microsoftexcel&logoColor=white)](https://openpyxl.readthedocs.io/)
 [![pandas](https://img.shields.io/badge/pandas-3.0.5-150458?logo=pandas&logoColor=white)](https://pandas.pydata.org/)
 [![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0.51-D71F00)](https://www.sqlalchemy.org/)
 [![psycopg](https://img.shields.io/badge/psycopg%5Bbinary%5D-3.3.4-336791?logo=postgresql&logoColor=white)](https://www.psycopg.org/psycopg3/)
@@ -49,7 +51,12 @@ Desarrollado por la **Dirección de Mercados — ARCOTEL**.
 [![gunicorn](https://img.shields.io/badge/gunicorn-26.0.0-499848?logo=gunicorn&logoColor=white)](https://gunicorn.org/)
 
 > El dashboard **no** usa `geopandas`/`shapely` — el polígono del mapa de nodos se sirve ya precalculado desde
-> `mart.vw_geometria_territorio_nodo` (ver [Geografía de nodos ISP](#geografía-de-nodos-isp)).
+> `mart.vw_geometria_territorio_nodo` (ver [Geografía de nodos ISP](#geografía-de-nodos-isp)). `dash-mantine-components`
+> se agregó en agosto de 2026 exclusivamente para dos widgets que `dcc`/`dash-ag-grid` no resuelven bien:
+> `dmc.MonthPickerInput` (selectores de período, calendario de meses sin nivel de día) y `dmc.NumberInput` (steppers
+> numéricos — reemplazó a `dcc.Input(type="number")`, cuyo spinner nativo perdía el valor del recuadro al usar las
+> flechas +/-, ver [Historial de correcciones](#historial-de-correcciones)). Requiere fijar
+> `_dash_renderer._set_react_version("18.2.0")` **antes** de instanciar `Dash()` — ver `dashboard/app.py`.
 
 ---
 
@@ -62,6 +69,7 @@ Desarrollado por la **Dirección de Mercados — ARCOTEL**.
 - [Las tres capas, en detalle — Líneas Dedicadas](#las-tres-capas-en-detalle--líneas-dedicadas)
 - [Principio metodológico: nunca imputar para medir concentración de mercado](#principio-metodológico-nunca-imputar-para-medir-concentración-de-mercado)
 - [Geografía de nodos ISP](#geografía-de-nodos-isp)
+- [El dashboard, módulo por módulo](#el-dashboard-módulo-por-módulo)
 - [Requisitos previos](#requisitos-previos)
 - [Roles y permisos de PostgreSQL](#roles-y-permisos-de-postgresql)
 - [Configuración](#configuración)
@@ -112,11 +120,16 @@ Desarrollado por la **Dirección de Mercados — ARCOTEL**.
 - Publica **dos vistas del dashboard**: nodos sin discrepancia (mapa nacional, coloreado por tipo de nodo) y nodos con
   discrepancia de cantón (solo lectura — la revisión formal ocurre fuera de OBTEL).
 
+**Control** (agregado ago-2026) — módulo de inconsistencias para seguimiento regulatorio, sin datos ni modelo nuevo en
+`mart`: reutiliza vistas ya existentes (`vw_prestadores_sin_reportar`, `vw_prestadores_reporte_detenido`) más una
+consulta nueva de variación mensual anómala (ventana `LAG()` sobre `fact_lineas_geografia_mes`), todo resuelto en la
+capa de consultas del dashboard, no en PostgreSQL.
+
 **Ambos módulos comparten:**
 
 - Un **dashboard web** (Dash + PostgreSQL) con autenticación propia — OBTEL — para que la Dirección de Mercados analice
-  evolución del mercado, cumplimiento de reporte, concentración y geografía de infraestructura, sin depender de Power BI
-  para el día a día.
+  evolución del mercado, cumplimiento de reporte, concentración, geografía de infraestructura y control regulatorio, sin
+  depender de Power BI para el día a día.
 
 ## Por qué existe
 
@@ -129,6 +142,10 @@ hallazgo está documentado formalmente en `Informe_Hallazgos_SIETEL.docx`.
 directamente por el prestador. El módulo de geografía de nodos nació de una necesidad distinta: **SIETEL no tiene forma
 propia de verificar si la ubicación reportada de un nodo es correcta** — `dbo.Parroquia` usa una codificación
 administrativa vieja, y nadie la había cruzado nunca contra una fuente cartográfica independiente hasta este proyecto.
+El módulo Control nació de una tercera necesidad: ninguna de las dos vistas anteriores reunía en un solo lugar las
+inconsistencias que importan para *control regulatorio* específicamente (quién nunca reportó, quién dejó de hacerlo,
+quién cambió drásticamente lo que reporta) — existían como piezas sueltas (un KPI aislado, una vista nunca expuesta) en
+vez de un módulo dedicado con sus propios filtros y gráficos.
 
 ## Arquitectura general
 
@@ -158,7 +175,8 @@ administrativa vieja, y nadie la había cruzado nunca contra una fuente cartogr�
         ▼
 ┌───────────────────────────── DASHBOARD ───────────────────────────┐
 │ Dash + Flask-Login + gunicorn, contenedor propio                  │
-│ Evolución · IHH y participación · Mapa de nodos · Discrepancias   │
+│ Evolución · IHH y participación · Mapa de nodos ·                 │
+│ Discrepancias de geografía · Control                              │
 │ Lee exclusivamente mart.* (rol de solo lectura dashboard_lector)  │
 └────────────────────────────────────────────────────────────────────┘
         ▼
@@ -181,6 +199,11 @@ recalcular en cada consulta del dashboard. Se reconstruyen por completo en cada 
 extensiones geoespaciales instaladas. El cruce punto-en-polígono se resuelve con `shapely` + `STRtree` en Python, contra
 geometría almacenada como GeoJSON en columnas `JSONB` — mismo patrón que
 [`Zerausir/samm_pipeline`](https://github.com/Zerausir/samm_pipeline).
+
+**Por qué Control no agrega tablas/vistas nuevas a `mart`:** dos de sus tres secciones reutilizan vistas que ya existían
+(`vw_prestadores_sin_reportar`, `vw_prestadores_reporte_detenido`); la tercera (variación mensual anómala) es una
+agregación con ventana (`LAG()`) sobre `fact_lineas_geografia_mes`, calculada al vuelo en
+`dashboard/services/queries.py` — no justificaba una vista materializada nueva ni un cambio de esquema.
 
 ## Estructura del repositorio
 
@@ -214,25 +237,32 @@ sietel_pipeline/
 │   ├── 03_ddl_auth.sql                       # Esquema auth: login del dashboard (Flask-Login + bcrypt)
 │   ├── 04_ddl_calidad.sql                    # Esquema calidad: conflictos RUC/PEVA + discrepancias de nodo
 │   ├── 05_roles_eda.sql                      # Permisos del rol de solo lectura eda_lector (EDA/ML exploratorio)
-│   └── 06.. a 09_..sql                       # Parches puntuales aplicados en producción, ver Historial de correcciones
+│   ├── 06_patch_vw_prestadores_sin_reportar.sql     # Parche puntual, ver Historial de correcciones
+│   ├── 07_patch_vw_prestadores_reporte_detenido.sql # Parche puntual, ver Historial de correcciones
+│   └── 08_patch_fact_ihh_geografico.sql             # Parche puntual, ver Historial de correcciones
 ├── dashboard/                                 # Aplicación Dash
-│   ├── app.py                                # Layout raíz, stores compartidos entre páginas, navegación
+│   ├── app.py                                # Layout raíz, stores compartidos, navegación, MantineProvider
 │   ├── auth.py                                # Flask-Login + bcrypt, blueprint /login /logout
-│   ├── config.py                             # Settings (dataclass), variables de entorno del dashboard
-│   ├── extensions.py                         # Instancia compartida de Flask-Caching
+│   ├── config.py                              # Settings (dataclass), variables de entorno del dashboard
+│   ├── extensions.py                          # Instancia compartida de Flask-Caching
 │   ├── requirements.txt
 │   ├── .env.example
 │   ├── assets/styles.css                     # Tema visual (variables CSS, tarjetas KPI, grids de filtros)
 │   ├── components/
-│   │   ├── ui.py                              # Helpers de UI, incluido compute_mapbox_view/mapbox_polygon_layers
-│   │   ├── territory_filters.py               # Filtro geográfico en cascada -- geografía de LÍNEAS reportadas
-│   │   ├── node_territory_filters.py          # Filtro geográfico en cascada -- geografía de NODOS (CONALI)
+│   │   ├── ui.py                              # Helpers de UI: kpi_card, chart_card, month_year_picker,
+│   │   │                                      #   numeric_stepper, excel_download_button, filters_summary_bar,
+│   │   │                                      #   compute_mapbox_view, mapbox_polygon_layers
+│   │   ├── territory_filters.py               # Nivel/Provincia/Cantón/Parroquia, selección única -- Evolución/Concentración
+│   │   ├── node_territory_filters.py          # Provincia/Cantón/Parroquia, sin Nivel, multi-select -- geografía de NODOS
+│   │   ├── lines_territory_filters.py         # Provincia/Cantón/Parroquia, sin Nivel, multi-select -- geografía de LÍNEAS (Control)
 │   │   └── filters_shared.py                  # Filtro de Estado de operación / Prestador, sincronizado
 │   ├── pages/
-│   │   ├── evolucion.py                       # "Evolución del mercado" (líneas dedicadas)
+│   │   ├── inicio.py                          # Panel de opciones (selector de módulos), path "/"
+│   │   ├── evolucion.py                       # "Evolución" (líneas dedicadas)
 │   │   ├── concentracion.py                   # "IHH y participación" (líneas dedicadas)
 │   │   ├── mapa_nodos.py                      # "Mapa de nodos" (sin discrepancia de geografía)
-│   │   └── discrepancias_geografia.py         # "Discrepancias de geografía" (solo lectura)
+│   │   ├── discrepancias_geografia.py         # "Discrepancias de geografía" (solo lectura)
+│   │   └── control.py                         # "Control" (inconsistencias de reporte)
 │   ├── services/
 │   │   ├── database.py                        # Engines SQLAlchemy (mart_lector, auth) + validadores de esquema
 │   │   └── queries.py                         # Todas las consultas cacheadas contra mart.*
@@ -270,10 +300,10 @@ aplicar_esquema >> cargar_dimensiones >> cargar_nodos_isp >> obtener_anios_a_car
 - **`cargar_dimensiones`** versiona `dim_isp` y `dim_permiso_va_agregado` con SCD Tipo 2. Las columnas que disparan una
   nueva versión (`COLUMNAS_VERSIONABLES_ISP`, `COLUMNAS_VERSIONABLES_PERMISO`) son una **propuesta inicial pendiente de
   confirmar formalmente con el área de Mercados**.
-- **`cargar_nodos_isp`** (agregado ago-2026) versiona `dim_nodo_isp` (`dbo.NodoISP`) con el mismo criterio SCD Tipo 2,
-  incluidos los códigos INEC de parroquia/cantón/provincia del nodo (vía `JOIN` contra
-  `dbo.Parroquia`/`Ciudad`/`Provincia`). **`dbo.NodoISP_Auxiliar` se excluye deliberadamente** — confirmado con un EDA
-  dirigido que está congelada desde 2014 y no tiene ningún PEVA exclusivo que no esté ya en `NodoISP`.
+- **`cargar_nodos_isp`** versiona `dim_nodo_isp` (`dbo.NodoISP`) con el mismo criterio SCD Tipo 2, incluidos los códigos
+  INEC de parroquia/cantón/provincia del nodo (vía `JOIN` contra `dbo.Parroquia`/`Ciudad`/`Provincia`). **
+  `dbo.NodoISP_Auxiliar` se excluye deliberadamente** — confirmado con un EDA dirigido que está congelada desde 2014 y
+  no tiene ningún PEVA exclusivo que no esté ya en `NodoISP`.
 - **`obtener_anios_a_cargar`** lee la Variable de Airflow `sietel_anios_a_cargar`.
 - **`cargar_hechos_de_anio`** extrae `dbo.VALineasDedicadas` agregado, particionado mes a mes, certificado con hash MD5
   antes del `UPSERT`.
@@ -294,12 +324,6 @@ Seis tareas del DAG **`sietel_mart_pipeline`**:
 
 2. **`construir_capa2`** (`mart/construir_capa2.py`) — reconstruye por completo
    `capa2.lineas_dedicadas_consolidado`, con relleno **LOCF exclusivamente hacia el interior** de la serie de cada PEVA.
-   Usa un patrón de intercambio *blue-green* (`_next` → `current` → `_prev`, conservando una generación anterior por si
-   hay que comparar o revertir) — el `DROP` de la generación `_prev` anterior usa `CASCADE`, porque si `aplicar_capa3`
-   falló en la corrida previa, las vistas materializadas de `mart` pueden quedar apuntando (por OID, no por nombre) al
-   objeto que ahora se llama `_prev`; `aplicar_capa3` las reconstruye de todas formas en cada corrida, así que el
-   `CASCADE` nunca pierde nada real.
-
 3. **`limpiar_coordenadas_nodo_isp`** — ver [Geografía de nodos ISP](#geografía-de-nodos-isp).
 4. **`cargar_parroquias`** — ver [Geografía de nodos ISP](#geografía-de-nodos-isp).
 5. **`detectar_discrepancias_geografia_nodo`** — ver [Geografía de nodos ISP](#geografía-de-nodos-isp).
@@ -317,31 +341,6 @@ corrida) → dimensiones y puentes → hechos de líneas dedicadas → dimension
 
 **Principio de diseño explícito en todo el archivo**: el cálculo de líneas reportadas, participación de mercado e IHH
 usa **exclusivamente `lineas_reportadas`** — nunca `total_lineas`. Ver la sección siguiente.
-
-### Dashboard (Dash + Flask-Login)
-
-Cuatro páginas, servidas con `gunicorn`:
-
-- **Evolución del mercado** (`pages/evolucion.py`): líneas reportadas y prestadores por mes, tasa de entrega de
-  reportes, prestadores que nunca han reportado, composición y diferencia mensual por rango de velocidad.
-- **IHH y participación** (`pages/concentracion.py`): evolución histórica del IHH (con alerta de *prestador dominante
-  ausente*), cobertura del índice, líder de mercado, CR2/CR4, participación individual, aporte al IHH, evolución de un
-  prestador específico.
-- **Mapa de nodos** (`pages/mapa_nodos.py`): ubicación geográfica nacional de nodos de acceso ISP sin discrepancia de
-  geografía, coloreados por tipo (primario/secundario), con auto-zoom y polígono del territorio seleccionado.
-- **Discrepancias de geografía** (`pages/discrepancias_geografia.py`): nodos cuyo cantón reportado en SIETEL no coincide
-  con el cantón real de su coordenada — solo lectura.
-
-**Filtros sincronizados entre páginas** (`dcc.Store` fuera de `dash.page_container`, en `app.py`):
-
-- `shared-territory` / `shared-filters`: exclusivos de Evolución/Concentración — geografía de **líneas** reportadas.
-- `nodo-shared-territory`: exclusivo de Mapa de nodos/Discrepancias — geografía de **nodos** (CONALI). **Nunca se mezcla
-  con `shared-territory`** — un nodo físico puede servir a varias parroquias de líneas, no hay relación 1:1.
-
-**Autenticación** (`auth.py`): Flask-Login + bcrypt, guard en `@server.before_request`. Sin autorregistro — altas, bajas
-y reseteo de contraseña exclusivamente vía `dashboard/scripts/gestionar_usuarios.py`, corrido con credenciales
-administrativas propias (**nunca** con el rol de runtime `dashboard_auth` — ese rol solo debe leer/actualizar filas
-existentes, no crear usuarios nuevos).
 
 ## Principio metodológico: nunca imputar para medir concentración de mercado
 
@@ -361,21 +360,24 @@ Por eso:
   `lineas_reportadas` de quienes tienen `tiene_reportado = TRUE` ese mes. Nunca en `0%` ni con su último valor conocido.
 - **`fact_ihh_geografico`** expone columnas de **cobertura** junto al índice, y una alerta adicional de **prestador
   dominante ausente**: un prestador que en algún período de su historia alcanzó ≥30% de participación real en un
-  territorio, y no reportó ese mes — porque la cobertura por sí sola no distingue "faltaron 10 prestadores chicos"
-  de "faltó quien domina el mercado" (verificado con datos reales: la ausencia de CNT EP hacía caer el IHH nacional de ~
-  5.741 a ~1.840 mientras la cobertura de prestadores seguía en 98%). **Acotada estrictamente a nivel NACIONAL** — se
-  intentó extender a nivel provincial y se descubrió que prestadores chicos superan el 30% en provincias con pocos
-  competidores y quedan marcados "ausentes" para siempre tras salir del mercado; detectar dominancia provincial genuina
-  requeriría un diseño más cuidadoso, fuera de alcance por ahora.
+  territorio, y no reportó ese mes. **Acotada estrictamente a nivel NACIONAL** — se intentó extender a provincia y se
+  descubrió que prestadores chicos superan el 30% en provincias con pocos competidores y quedan marcados "ausentes"
+  para siempre tras salir del mercado.
 - **La obligación de reportar de un prestador empieza un año calendario después de la fecha del título habilitante**, no
   el día del otorgamiento. `get_reporting_summary` (dashboard) y `vw_prestadores_sin_reportar`
   (`fuera_de_gracia`) aplican esta regla.
 - **Límite reconocido explícitamente**: un prestador que **jamás** ha entregado un solo reporte no aparece en
   `capa2` ni en `fact_lineas_geografia_mes`. Se hace visible aparte vía `mart.vw_prestadores_sin_reportar`
-  (clasificado en `activo_sin_reportar` / `no_operativo` / `zona_gris`), solo a nivel Nacional.
+  (clasificado en `activo_sin_reportar` / `no_operativo` / `zona_gris`), solo a nivel Nacional — **este límite se
+  mantiene igual en Control**: los filtros de Provincia/Cantón/Parroquia no pueden aplicarse a esa tabla, porque la
+  fuente misma no tiene la columna.
 - **`mart.vw_prestadores_reporte_detenido`** — complemento del anterior: prestadores que sí reportaron al menos una vez
   y luego se detuvieron, usando un período de referencia con margen de 3 meses (no el último período crudo) para no
   marcar como "detenido" un rezago normal de carga.
+- **`services/queries.py:get_variacion_mensual_anomala`** (Control, dashboard) extiende el mismo principio a un caso
+  nuevo: comparar cuántas cuentas reporta un prestador mes a mes **solo** entre pares de meses donde reportó de verdad
+  en AMBOS extremos — un salto frente a un mes sin reporte real no es una variación genuina, es artefacto del relleno
+  interior (LOCF), y se excluye explícitamente.
 
 ## Geografía de nodos ISP
 
@@ -401,65 +403,133 @@ variables, coma o punto decimal, letra de hemisferio en cualquier posición o au
 `inferir_hemisferio_longitud_faltante` — si el texto de longitud no trae ninguna letra de hemisferio (N/S/E/O/W) y el
 valor convertido salió positivo, se infiere el signo negativo, porque Ecuador (continental e insular) está 100% al oeste
 del meridiano de Greenwich, sin excepción. **Nunca se aplica el mismo criterio a latitud** — Ecuador cruza la línea
-ecuatorial, así que ahí sí sería adivinar. Resultado verificado en producción: 81.6% de coordenadas válidas (54 nodos
-adicionales rescatados solo por la inferencia de longitud, marcados con
-`hemisferio_longitud_inferido = true` para auditoría).
+ecuatorial, así que ahí sí sería adivinar.
 
 Destino: `capa2.nodo_isp_geocodificado`.
 
 ### Parte B — Cruce espacial (`mart/cargar_parroquias.py` + `mart/detectar_discrepancias_geografia_nodo.py`)
 
 **Fuente cartográfica: CONALI** (Comité Nacional de Límites Internos), shapefile a nivel parroquial.
-`cargar_parroquias.py`
-lo carga **una sola vez** (idempotente, `--forzar` para recargar) vía `geopandas`, y precalcula tres cosas en la misma
-corrida:
+`cargar_parroquias.py` lo carga **una sola vez** (idempotente, `--forzar` para recargar) vía `geopandas`, y precalcula
+tres cosas en la misma corrida:
 
 1. `capa2.parroquias_geometria` — geometría íntegra por parroquia (1.052 filas), **sin simplificar** — es la que usa el
    cruce punto-en-polígono real, ahí la precisión completa importa.
-2. `capa2.territorio_geometria_nodo` — geometría de cantón y provincia, **disuelta con `gdf.dissolve()`** (no en SQL:
-   este proyecto no tiene PostGIS) y **simplificada con `shapely.simplify()`** (tolerancia 0.0005°–0.002° según nivel) —
-   exclusivamente para el polígono de fondo del mapa del dashboard. Confirmado en producción: el shapefile completo
-   tenía **21,8 millones de vértices**; sin simplificar, el navegador se colgaba al elegir Provincia. Tras simplificar:
-   313 mil vértices (98,6% de reducción), imperceptible a la escala de un mapa de referencia.
+2. `capa2.territorio_geometria_nodo` — geometría de cantón y provincia, **disuelta con `gdf.dissolve()`** y
+   **simplificada con `shapely.simplify()`** (tolerancia 0.0005°–0.002° según nivel) — exclusivamente para el polígono
+   de fondo del mapa del dashboard. Confirmado en producción: el shapefile completo tenía **21,8 millones de vértices**;
+   sin simplificar, el navegador se colgaba al elegir Provincia. Tras simplificar: 313 mil vértices (98,6% de
+   reducción).
 3. Reporta (no descarta) cualquier código de provincia/cantón/parroquia fuera del patrón INEC estándar — CONALI incluye
    zonas especiales sin código numérico convencional (`ISLA`, `ZONA EN ESTUDIO: JUVAL`, etc.).
 
-`detectar_discrepancias_geografia_nodo.py` cruza cada nodo válido contra el shapefile con `shapely.strtree.STRtree`
-
-+ `geometry.covers(punto)` (no `.within()` — `covers()` incluye la frontera del polígono, necesario para nodos
-  capturados justo sobre un límite parroquial). Persiste:
+`detectar_discrepancias_geografia_nodo.py` cruza cada nodo válido contra el shapefile con `shapely.strtree.STRtree` +
+`geometry.covers(punto)` (no `.within()` — `covers()` incluye la frontera del polígono). Persiste:
 
 - **`capa2.nodo_isp_geografia_resuelta`** — universo completo de nodos con match espacial (coincidan o no), geografía
   **siempre la derivada de CONALI** (autoritativa). Se reconstruye entera en cada corrida.
 - **`calidad.discrepancias_geografia_nodo`** — solo los que discrepan, con el mismo patrón de *workflow* de revisión
-  humana persistente que `calidad.conflictos_ruc_peva` (`estado_revision` nunca se sobreescribe).
+  humana persistente que `calidad.conflictos_ruc_peva`.
 
 **Decisión metodológica clave: la comparación es por CANTÓN, no por parroquia exacta.** Comparar por código de parroquia
-completo producía 3.976 "discrepancias" sobre 7.021 nodos válidos (56,6%) — cifra investigada, no aceptada a ojo: el 91%
-de esas resultó ser el mismo lugar con dos convenciones de código distintas (`dbo.Parroquia` usa una codificación INEC
-más vieja para la cabecera cantonal — típicamente `XX01` — que CONALI 2026 —`XX50`). El cantón se mantiene estable entre
-ambos vintages; la parroquia exacta, no. Con la comparación por cantón, el número bajó a 360 discrepancias reales
-(5,1%), con patrones plausibles (varios casos repetidos por el mismo prestador, sugiriendo un `par_codigo` mal
-configurado, no ruido aleatorio).
+completo producía 3.976 "discrepancias" sobre 7.021 nodos válidos (56,6%): el 91% de esas resultó ser el mismo lugar con
+dos convenciones de código distintas (`dbo.Parroquia` usa una codificación INEC más vieja para la cabecera cantonal —
+típicamente `XX01` — que CONALI 2026 — `XX50`). Con la comparación por cantón, el número bajó a 360 discrepancias reales
+(5,1%).
 
-**Límite aceptado y documentado**: esto puede dejar pasar una discrepancia real *dentro* del mismo cantón (ej. un nodo
-reportado en la cabecera cantonal que en realidad está en una parroquia rural distinta del mismo cantón — caso real
+**Límite aceptado y documentado**: esto puede dejar pasar una discrepancia real *dentro* del mismo cantón (caso real
 encontrado en Sígsig, Azuay). Se acepta este costo a cambio de eliminar el 91% de falso positivo por desfase de
 codificación.
 
 ### Vistas de `mart` para el dashboard
 
-- **`mart.dim_territorio_nodo`** / **`vw_dashboard_filtros_geograficos_nodo`** — cascada Provincia/Cantón/Parroquia,
-  construida desde `capa2.nodo_isp_geografia_resuelta` (26 provincias reales: las 24 oficiales + `90` "zona en
-  estudio" + `ISLA`).
+- **`mart.dim_territorio_nodo`** / **`vw_dashboard_filtros_geograficos_nodo`** — Provincia/Cantón/Parroquia de geografía
+  de nodos, construida desde `capa2.nodo_isp_geografia_resuelta` (26 provincias reales: las 24 oficiales +
+  `90` "zona en estudio" + `ISLA`). `dim_territorio_nodo` trae columnas planas
+  `codigo_provincia`/`codigo_canton`/`codigo_parroquia` — es lo que permite el filtro multi-select independiente del
+  dashboard, no un `territorio_id` compuesto que solo admitiera un valor por nivel (ver
+  [El dashboard, módulo por módulo](#el-dashboard-módulo-por-módulo)).
 - **`mart.vw_geometria_territorio_nodo`** — geometría precalculada (parroquia/cantón/provincia) para el polígono del
   mapa. Nunca se une nada en el dashboard en tiempo de consulta.
-- **`mart.vw_nodos_isp_mapa`** — vista principal del mapa: primer puente de este proyecto entre `calidad.*` y
-  `mart.*` (calidad.discrepancias_geografia_nodo vía `LEFT JOIN`, corre con los privilegios del dueño de la vista,
-  `dashboard_lector` nunca necesita `GRANT` directo sobre `calidad`). `isp_nombre` se resuelve vía
-  `analitico.v_ultimo_periodo_reportado_detalle` (cubre PEVA sin ningún reporte de líneas — un hecho de identidad que
-  SIETEL sí tiene registrado); `opera_actual` sigue viniendo de `mart.dim_prestador` (línea-reporte) a propósito — es un
-  dato genuinamente derivado de reportes, `NULL` legítimo para quien nunca ha reportado.
+- **`mart.vw_nodos_isp_mapa`** — vista principal del mapa: `isp_nombre` se resuelve vía
+  `analitico.v_ultimo_periodo_reportado_detalle` (cubre PEVA sin ningún reporte de líneas); `opera_actual` sigue
+  viniendo de `mart.dim_prestador` (línea-reporte) a propósito — `NULL` legítimo para quien nunca ha reportado.
+
+## El dashboard, módulo por módulo
+
+Seis páginas Dash (`use_pages=True`), servidas con `gunicorn`, autenticadas con Flask-Login. `pages/inicio.py` (path
+`/`) es el panel de selección de módulos tras el login; las otras cinco viven bajo `/sai/`.
+
+- **Evolución** (`pages/evolucion.py`, `/sai/evolucion`): cuentas reportadas y prestadores por mes (**líneas**, no
+  barras — series de hasta 180 puntos mensuales), tasa de entrega de reportes, prestadores que nunca han reportado,
+  composición (área apilada) y diferencia mensual (barra) por rango de velocidad, ambas respetando Estado de operación y
+  Prestador.
+- **IHH y participación** (`pages/concentracion.py`, `/sai/concentracion`): evolución histórica del IHH (con alerta de
+  *prestador dominante ausente*), cobertura del índice, líder de mercado, CR2/CR4, participación individual, aporte al
+  IHH (barras horizontales top 15), y dos gráficos de un solo eje cada uno para el prestador seleccionado
+  (participación % / cuentas) — **no** un combo de doble eje: escalas arbitrarias superpuestas invitan a leer una
+  correlación visual que puede no existir.
+- **Mapa de nodos** (`pages/mapa_nodos.py`, `/sai/mapa-nodos`): ubicación geográfica nacional de nodos de acceso ISP sin
+  discrepancia de geografía, coloreados por tipo (primario/secundario), con auto-zoom y polígono del territorio
+  seleccionado, más una barra horizontal de nodos por provincia (top 15) — un mapa comunica densidad espacial, no
+  compara magnitudes con precisión.
+- **Discrepancias de geografía** (`pages/discrepancias_geografia.py`, `/sai/discrepancias-geografia`): nodos cuyo cantón
+  reportado en SIETEL no coincide con el cantón real de su coordenada — solo lectura —, más barras de discrepancias por
+  provincia real y por estado de revisión.
+- **Control** (`pages/control.py`, `/sai/control`): tres tablas de inconsistencias para seguimiento regulatorio —
+  prestadores que nunca han reportado (barra por clasificación), prestadores con reporte detenido (histograma de meses
+  sin reportar + dispersión antigüedad-vs-peso-histórico en escala log), y variación mensual anómala en cuentas
+  reportadas (ranking Top 15 + dispersión temporal con transformación `signo × log₁₀(1+|%|)`, para que un caso de
+  +10.000% no aplaste visualmente al resto). Filtros de Provincia/Cantón/Parroquia + Desde/Hasta + Estado/Prestador,
+  pero **no aplican igual a las tres secciones** — ver más abajo.
+
+**Descarga a Excel** (`components/ui.py:excel_download_button`): botón junto a cada tabla `dash_ag_grid.AgGrid`,
+presente en las tres tablas de Control, Detalle de participación (Concentración), Detalle de nodos (Mapa de nodos) y
+Detalle de discrepancias. Exporta exactamente el `rowData` en pantalla (ya filtrado/ordenado), no una consulta nueva —
+vía `dcc.send_data_frame(df.to_excel, ...)`, requiere `openpyxl`.
+
+**Selectores de período** (`components/ui.py:month_year_picker`): calendario de meses (`dmc.MonthPickerInput`),
+navegación por año, sin nivel de día — reemplazó una lista plana de ~180 opciones (`dcc.Dropdown`) que obligaba a hacer
+scroll para llegar al período más reciente.
+
+**Tres familias de filtro geográfico, tres universos de datos distintos, nunca mezclados**:
+
+| Componente                   | Usado por                    | Universo                                                                                 | Nivel geográfico                         | Selección                                               |
+|------------------------------|------------------------------|------------------------------------------------------------------------------------------|------------------------------------------|---------------------------------------------------------|
+| `territory_filters.py`       | Evolución, Concentración     | Geografía de **líneas** (`mart.dim_territorio`)                                          | Sí (Nacional/Provincia/Cantón/Parroquia) | Única, un valor por nivel                               |
+| `node_territory_filters.py`  | Mapa de nodos, Discrepancias | Geografía de **nodos** (`mart.dim_territorio_nodo`, CONALI)                              | No                                       | Múltiple e independiente por Provincia/Cantón/Parroquia |
+| `lines_territory_filters.py` | Control                      | Geografía de **líneas** (`mart.dim_territorio`, misma fuente que `territory_filters.py`) | No                                       | Múltiple e independiente                                |
+
+`node_territory_filters.py` y `lines_territory_filters.py` son deliberadamente dos módulos separados y casi idénticos
+(no una función genérica parametrizada) — unificarlos exigiría tocar páginas que ya funcionan en producción por un
+ahorro de líneas que no vale ese riesgo. Filtran por listas de códigos (`EXISTS` correlacionado, no `JOIN` plano —
+`bridge_geografia_territorio` tiene una fila por nivel geográfico por `geografia_id`, un `JOIN` directo multiplicaría
+filas).
+
+**Filtros sincronizados entre páginas** (`dcc.Store` fuera de `dash.page_container`, en `app.py`):
+
+- `shared-territory` / `shared-filters`: exclusivos de Evolución/Concentración — geografía de **líneas** reportadas.
+- `nodo-shared-territory`: exclusivo de Mapa de nodos/Discrepancias — geografía de **nodos** (CONALI). Forma:
+  `{"provincias": [...], "cantones": [...], "parroquias": [...]}` (listas, selección múltiple).
+- Control **no** comparte ningún store global de territorio con las demás páginas — su selector de Provincia/Cantón/
+  Parroquia es local a la página (`ctrl-territory-selection`); Estado de operación y Prestador tampoco están
+  sincronizados con `shared-filters` — Prestador en Control lista el universo **nacional** completo, sin acotar por el
+  territorio elegido (simplificación deliberada, no un descuido).
+
+**Por qué los filtros de Control no aplican igual a sus tres secciones** — la vista/consulta fuente de cada una no es
+simétrica, esto no es una limitación del dashboard:
+
+- **Nunca han reportado**: SOLO Estado/Prestador. `mart.vw_prestadores_sin_reportar` no tiene columna de geografía
+  (SIETEL no la conoce para quien nunca reportó) ni de período (es "alguna vez, sí/no", no una serie de tiempo).
+- **Reporte detenido**: territorio = "reportó alguna vez ahí" (`EXISTS` contra `fact_lineas_geografia_mes`, no la
+  geografía de su último reporte específico — la vista fuente no la tiene por prestador); Desde/Hasta filtra por fecha
+  del **último** reporte, no reemplaza "Meses mínimos sin reportar" (control aparte, mismo sentido pero distinto eje).
+- **Variación mensual**: los cinco filtros aplican tal cual, **recalculando** la suma de cuentas dentro del territorio
+  elegido antes de comparar mes a mes — mismo principio que `get_evolution_filtrado`.
+
+**Autenticación** (`auth.py`): Flask-Login + bcrypt, guard en `@server.before_request`. Sin autorregistro — altas, bajas
+y reseteo de contraseña exclusivamente vía `dashboard/scripts/gestionar_usuarios.py`, corrido con credenciales
+administrativas propias (**nunca** con el rol de runtime `dashboard_auth`).
 
 ## Requisitos previos
 
@@ -510,8 +580,7 @@ sql/05_roles_eda.sql    # requiere que mart_user, eda_lector ya existan
 > **Importante, verificado en producción**: estos archivos están diseñados para correr **conectado como
 > `mart_user`** (así `CREATE TABLE`/`CREATE SCHEMA` deja a `mart_user` como dueño automáticamente). Si se aplican
 > con `sudo -u postgres psql -f ...` (superusuario), los objetos quedan con dueño `postgres` en vez de `mart_user`,
-> lo que rompe `INSERT`/`UPDATE` desde `mart/*.py` — el patrón de fix es `ALTER TABLE ... OWNER TO mart_user;`
-> (idempotente, ver `sql/04_ddl_calidad.sql`).
+> lo que rompe `INSERT`/`UPDATE` desde `mart/*.py` — el patrón de fix es `ALTER TABLE ... OWNER TO mart_user;`.
 
 ## Configuración
 
@@ -548,8 +617,7 @@ Variables propias de Airflow: `AIRFLOW__CORE__FERNET_KEY`, `AIRFLOW__API_AUTH__J
 `MART_USER_USER`/`MART_USER_PASSWORD` de Capa 2/3.
 
 `AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG=1` limita la concurrencia deliberadamente, para no saturar SQL Server mientras
-el índice compuesto no exista en producción — como efecto colateral, esto también serializa la ejecución completa de
-cada DAG, así que el orden de las tareas en el código es el orden real de ejecución.
+el índice compuesto no exista en producción.
 
 ### Dashboard (`dashboard/.env`, ver `dashboard/.env.example`)
 
@@ -567,8 +635,7 @@ cada DAG, así que el orden de las tareas en el código es el orden real de ejec
 
 1. **Crear los roles de PostgreSQL** por línea de comandos (`mart_user`, `dashboard_lector`, `dashboard_auth`,
    `calidad_lector`, `calidad_revisor`, `eda_lector`).
-2. **Aplicar permisos base**, conectado como `mart_user` (ver aviso
-   en [Roles y permisos](#roles-y-permisos-de-postgresql)), en este orden: `sql/00_roles_mart.sql` →
+2. **Aplicar permisos base**, conectado como `mart_user`, en este orden: `sql/00_roles_mart.sql` →
    `sql/03_ddl_auth.sql` → `sql/04_ddl_calidad.sql` → `sql/05_roles_eda.sql`.
 3. **Otorgar a `mart_user` lectura sobre `analitico`** (ejecutar como `sietel_user` o superusuario):
    ```sql
@@ -579,13 +646,10 @@ cada DAG, así que el orden de las tareas en el código es el orden real de ejec
    ```
 4. **Levantar Airflow**: `docker compose --env-file ../.env -f docker/docker-compose.yml up -d` (requiere la base de
    metadata ya creada en PostgreSQL bare-metal).
-5. **Transferir el shapefile de CONALI** a `mart/data/shapefiles/parroquial/` en la VM de Airflow — ver el comando
-   `scp` exacto en el `README.md` de esa carpeta.
-6. **Correr `sietel_usuarios_cuentas_pipeline`** (Capa 1) al menos una vez, para poblar `staging`/`analitico`
-   (incluye ahora `dim_nodo_isp`).
+5. **Transferir el shapefile de CONALI** a `mart/data/shapefiles/parroquial/` en la VM de Airflow.
+6. **Correr `sietel_usuarios_cuentas_pipeline`** (Capa 1) al menos una vez, para poblar `staging`/`analitico`.
 7. **Correr `sietel_mart_pipeline`** (Capa 2/3) — reconstruye `calidad`, `capa2` y `mart` desde cero, incluida la carga
-   del shapefile (idempotente, solo la primera vez tarda; usa `--forzar` para recargar tras una actualización de
-   CONALI).
+   del shapefile.
 8. **Crear el primer usuario del dashboard**:
    ```bash
    cd dashboard/scripts
@@ -611,8 +675,7 @@ cada DAG, así que el orden de las tareas en el código es el orden real de ejec
 Luego, **DAGs** → `sietel_usuarios_cuentas_pipeline` → *Trigger DAG*.
 
 **Capa 2/3** — **DAGs** → `sietel_mart_pipeline` → *Trigger DAG*, después de cada actualización relevante de Capa 1, o
-cuando se necesite refrescar el dashboard (líneas dedicadas **y** geografía de nodos se reconstruyen juntas, en la misma
-corrida).
+cuando se necesite refrescar el dashboard.
 
 ### Vía CLI (pruebas puntuales / smoke tests)
 
@@ -648,8 +711,8 @@ python gestionar_usuarios.py resetear-password --username jperez
 ```
 
 > `gestionar_usuarios.py` pide la contraseña nueva por `getpass` (dos veces) — nunca por argumento ni variable de
-> entorno, para que no quede en el historial de shell. El "usuario administrativo" que pide al conectar debe ser el
-> dueño del esquema `auth` o un superusuario puntual — **nunca** `dashboard_auth` (el rol de runtime de la app).
+> entorno. El "usuario administrativo" que pide al conectar debe ser el dueño del esquema `auth` o un superusuario
+> puntual — **nunca** `dashboard_auth` (el rol de runtime de la app).
 
 ## Modelo de datos
 
@@ -691,10 +754,10 @@ python gestionar_usuarios.py resetear-password --username jperez
 | `nodo_isp_geografia_resuelta`  | Universo completo de nodos con match espacial (coincidan o no con lo reportado), geografía CONALI                                                   |
 
 **Esquema `mart`** (Capa 3): dimensiones (`dim_periodo`, `dim_prestador`, `dim_geografia`, `dim_territorio`,
-`dim_territorio_nodo`), tablas puente, tablas de hechos de líneas dedicadas (`fact_lineas_geografia_mes`,
-`fact_lineas_velocidad_mes`, `fact_resumen_mercado_mes`, `fact_velocidad_mercado_mes`, `fact_participacion_mercado`,
-`fact_ihh_geografico`), vistas de cumplimiento (`vw_prestadores_sin_reportar`, `vw_prestadores_reporte_detenido`),
-vistas de geografía de nodos (`vw_nodos_isp_mapa`, `vw_geometria_territorio_nodo`,
+`dim_territorio_nodo`), tablas puente (`bridge_geografia_territorio`), tablas de hechos de líneas dedicadas
+(`fact_lineas_geografia_mes`, `fact_lineas_velocidad_mes`, `fact_resumen_mercado_mes`, `fact_velocidad_mercado_mes`,
+`fact_participacion_mercado`, `fact_ihh_geografico`), vistas de cumplimiento (`vw_prestadores_sin_reportar`,
+`vw_prestadores_reporte_detenido`), vistas de geografía de nodos (`vw_nodos_isp_mapa`, `vw_geometria_territorio_nodo`,
 `vw_dashboard_filtros_geograficos_nodo`), y las vistas `vw_dashboard_*` que consume directamente el dashboard.
 
 **Columnas por rango de velocidad** (`lineas_dl_*` para bajada, `lineas_ul_*` para subida) cuentan **líneas/cuentas**,
@@ -715,9 +778,8 @@ no usuarios finales:
 Desde el 22-jul-2026, `va_lineas_dedicadas_resumen` incluye `codigo_provincia`, `codigo_ciudad` y
 `codigo_parroquia` (VARCHAR, no INTEGER, para preservar ceros a la izquierda), tomados de
 `Provincia.codigo`/`Ciudad.codigoCiudad`/`Parroquia.codigoParroquia` en SQL Server. Desde el 07-ago-2026, el mismo
-criterio se aplicó a `dim_nodo_isp` (`par_nombre`, `codigo_parroquia`, `ciu_nombre`, `codigo_canton`, `pro_nombre`,
-`codigo_provincia`). En ambos casos, **no forman parte de `COLUMNAS_HASH`/`COLUMNAS_VERSIONABLES`** — son metadata
-derivada de `par_codigo`, no parte de la llave natural ni de las métricas medidas.
+criterio se aplicó a `dim_nodo_isp`. En ambos casos, **no forman parte de `COLUMNAS_HASH`/`COLUMNAS_VERSIONABLES`** —
+son metadata derivada de `par_codigo`, no parte de la llave natural ni de las métricas medidas.
 
 Los años cargados **antes** de este cambio necesitan un backfill puntual —
 `scripts/sincronizar_codigos_administrativos.py` (idempotente, no cableado al DAG). Este backfill **no** modifica
@@ -726,27 +788,43 @@ Los años cargados **antes** de este cambio necesitan un backfill puntual —
 ## Historial de correcciones
 
 `staging.historial_correcciones`, poblada por el trigger `trg_registrar_correccion_resumen`, registra un snapshot
-completo (JSONB) de la fila anterior cada vez que `hash_contenido` cambia entre una carga y otra. No distingue una
-corrección real de un reprocesamiento propio — esa distinción vive en `staging.control_cargas` y en el historial de Git.
+completo (JSONB) de la fila anterior cada vez que `hash_contenido` cambia entre una carga y otra.
 
-**Correcciones puntuales aplicadas en producción** (`sql/06` a `sql/09`, cada una con su verificación documentada dentro
-del propio archivo):
+**Correcciones puntuales aplicadas en producción sobre `mart` sin esperar al próximo refresco completo**
+(`sql/06` a `sql/08`, cada una con su verificación documentada dentro del propio archivo):
 
 | Archivo                                        | Qué corrige                                                                                                                                                                |
 |------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `06_patch_vw_prestadores_sin_reportar.sql`     | Agrega `fuera_de_gracia` y `clasificacion_incumplimiento` sin esperar al próximo refresco completo                                                                         |
 | `07_patch_vw_prestadores_reporte_detenido.sql` | Corrige 13 falsos positivos: usaba el último período crudo como referencia en vez de uno con margen de 3 meses                                                             |
 | `08_patch_fact_ihh_geografico.sql`             | Alerta de *prestador dominante ausente* — tres iteraciones hasta acotarla a NACIONAL (v2 y v3 producían falsos positivos por período de existencia y por nivel geográfico) |
-| `09_reparacion_scd2_nodo_isp.sql`              | Repara versiones SCD2 espurias en `dim_nodo_isp` causadas por un bug ya corregido de plegado de mayúsculas — corre interactivo, con `COMMIT`/`ROLLBACK` manual             |
 
 **Bug crítico corregido en `_cambio_relevante()`** (`cargar_dimensiones.py` y `cargar_nodo_isp.py`, 07-ago-2026):
 comparaba claves de diccionario con el *case* exacto de SQL Server (`tipoNodo`, `Resolucion`, `nombreComercial`)
-contra claves de Postgres siempre plegadas a minúscula (`tiponodo`, `resolucion`, `nombrecomercial`) — el *mismatch* de
-mayúsculas hacía que **toda** fila se detectara como cambio real, siempre, disparando una nueva versión SCD2 innecesaria
-en cada corrida. Confirmado en producción: `dim_permiso_va_agregado` había acumulado 7 versiones espurias por PEVA desde
-su primera corrida (11.655 → 1.665 filas tras la remediación,
+contra claves de Postgres siempre plegadas a minúscula — el *mismatch* hacía que **toda** fila se detectara como cambio
+real, siempre, disparando una nueva versión SCD2 innecesaria en cada corrida. Confirmado en producción:
+`dim_permiso_va_agregado` había acumulado 7 versiones espurias por PEVA (11.655 → 1.665 filas tras la remediación con
 `scripts/remediar_versiones_espurias_scd2.py`, que fusiona solo versiones *consecutivas* idénticas, preservando
-cualquier cambio real intercalado).
+cualquier cambio real intercalado); `dim_nodo_isp` acumuló 1 versión espuria por nodo (8.606 → 8.606 nodos, cada uno con
+exactamente 2 versiones antes de remediar).
+
+**Correcciones aplicadas en el dashboard (agosto de 2026), documentadas aquí por el mismo criterio que las de arriba —
+no son detalles cosméticos, cambiaron resultados numéricos**:
+
+- **Correlación SQL incorrecta en el filtro de territorio de "Reporte detenido" (Control, 12-ago-2026)**: la cláusula
+  `EXISTS` escribía `f.prestador_id = prestador_id` (el lado derecho sin calificar) esperando correlacionar contra la
+  tabla exterior — pero como `fact_lineas_geografia_mes` (alias `f`, la tabla MÁS interna) también tiene una columna
+  `prestador_id`, Postgres resolvió el nombre suelto contra `f` misma. La condición se volvió una tautología
+  (`f.prestador_id = f.prestador_id`, siempre verdadera), así que el filtro preguntaba "¿existe ALGUNA fila en ese
+  territorio en toda la tabla nacional?" en vez de "¿ESTE prestador reportó ahí?" — confirmado en producción vía logging
+  temporal: el resultado se quedaba en 548 filas sin importar el territorio elegido. Corregido con un alias explícito
+  (`pr`) en la tabla exterior.
+- **`dcc.Input(type="number")` perdía el valor al usar las flechas +/-** (Control, 12-ago-2026) — comportamiento
+  conocido del spinner nativo del navegador combinado con un callback de Python sin `debounce`. Reemplazado por
+  `dmc.NumberInput` (`components/ui.py:numeric_stepper`).
+- **Selector "Nivel geográfico" en Mapa de nodos/Discrepancias** rediseñado a Provincia/Cantón/Parroquia siempre
+  visibles, multi-select independiente (11-ago-2026) — mismo patrón replicado luego para Control
+  (`lines_territory_filters.py`, 12-ago-2026), sobre la geografía de líneas en vez de la de nodos.
 
 ## Rendimiento e índice de SQL Server
 
@@ -774,9 +852,11 @@ como reporte consolidado (✅/❌) y se registra en `staging.control_cargas`.
 incluyendo invariantes de la metodología de datos reales: ningún prestador sin reporte real ese mes debe tener
 `participacion_porcentaje`/`aporte_ihh` distinto de `NULL`, cobertura siempre entre 0 y 100, `CR2 ≤ CR4 ≤ 100`.
 
-La geografía de nodos se verifica manualmente contra Postgres real en cada cambio de esquema (ver comentarios en
-`mart/cargar_parroquias.py` y `mart/detectar_discrepancias_geografia_nodo.py` para las consultas de verificación
-esperadas tras cada corrida).
+La geografía de nodos se verifica manualmente contra Postgres real en cada cambio de esquema. Las consultas y callbacks
+del dashboard se prueban con datos simulados que cubren casos límite reales (rangos extremos observados en producción,
+nombres nulos, valores mixtos de mayúsculas) antes de cada entrega — no solo el camino feliz — desde que un patrón de
+correlación SQL incorrecto pasó una prueba superficial (ver
+[Historial de correcciones](#historial-de-correcciones)).
 
 ## Calidad de datos conocida
 
@@ -789,7 +869,8 @@ esperadas tras cada corrida).
 - **Cadencia de reporte no uniforme entre prestadores**: un prestador grande puede reportar trimestralmente durante
   períodos extensos — los "picos" en gráficas de evolución son la cadencia real, no un error del pipeline.
 - **`v_ultimo_periodo_reportado_detalle` no tiene geografía para prestadores sin reportes**: el KPI *"Nunca han
-  reportado"* solo está disponible a nivel Nacional por esta razón estructural.
+  reportado"* (Evolución) y la sección "Nunca han reportado" (Control) solo están disponibles a nivel Nacional por esta
+  razón estructural — ver [El dashboard, módulo por módulo](#el-dashboard-módulo-por-módulo).
 - **Lista de columnas versionables SCD no cerrada formalmente**: `COLUMNAS_VERSIONABLES_ISP`/`_PERMISO`/`_NODO_ISP`
   son una propuesta inicial pendiente de confirmar con Mercados.
 - **RUC con múltiples PEVA de nombre distinto (Grupo C)**: sin resolución automática — cola de revisión manual.
@@ -797,19 +878,22 @@ esperadas tras cada corrida).
 **Geografía de nodos ISP:**
 
 - **`dbo.Parroquia` usa codificación INEC más vieja que CONALI 2026**: causa raíz de que la comparación de discrepancias
-  sea por cantón, no por parroquia exacta — ver [Geografía de nodos ISP](#geografía-de-nodos-isp).
-- **~18,4% de coordenadas de nodo no se pueden convertir** (texto sin componentes numéricos reconocibles, o valores con
-  magnitud imposible para Ecuador) — quedan marcadas `es_coordenada_valida = false` con el motivo, nunca descartadas
-  silenciosamente ni "corregidas" con una suposición.
-- **`515` de `7.000` nodos con match espacial pertenecen a PEVA que nunca han reportado líneas** — `opera_actual`
-  queda `NULL` para ellos en el dashboard, correctamente (dato genuinamente derivado de reportes); `isp_nombre` sí se
-  resuelve (hecho de identidad, no depende de reportar).
+  sea por cantón, no por parroquia exacta.
+- **~18,4% de coordenadas de nodo no se pueden convertir** — quedan marcadas `es_coordenada_valida = false` con el
+  motivo, nunca descartadas silenciosamente ni "corregidas" con una suposición.
 - **Ambigüedad geométrica en fronteras compartidas**: un nodo capturado exactamente sobre un vértice compartido entre
   dos parroquias adyacentes puede resolver a cualquiera de las dos, según el orden interno de `STRtree` — trade-off
   aceptado (la alternativa, `.within()`, deja esos nodos sin ningún match).
 - **`mgonzalez`/Power BI**: posible misma fragilidad de permisos que ya se corrigió para `mart_user`
-  (`ALTER DEFAULT PRIVILEGES` no está capturado en ningún `.sql` versionado para este rol) — **sin confirmar todavía**,
-  pendiente de verificar si se aplicó alguna vez fuera de Git.
+  (`ALTER DEFAULT PRIVILEGES` no está capturado en ningún `.sql` versionado para este rol) — **sin confirmar todavía**.
+
+**Control:**
+
+- **"Prestador" no está acotado por el territorio elegido** — lista el universo nacional completo, a diferencia de
+  Evolución/Concentración, donde sí se acota. Simplificación deliberada, no un descuido — ver
+  [El dashboard, módulo por módulo](#el-dashboard-módulo-por-módulo).
+- **Umbral de variación mensual (30% por defecto) no está validado estadísticamente** — es un punto de partida razonable
+  para señalar algo revisable, ajustable en la página, no un límite estadístico riguroso.
 
 ## Seguridad del dashboard
 
@@ -822,6 +906,9 @@ esperadas tras cada corrida).
 - Mismo mensaje de error para usuario inexistente, contraseña incorrecta o usuario inactivo.
 - `APP_DEBUG=false` obligatorio en producción.
 - Servido con `gunicorn`, nunca con el servidor de desarrollo de Flask/Dash.
+- **Pendiente**: `dashboard/templates/login.html` no tiene token CSRF — Flask-Login no lo provee por defecto. Riesgo
+  bajo (formulario de login, no una acción de estado con sesión ya activa), pero es una desviación de buena práctica no
+  resuelta todavía — ver [Hoja de ruta](#hoja-de-ruta--pendientes).
 
 ## Pruebas de integración
 
@@ -836,7 +923,9 @@ Verifica conectividad a ambas bases, existencia de tablas/vistas esperadas del e
 certificación cruzada en `validar_carga.validar_anios()`.
 
 > **Cobertura conocida como incompleta:** no incluye `staging.dim_nodo_isp`, ni ningún objeto de los esquemas
-> `mart`/`capa2`/`calidad` (Capa 2/3, incluida toda la geografía de nodos) todavía.
+> `mart`/`capa2`/`calidad` (Capa 2/3, incluida toda la geografía de nodos) todavía. Tampoco hay una suite automatizada
+> para el dashboard — las verificaciones de `pages/`/`services/queries.py` se hacen con datos simulados en aislamiento
+> antes de cada entrega, no como parte de este archivo.
 
 ## Documentación relacionada
 
@@ -852,7 +941,8 @@ certificación cruzada en `validar_carga.validar_anios()`.
 Patrones de diseño (certificación de contenido vía hash, carga por lotes, unión y simplificación de geometría vía
 `geopandas`/`shapely`, punto-en-polígono vía `STRtree`) tomados como referencia de
 [`Zerausir/samm_pipeline`](https://github.com/Zerausir/samm_pipeline), un pipeline hermano con el que se comparte
-infraestructura de VMs y versión de Airflow.
+infraestructura de VMs y versión de Airflow. El estilo visual del panel de opciones del dashboard (`pages/inicio.py`)
+se inspiró en `Zerausir/tablero`.
 
 ## Hoja de ruta / pendientes
 
@@ -862,8 +952,6 @@ infraestructura de VMs y versión de Airflow.
 - [ ] Ampliar `tests/verificar_pipeline.py` para cubrir `historial_correcciones`,
   `v_ultimo_periodo_reportado_detalle`, `dim_nodo_isp`, y todos los objetos de `mart`/`capa2`/`calidad`.
 - [ ] Documentar formalmente las variables `AIRFLOW_METADATA_PG_*` en un archivo de referencia de configuración.
-- [ ] Selección múltiple en Provincia/Cantón/Parroquia del dashboard (hoy es selección única).
-- [ ] Extender los filtros de Estado de operación / Prestador a las gráficas de velocidad de Evolución.
 - [ ] Incorporar datos de internet móvil (fuente aún no identificada en SIETEL).
 - [ ] Pantalla de consistencia de datos sobre `calidad.conflictos_ruc_peva` (Grupos B/C pendientes de revisión manual) y
   `calidad.discrepancias_geografia_nodo`, con el rol `calidad_revisor` — hoy la revisión de ambas colas ocurre fuera de
@@ -872,6 +960,12 @@ infraestructura de VMs y versión de Airflow.
   (`ALTER DEFAULT PRIVILEGES` no capturado en Git para ese rol).
 - [ ] Investigar el caso Sígsig (discrepancia real dentro del mismo cantón, no capturada por el criterio actual de
   comparación) para evaluar si vale la pena un segundo nivel de detección intra-cantón.
+- [ ] Token CSRF en `dashboard/templates/login.html` — ver [Seguridad del dashboard](#seguridad-del-dashboard).
+- [ ] Evaluar si "Prestador" en Control debería acotarse al territorio elegido (hoy lista el universo nacional).
+- [ ] Explorar una fuente de geografía para "Nunca han reportado" (Control) — hoy es un límite estructural sin datos
+  disponibles en SIETEL para resolverlo; no hay una vía identificada todavía.
+- [ ] Suite de pruebas automatizada para el dashboard (hoy las verificaciones son manuales, con datos simulados, antes
+  de cada entrega).
 
 ## Dónde obtener ayuda
 
