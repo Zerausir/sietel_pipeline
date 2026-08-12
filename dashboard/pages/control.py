@@ -372,7 +372,6 @@ def update_nunca_reportaron(opera_estados, isp_nombres):
 )
 def update_reporte_detenido(seleccion, start_period, end_period, opera_estados, isp_nombres, meses_minimo):
     seleccion = seleccion or {}
-    print(f"[DEBUG reporte_detenido callback] seleccion recibida: {seleccion!r}", flush=True)
     meses_minimo = int(meses_minimo) if meses_minimo else 1
     start_period = int(start_period) if start_period is not None else None
     end_period = int(end_period) if end_period is not None else None

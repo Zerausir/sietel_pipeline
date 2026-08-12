@@ -1211,9 +1211,20 @@ def get_prestadores_reporte_detenido_detalle(
         "f.geografia_id", provincias, cantones, parroquias,
     )
     if territorio_sql:
+        # CORRECCIÓN (12-ago-2026): antes decía "f.prestador_id = prestador_id"
+        # -- ese "prestador_id" suelto lo resolvía Postgres contra f (la
+        # tabla MÁS INTERNA que también tiene una columna prestador_id),
+        # no contra pr (la tabla exterior que se quiere correlacionar).
+        # La condición terminaba siendo "f.prestador_id = f.prestador_id"
+        # -- una tautología, siempre verdadera -- así que el EXISTS
+        # preguntaba "¿existe ALGUNA fila en ese territorio en toda la
+        # tabla nacional?" en vez de "¿ESTE prestador reportó ahí?".
+        # Confirmado en producción: filas_resultado se quedaba en 548 sin
+        # importar el territorio elegido. Ahora "pr" alias explícito la
+        # tabla exterior, sin ambigüedad posible.
         clauses.append(
             f"EXISTS (SELECT 1 FROM mart.fact_lineas_geografia_mes f "
-            f"WHERE f.prestador_id = prestador_id AND {territorio_sql})"
+            f"WHERE f.prestador_id = pr.prestador_id AND {territorio_sql})"
         )
         params.update(territorio_params)
     if start_period is not None and end_period is not None:
@@ -1234,28 +1245,17 @@ def get_prestadores_reporte_detenido_detalle(
         clauses.append("isp_nombre = ANY(:isp_nombres)")
         params["isp_nombres"] = list(isp_nombres)
 
-    sql = f"""
+    return _read(
+        f"""
         SELECT prestador_id, isp_nombre, ruc_limpio, opera_actual, es_cancelado_actual,
                primer_periodo_reportado, ultimo_periodo_reportado,
                lineas_ultimo_reporte, total_lineas_historico, meses_desde_ultimo_reporte
-        FROM mart.vw_prestadores_reporte_detenido
+        FROM mart.vw_prestadores_reporte_detenido pr
         WHERE {' AND '.join(clauses)}
         ORDER BY meses_desde_ultimo_reporte DESC, total_lineas_historico DESC
-        """
-    # DIAGNÓSTICO TEMPORAL (12-ago-2026) -- Iván reporta que este filtro de
-    # territorio no cambia el resultado en producción y no pudimos
-    # confirmarlo por DevTools. Esto imprime a stdout (visible en
-    # `docker logs sietel_dashboard`) los argumentos recibidos y cuántas
-    # filas salieron, para diagnosticar sin depender del navegador. QUITAR
-    # una vez resuelto -- no debe quedar en producción indefinidamente.
-    resultado = _read(sql, params)
-    print(
-        f"[DEBUG reporte_detenido] provincias={provincias!r} cantones={cantones!r} "
-        f"parroquias={parroquias!r} territorio_sql_aplicado={bool(territorio_sql)} "
-        f"filas_resultado={len(resultado)}",
-        flush=True,
+        """,
+        params,
     )
-    return resultado
 
 
 @cache.memoize(timeout=300)
