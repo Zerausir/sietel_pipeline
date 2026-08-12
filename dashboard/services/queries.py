@@ -1234,17 +1234,28 @@ def get_prestadores_reporte_detenido_detalle(
         clauses.append("isp_nombre = ANY(:isp_nombres)")
         params["isp_nombres"] = list(isp_nombres)
 
-    return _read(
-        f"""
+    sql = f"""
         SELECT prestador_id, isp_nombre, ruc_limpio, opera_actual, es_cancelado_actual,
                primer_periodo_reportado, ultimo_periodo_reportado,
                lineas_ultimo_reporte, total_lineas_historico, meses_desde_ultimo_reporte
         FROM mart.vw_prestadores_reporte_detenido
         WHERE {' AND '.join(clauses)}
         ORDER BY meses_desde_ultimo_reporte DESC, total_lineas_historico DESC
-        """,
-        params,
+        """
+    # DIAGNÓSTICO TEMPORAL (12-ago-2026) -- Iván reporta que este filtro de
+    # territorio no cambia el resultado en producción y no pudimos
+    # confirmarlo por DevTools. Esto imprime a stdout (visible en
+    # `docker logs sietel_dashboard`) los argumentos recibidos y cuántas
+    # filas salieron, para diagnosticar sin depender del navegador. QUITAR
+    # una vez resuelto -- no debe quedar en producción indefinidamente.
+    resultado = _read(sql, params)
+    print(
+        f"[DEBUG reporte_detenido] provincias={provincias!r} cantones={cantones!r} "
+        f"parroquias={parroquias!r} territorio_sql_aplicado={bool(territorio_sql)} "
+        f"filas_resultado={len(resultado)}",
+        flush=True,
     )
+    return resultado
 
 
 @cache.memoize(timeout=300)
