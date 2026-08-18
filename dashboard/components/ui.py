@@ -19,6 +19,27 @@ PALETTE = {
     "grid": "#e6edf4",
 }
 
+# Paleta Okabe-Ito (Okabe & Ito, 2008) -- estándar de facto para paletas
+# categóricas seguras ante daltonismo (protanopia/deuteranopia/tritanopia),
+# citada consistentemente en guías de accesibilidad de datos 2025-2026
+# (IBM Carbon, ColorBrewer, UK Government Analysis Function). SOLO para
+# gráficos con 3+ categorías simultáneas donde el color ES el dato (ej.
+# "Composición por velocidad", 7 rangos) -- los gráficos de 1-2 series de
+# este dashboard ya usan PALETTE (navy/blue/teal/red con significado fijo
+# positivo/negativo, que no se debe tocar). Más de 8 categorías en un
+# mismo gráfico deja de ser seguro incluso con esta paleta -- dividir el
+# gráfico, no agregar un noveno color.
+OKABE_ITO = [
+    "#E69F00",  # naranja
+    "#56B4E9",  # celeste
+    "#009E73",  # verde azulado
+    "#F0E442",  # amarillo
+    "#0072B2",  # azul
+    "#D55E00",  # bermellón
+    "#CC79A7",  # púrpura rosado
+    "#000000",  # negro -- último recurso si hace falta una 8va categoría
+]
+
 
 def format_number(value: Any, decimals: int = 0, empty: str = "—") -> str:
     if value is None or pd.isna(value):
@@ -43,7 +64,7 @@ def clean_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     return safe.to_dict("records")
 
 
-def kpi_card(title: str, value_id: str, note_id: str | None = None) -> html.Div:
+def kpi_card(title: str, value_id: str, note_id: str | None = None, sparkline_id: str | None = None) -> html.Div:
     title_row: list[Any] = [html.Span(title, className="kpi-title-text")]
     if note_id:
         title_row.append(
@@ -64,7 +85,67 @@ def kpi_card(title: str, value_id: str, note_id: str | None = None) -> html.Div:
         html.Div(title_row, className="kpi-title-row"),
         html.Div("—", id=value_id, className="kpi-value"),
     ]
+    if sparkline_id:
+        # Solo para KPI que NO tienen ya un gráfico completo de tendencia
+        # en la misma página -- si ya existe uno (ej. "Cuentas reportadas"
+        # con su línea debajo, "IHH" con la suya), agregar un sparkline
+        # sería tinta redundante mostrando el mismo dato dos veces (Tufte,
+        # "erase redundant data-ink"). Un número aislado sin ningún
+        # gráfico en la página sí es un hueco real de contexto -- ver
+        # register de cada página para el criterio aplicado en cada caso.
+        children.append(
+            dcc.Graph(
+                id=sparkline_id,
+                config={"staticPlot": True, "displayModeBar": False},
+                className="kpi-sparkline",
+            )
+        )
     return html.Div(children, className="kpi-card")
+
+
+def build_sparkline_figure(
+        values: list[float] | Any, color: str, height: int = 34,
+) -> go.Figure:
+    """
+    Mini-gráfico de tendencia dentro de una tarjeta KPI (sparkline) --
+    sin ejes, sin cuadrícula, sin leyenda: el único propósito es responder
+    "¿este número es parte de una subida, una caída, o es estable?" de un
+    vistazo, no permitir lectura precisa (esa vive en el gráfico completo
+    de abajo, cuando existe, o en la tabla de detalle). Punto final
+    marcado con un círculo -- convención estándar de sparkline para anclar
+    dónde está el valor "ahora" dentro de la serie.
+    """
+    valores_validos = [v for v in values if v is not None and not pd.isna(v)]
+    if len(valores_validos) < 2:
+        fig = go.Figure()
+        fig.update_layout(
+            height=height, margin={"l": 0, "r": 0, "t": 0, "b": 0},
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", showlegend=False,
+        )
+        fig.update_xaxes(visible=False)
+        fig.update_yaxes(visible=False)
+        return fig
+
+    x = list(range(len(values)))
+    hex_color = color.lstrip("#")
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=x, y=values, mode="lines", line={"color": color, "width": 1.8},
+        fill="tozeroy", fillcolor=f"rgba({r}, {g}, {b}, 0.12)",
+        hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=[x[-1]], y=[values[-1]], mode="markers", marker={"color": color, "size": 5},
+        hoverinfo="skip",
+    ))
+    fig.update_layout(
+        height=height, margin={"l": 0, "r": 0, "t": 2, "b": 2},
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", showlegend=False,
+    )
+    fig.update_xaxes(visible=False, showgrid=False, zeroline=False)
+    fig.update_yaxes(visible=False, showgrid=False, zeroline=False)
+    return fig
 
 
 def _periodo_id_to_iso(periodo_id: int) -> str:

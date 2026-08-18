@@ -9,7 +9,9 @@ from dash import Input, Output, callback, dcc, html, register_page
 from components.filters_shared import register_shared_filters_callbacks, shared_filters_layout
 from components.territory_filters import register_territory_callbacks, territory_filter_layout
 from components.ui import (
+    OKABE_ITO,
     PALETTE,
+    build_sparkline_figure,
     chart_card,
     empty_figure,
     error_panel,
@@ -24,6 +26,7 @@ from components.ui import (
     style_figure,
 )
 from services.queries import (
+    get_churn_history,
     get_evolution_filtrado,
     get_participation,
     get_periods,
@@ -100,7 +103,8 @@ def layout():
                     kpi_card("Cuentas reportadas (último período)", "evo-kpi-lines", "evo-kpi-lines-note"),
                     kpi_card("Prestadores que reportaron", "evo-kpi-providers", "evo-kpi-providers-note"),
                     kpi_card("Cambio mensual (reportadas)", "evo-kpi-change", "evo-kpi-change-note"),
-                    kpi_card("Dejaron de reportar este mes", "evo-kpi-churn", "evo-kpi-churn-note"),
+                    kpi_card("Dejaron de reportar este mes", "evo-kpi-churn", "evo-kpi-churn-note",
+                             "evo-kpi-churn-spark"),
                 ],
             ),
             html.H3(id="evo-titulo-resumen-rango", children="Resumen del rango seleccionado"),
@@ -150,6 +154,7 @@ register_filters_summary_callback(PREFIX)
     Output("evo-kpi-change-note", "children"),
     Output("evo-kpi-churn", "children"),
     Output("evo-kpi-churn-note", "children"),
+    Output("evo-kpi-churn-spark", "figure"),
     Output("evo-lines-chart", "figure"),
     Output("evo-providers-chart", "figure"),
     Output("evo-speed-composition-chart", "figure"),
@@ -185,7 +190,7 @@ def update_evolution(
 
     if not territory_id or start_period is None or end_period is None:
         figures = [empty_figure("Seleccione todos los filtros") for _ in range(4)]
-        return ("—", "", "—", "", "—", "", "—", "", *figures, "", "Estado actual",
+        return ("—", "", "—", "", "—", "", "—", "", empty_figure(), *figures, "", "Estado actual",
                 "Resumen del rango seleccionado", "—", "", "—", "", "—", "", "—", "")
 
     start_period, end_period = sorted((int(start_period), int(end_period)))
@@ -195,12 +200,12 @@ def update_evolution(
         velocities = get_velocities(territory_id, start_period, end_period, speed_type, opera_estados, isp_nombres)
     except Exception as exc:
         figures = [empty_figure("Error al consultar PostgreSQL") for _ in range(4)]
-        return ("—", "", "—", "", "—", "", "—", "", *figures, str(exc), "Estado actual",
+        return ("—", "", "—", "", "—", "", "—", "", empty_figure(), *figures, str(exc), "Estado actual",
                 "Resumen del rango seleccionado", "—", "", "—", "", "—", "", "—", "")
 
     if evolution.empty:
         figures = [empty_figure() for _ in range(4)]
-        return ("—", "", "—", "", "—", "", "—", "", *figures,
+        return ("—", "", "—", "", "—", "", "—", "", empty_figure(), *figures,
                 "No existen datos para este territorio, período y filtros seleccionados.",
                 "Estado actual", "Resumen del rango seleccionado", "—", "", "—", "", "—", "", "—", "")
 
@@ -254,6 +259,19 @@ def update_evolution(
     except Exception:
         churn_value, churn_note = "—", "No se pudo calcular"
 
+    # Sparkline: "Dejaron de reportar este mes" no tenía ningún gráfico en
+    # la página que mostrara su tendencia -- a diferencia de "Cuentas
+    # reportadas"/"Prestadores", que ya tienen su línea completa debajo.
+    # Últimos 12 meses terminando en el período visible, no el rango
+    # completo Desde-Hasta (ver get_churn_history).
+    try:
+        churn_hist = get_churn_history(territory_id, int(latest["periodo_id"]), meses=12)
+        churn_spark = build_sparkline_figure(
+            pd.to_numeric(churn_hist["churn"], errors="coerce").tolist(), PALETTE["red"],
+        )
+    except Exception:
+        churn_spark = empty_figure()
+
     # Líneas, no barras -- son series mensuales de hasta 180 puntos (15
     # años); una barra por mes en un rango así es ruido visual, la línea
     # es la elección estándar para tendencia-en-el-tiempo (misma razón por
@@ -292,6 +310,11 @@ def update_evolution(
                 "rango_velocidad": velocities.sort_values("orden_rango")["rango_velocidad"].drop_duplicates().tolist()
             },
             labels={"total_lineas": "Cuentas", "periodo": "Período", "rango_velocidad": "Rango"},
+            # Paleta cualitativa por defecto de Plotly reemplazada por
+            # Okabe-Ito -- con 7 categorías simultáneas (rangos de
+            # velocidad), el color por defecto no está verificado contra
+            # daltonismo; este sí (ver components/ui.py:OKABE_ITO).
+            color_discrete_sequence=OKABE_ITO,
         )
         style_figure(speed_comp_fig)
         speed_comp_fig.update_yaxes(tickformat=",")
@@ -395,7 +418,7 @@ def update_evolution(
         lines_value, lines_note,
         providers_value, providers_note,
         change_value, change_note,
-        churn_value, churn_note,
+        churn_value, churn_note, churn_spark,
         lines_fig, providers_fig, speed_comp_fig, speed_diff_fig,
         message,
         titulo_estado_actual, titulo_resumen_rango,

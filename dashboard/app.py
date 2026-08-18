@@ -110,14 +110,22 @@ def actualizar_navegacion(pathname: str | None):
     if not dentro_de_sai:
         return [], "Observatorio de Telecomunicaciones"
 
+    def _nav_link(label: str, href: str) -> dcc.Link:
+        # Compara contra pathname exacto -- las rutas de este dashboard no
+        # tienen sub-rutas anidadas bajo /sai/*, así que no hace falta
+        # startswith() aquí (eso sí se necesita para decidir si mostrar la
+        # barra completa, arriba).
+        clase = "nav-link active" if pathname == href else "nav-link"
+        return dcc.Link(label, href=href, className=clase)
+
     nav = [
         dcc.Link("← Panel", href="/", className="nav-link nav-back"),
         html.Div(className="topbar-sep"),
-        dcc.Link("Evolución", href="/sai/evolucion", className="nav-link"),
-        dcc.Link("IHH y participación", href="/sai/concentracion", className="nav-link"),
-        dcc.Link("Mapa de nodos", href="/sai/mapa-nodos", className="nav-link"),
-        dcc.Link("Discrepancias de geografía", href="/sai/discrepancias-geografia", className="nav-link"),
-        dcc.Link("Control", href="/sai/control", className="nav-link"),
+        _nav_link("Evolución", "/sai/evolucion"),
+        _nav_link("IHH y participación", "/sai/concentracion"),
+        _nav_link("Mapa de nodos", "/sai/mapa-nodos"),
+        _nav_link("Discrepancias de geografía", "/sai/discrepancias-geografia"),
+        _nav_link("Control", "/sai/control"),
     ]
     return nav, "Servicio de Acceso a Internet — SAI"
 

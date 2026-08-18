@@ -11,6 +11,13 @@
     --background: #f4f7fb;
     --white: #ffffff;
     --shadow: 0 10px 28px rgba(11, 31, 51, 0.08);
+    /* Acento institucional (identidad ARCOTEL) -- deliberadamente
+       reservado para cromo de interfaz (nav, subrayados, foco) y NUNCA
+       para codificar datos: los colores de gráficos ya tienen significado
+       fijo en este dashboard (rojo=negativo, teal=positivo, azul=serie
+       principal) y no se deben tocar por una razón de marca. */
+    --gold: #f2b40b;
+    --gold-dark: #b8860b;
 }
 
 * {
@@ -41,6 +48,7 @@ body {
     gap: 24px;
     background: linear-gradient(110deg, #071a2d 0%, #0f3152 100%);
     box-shadow: 0 8px 24px rgba(7, 26, 45, 0.22);
+    border-bottom: 3px solid var(--gold);
 }
 
 .brand {
@@ -91,6 +99,15 @@ body {
 .nav-link:hover {
     background: rgba(255, 255, 255, .10);
     color: white;
+}
+
+/* Indicador de página activa -- antes no existía ninguna señal de "estás
+   aquí" más allá de mirar la URL. Clase agregada por actualizar_navegacion()
+   en app.py, comparando cada href contra el pathname actual. */
+.nav-link.active {
+    background: rgba(242, 180, 11, 0.16);
+    color: white;
+    box-shadow: inset 0 -2px 0 var(--gold);
 }
 
 .topbar-sep {
@@ -326,6 +343,25 @@ h3[id^="evo-titulo-"] {
     font-weight: 800;
     line-height: 1.05;
     overflow-wrap: anywhere;
+}
+
+/* Sparkline dentro de la tarjeta KPI -- solo presente cuando kpi_card()
+   recibe sparkline_id (components/ui.py). Sin ejes ni grilla (ya
+   configurado en build_sparkline_figure); esto solo controla el espacio
+   que ocupa. */
+.kpi-card:has(.kpi-sparkline) {
+    min-height: 132px;
+}
+
+.kpi-sparkline {
+    margin-top: 8px;
+    height: 34px;
+}
+
+.kpi-sparkline .dash-graph,
+.kpi-sparkline .js-plotly-plot,
+.kpi-sparkline .plot-container {
+    height: 34px !important;
 }
 
 /* Ícono "i" + tooltip -- reemplaza al texto de nota siempre visible.

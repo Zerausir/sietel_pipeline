@@ -10,6 +10,7 @@ from components.filters_shared import register_shared_filters_callbacks, shared_
 from components.territory_filters import register_territory_callbacks, territory_filter_layout
 from components.ui import (
     PALETTE,
+    build_sparkline_figure,
     chart_card,
     clean_records,
     empty_figure,
@@ -95,9 +96,11 @@ def layout():
                 className="kpi-grid six",
                 children=[
                     kpi_card("IHH", "con-kpi-ihh", "con-kpi-ihh-note"),
-                    kpi_card("Cobertura del índice", "con-kpi-cobertura", "con-kpi-cobertura-note"),
+                    kpi_card("Cobertura del índice", "con-kpi-cobertura", "con-kpi-cobertura-note",
+                             "con-kpi-cobertura-spark"),
                     kpi_card("Líder", "con-kpi-leader", "con-kpi-leader-note"),
-                    kpi_card("Participación líder", "con-kpi-leader-share", "con-kpi-leader-share-note"),
+                    kpi_card("Participación líder", "con-kpi-leader-share", "con-kpi-leader-share-note",
+                             "con-kpi-leader-share-spark"),
                     kpi_card("CR2", "con-kpi-cr2", "con-kpi-cr2-note"),
                     kpi_card("CR4", "con-kpi-cr4", "con-kpi-cr4-note"),
                 ],
@@ -107,6 +110,15 @@ def layout():
                 children=[
                     chart_card("Evolución histórica del IHH", "con-ihh-chart",
                                "Calculado solo sobre prestadores con reporte real cada mes."),
+                    chart_card("CR2 y CR4 en el tiempo", "con-cr-chart",
+                               "Concentración acumulada de los 2 y 4 principales prestadores -- el IHH resume "
+                               "todo el mercado en un número, CR2/CR4 responden una pregunta más concreta: "
+                               "¿cuánto controlan los líderes?"),
+                ],
+            ),
+            html.Section(
+                className="chart-grid two",
+                children=[
                     chart_card("Participación por prestador", "con-participation-chart",
                                "Principales prestadores del período seleccionado, solo datos reales."),
                     chart_card("Aporte individual al IHH", "con-contribution-chart",
@@ -214,15 +226,18 @@ def update_provider_options(territory_id: str, period_id: int, opera_estados: li
     Output("con-kpi-ihh-note", "children"),
     Output("con-kpi-cobertura", "children"),
     Output("con-kpi-cobertura-note", "children"),
+    Output("con-kpi-cobertura-spark", "figure"),
     Output("con-kpi-leader", "children"),
     Output("con-kpi-leader-note", "children"),
     Output("con-kpi-leader-share", "children"),
     Output("con-kpi-leader-share-note", "children"),
+    Output("con-kpi-leader-share-spark", "figure"),
     Output("con-kpi-cr2", "children"),
     Output("con-kpi-cr2-note", "children"),
     Output("con-kpi-cr4", "children"),
     Output("con-kpi-cr4-note", "children"),
     Output("con-ihh-chart", "figure"),
+    Output("con-cr-chart", "figure"),
     Output("con-participation-chart", "figure"),
     Output("con-contribution-chart", "figure"),
     Output("con-participation-grid", "rowData"),
@@ -245,8 +260,12 @@ def update_concentration(
     opera_estados = opera_estados or []
     isp_nombres = isp_nombres or []
 
-    empty_figures = [empty_figure() for _ in range(3)]
-    empty_return = ("—", "", "—", "", "—", "", "—", "", "—", "", "—", "", *empty_figures, [], "")
+    empty_figures = [empty_figure() for _ in range(4)]
+    empty_spark = empty_figure()
+    empty_return = (
+        "—", "", "—", "", empty_spark, "—", "", "—", "", empty_spark, "—", "", "—", "",
+        *empty_figures, [], "",
+    )
     if not territory_id or None in (start_period, end_period, current_period):
         return empty_return
 
@@ -303,6 +322,14 @@ def update_concentration(
         f"reportaron este mes -- el IHH de al lado se calculó solo sobre ellos. Una cobertura baja "
         "significa que el índice representa una porción menor del mercado real ese mes."
     )
+    # Sparklines: "Cobertura del índice" y "Participación líder" son las
+    # dos tarjetas que no tienen ningún gráfico completo en esta página --
+    # a diferencia de IHH (tiene su línea de al lado) o CR2/CR4 (tienen el
+    # gráfico nuevo de abajo), un número aislado aquí sí era un hueco real
+    # de contexto. Reutiliza la serie "ihh" ya calculada arriba -- ninguna
+    # consulta nueva.
+    cobertura_spark = build_sparkline_figure(ihh["porcentaje_cobertura_prestadores"].tolist(), PALETTE["blue"])
+    leader_share_spark = build_sparkline_figure(ihh["participacion_lider"].tolist(), PALETTE["orange"])
 
     leader_value = str(leader_name)
     leader_note = "Prestador con mayor participación, entre quienes reportaron"
@@ -323,6 +350,21 @@ def update_concentration(
     )
     style_figure(ihh_fig)
     ihh_fig.update_yaxes(title="IHH", rangemode="tozero")
+
+    # CR2/CR4 en el tiempo -- responde una pregunta que el IHH por sí solo
+    # no responde directamente ("¿cuánto controlan específicamente los 2 o
+    # 4 principales?"). Un solo eje (0-100%, ambas series son porcentajes
+    # de la misma naturaleza) -- no es el caso de doble eje que se evita en
+    # otras partes del dashboard, aquí SÍ comparten unidad.
+    cr_fig = go.Figure()
+    cr_fig.add_trace(go.Scatter(
+        x=ihh["periodo"], y=ihh["cr2"], mode="lines", name="CR2", line={"color": PALETTE["blue"], "width": 2.5},
+    ))
+    cr_fig.add_trace(go.Scatter(
+        x=ihh["periodo"], y=ihh["cr4"], mode="lines", name="CR4", line={"color": PALETTE["orange"], "width": 2.5},
+    ))
+    style_figure(cr_fig)
+    cr_fig.update_yaxes(title="Concentración acumulada (%)", rangemode="tozero", range=[0, 100])
 
     if participation.empty:
         participation_fig = empty_figure("No hay participación para el período seleccionado")
@@ -387,12 +429,12 @@ def update_concentration(
 
     return (
         ihh_value, ihh_note,
-        cobertura_value, cobertura_note,
+        cobertura_value, cobertura_note, cobertura_spark,
         leader_value, leader_note,
-        leader_share_value, leader_share_note,
+        leader_share_value, leader_share_note, leader_share_spark,
         cr2_value, cr2_note,
         cr4_value, cr4_note,
-        ihh_fig, participation_fig, contribution_fig,
+        ihh_fig, cr_fig, participation_fig, contribution_fig,
         grid_rows, message,
     )
 

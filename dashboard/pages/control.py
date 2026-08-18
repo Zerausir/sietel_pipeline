@@ -504,7 +504,33 @@ def update_variacion(seleccion, start_period, end_period, opera_estados, isp_nom
     ))
     style_figure(tiempo_fig, height=360, hovermode="closest")
     tiempo_fig.update_xaxes(title="Período")
-    tiempo_fig.update_yaxes(title="Variación % (escala log, signo preservado)", zeroline=True, zerolinecolor="#c7d2dc")
+
+    # CORRECCIÓN (13-ago-2026): el eje mostraba los valores TRANSFORMADOS
+    # tal cual (-2, 0, 2, 4), no el porcentaje real que representan --
+    # nadie que no leyera el subtítulo podía saber que "4" significa
+    # "+10.000%". tickvals/ticktext fuerzan las marcas del eje a
+    # porcentajes "redondos" reales, ubicados en la posición que les
+    # corresponde bajo la misma transformación sign(v)*log10(1+|v|) --
+    # los PUNTOS no cambian, solo lo que se lee en el eje.
+    transformada_min = float(df["variacion_transformada"].min())
+    transformada_max = float(df["variacion_transformada"].max())
+    candidatos_pct = [10, 30, 100, 300, 1000, 3000, 10000, 30000, 100000]
+    tickvals: list[float] = [0.0]
+    ticktext: list[str] = ["0%"]
+    for pct in candidatos_pct:
+        t = float(np.log10(1 + pct))
+        if t <= transformada_max + 0.05:
+            tickvals.append(t)
+            ticktext.append(f"+{pct:,}%".replace(",", "."))
+        if -t >= transformada_min - 0.05:
+            tickvals.append(-t)
+            ticktext.append(f"-{pct:,}%".replace(",", "."))
+    orden = sorted(range(len(tickvals)), key=lambda i: tickvals[i])
+    tiempo_fig.update_yaxes(
+        title="Variación % (escala log, signo preservado)",
+        zeroline=True, zerolinecolor="#c7d2dc",
+        tickvals=[tickvals[i] for i in orden], ticktext=[ticktext[i] for i in orden],
+    )
 
     columnas = [
         "isp_nombre", "ruc_limpio", "anio_mes", "lineas_mes_anterior", "lineas_reportadas",

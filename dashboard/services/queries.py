@@ -1360,3 +1360,60 @@ def get_variacion_mensual_anomala(
     df["periodo_id"] = pd.to_datetime(df["periodo"]).dt.year * 100 + pd.to_datetime(df["periodo"]).dt.month
     df = df.merge(periods, on="periodo_id", how="left")
     return df
+
+
+@cache.memoize(timeout=300)
+def get_churn_history(territory_id: str, end_period: int, meses: int = 12) -> pd.DataFrame:
+    """
+    Historial reciente de "prestadores que dejaron de reportar cada mes"
+    (churn), para el sparkline de "Dejaron de reportar este mes" en
+    Evolución -- ese KPI era un número aislado sin ningún gráfico en la
+    página que mostrara su tendencia (a diferencia de "Cuentas
+    reportadas", que ya tiene su línea completa debajo).
+
+    Acotado a los últimos `meses` períodos terminando en end_period, NO al
+    rango Desde-Hasta completo (que puede cubrir 15 años) -- un sparkline
+    es contexto reciente, no un historial completo; calcularlo sobre 180
+    meses sería costoso para una tendencia que además sería ilegible a ese
+    tamaño de todas formas.
+
+    "activo" = tiene_reportado Y al menos una cuenta reportada ese mes,
+    vía LAG() sobre mart.vw_dashboard_participacion -- mismo patrón que
+    get_variacion_mensual_anomala. El primer período de la ventana no
+    tiene mes anterior DENTRO de la ventana, así que su churn queda en 0
+    en vez del valor real (subestima ese único punto) -- aceptable para
+    una tendencia reciente, no para una cifra certificada.
+    """
+    meses = max(2, int(meses))
+    df = _read(
+        f"""
+        WITH ancla AS (
+            SELECT periodo FROM mart.dim_periodo WHERE periodo_id = :end_period
+        ),
+        serie AS (
+            SELECT
+                vp.periodo_id,
+                vp.prestador_id,
+                (vp.tiene_reportado AND COALESCE(vp.total_lineas_prestador, 0) > 0) AS activo
+            FROM mart.vw_dashboard_participacion vp, ancla
+            WHERE vp.territorio_id = :territory_id
+              AND vp.periodo BETWEEN (ancla.periodo - INTERVAL '{meses} months') AND ancla.periodo
+        ),
+        con_lag AS (
+            SELECT
+                periodo_id, prestador_id, activo,
+                LAG(activo) OVER (PARTITION BY prestador_id ORDER BY periodo_id) AS activo_anterior
+            FROM serie
+        )
+        SELECT
+            c.periodo_id,
+            d.anio_mes,
+            COUNT(*) FILTER (WHERE c.activo_anterior = TRUE AND c.activo = FALSE) AS churn
+        FROM con_lag c
+        JOIN mart.dim_periodo d ON d.periodo_id = c.periodo_id
+        GROUP BY c.periodo_id, d.anio_mes
+        ORDER BY c.periodo_id
+        """,
+        {"territory_id": territory_id, "end_period": end_period},
+    )
+    return df
