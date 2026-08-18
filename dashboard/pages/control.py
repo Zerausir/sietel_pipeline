@@ -42,7 +42,6 @@ descuido, está documentado en cada función de services/queries.py:
 from __future__ import annotations
 
 import dash_ag_grid as dag
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -52,7 +51,7 @@ from components.lines_territory_filters import lines_territory_filter_layout, re
 from components.ui import (
     PALETTE, chart_card, clean_records, empty_figure, error_panel, excel_download_button, format_number, kpi_card,
     month_year_picker, numeric_stepper, page_header, register_excel_download_callback,
-    register_month_year_picker_callback, style_figure,
+    register_month_year_picker_callback, signed_log_tickvals, style_figure, transformar_signed_log,
 )
 from services.queries import (
     get_operation_states, get_periods, get_prestadores_nunca_reportaron_detalle,
@@ -490,8 +489,10 @@ def update_variacion(seleccion, start_period, end_period, opera_estados, isp_nom
     # eje "symlog" nativo; esta transformación logra lo mismo a mano,
     # preservando el signo (positivo/negativo) mientras evita que un caso
     # de +10.000% comprima visualmente el resto de puntos contra el cero.
-    # El hover siempre muestra el % real, sin transformar.
-    df["variacion_transformada"] = np.sign(df["variacion_porcentaje"]) * np.log10(1 + df["variacion_porcentaje"].abs())
+    # El hover siempre muestra el % real, sin transformar. Función
+    # compartida (components/ui.py) -- Evolución la usa también para sus
+    # dos gráficos de variación mensual, ver pages/evolucion.py.
+    df["variacion_transformada"] = transformar_signed_log(df["variacion_porcentaje"])
     tiempo_fig = go.Figure(go.Scatter(
         x=df["periodo"], y=df["variacion_transformada"],
         mode="markers",
@@ -505,31 +506,14 @@ def update_variacion(seleccion, start_period, end_period, opera_estados, isp_nom
     style_figure(tiempo_fig, height=360, hovermode="closest")
     tiempo_fig.update_xaxes(title="Período")
 
-    # CORRECCIÓN (13-ago-2026): el eje mostraba los valores TRANSFORMADOS
-    # tal cual (-2, 0, 2, 4), no el porcentaje real que representan --
-    # nadie que no leyera el subtítulo podía saber que "4" significa
-    # "+10.000%". tickvals/ticktext fuerzan las marcas del eje a
-    # porcentajes "redondos" reales, ubicados en la posición que les
-    # corresponde bajo la misma transformación sign(v)*log10(1+|v|) --
-    # los PUNTOS no cambian, solo lo que se lee en el eje.
-    transformada_min = float(df["variacion_transformada"].min())
-    transformada_max = float(df["variacion_transformada"].max())
-    candidatos_pct = [10, 30, 100, 300, 1000, 3000, 10000, 30000, 100000]
-    tickvals: list[float] = [0.0]
-    ticktext: list[str] = ["0%"]
-    for pct in candidatos_pct:
-        t = float(np.log10(1 + pct))
-        if t <= transformada_max + 0.05:
-            tickvals.append(t)
-            ticktext.append(f"+{pct:,}%".replace(",", "."))
-        if -t >= transformada_min - 0.05:
-            tickvals.append(-t)
-            ticktext.append(f"-{pct:,}%".replace(",", "."))
-    orden = sorted(range(len(tickvals)), key=lambda i: tickvals[i])
+    # tickvals/ticktext fuerzan las marcas del eje a porcentajes "redondos"
+    # reales (+300%, +1.000%...), no el valor transformado (-2, 0, 2, 4)
+    # que no significa nada para quien no leyó el subtítulo.
+    tickvals, ticktext = signed_log_tickvals(df["variacion_transformada"])
     tiempo_fig.update_yaxes(
         title="Variación % (escala log, signo preservado)",
         zeroline=True, zerolinecolor="#c7d2dc",
-        tickvals=[tickvals[i] for i in orden], ticktext=[ticktext[i] for i in orden],
+        tickvals=tickvals, ticktext=ticktext,
     )
 
     columnas = [

@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 import dash_mantine_components as dmc
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, callback, dcc, html, no_update
@@ -101,6 +102,47 @@ def kpi_card(title: str, value_id: str, note_id: str | None = None, sparkline_id
             )
         )
     return html.Div(children, className="kpi-card")
+
+
+def transformar_signed_log(valores: pd.Series) -> pd.Series:
+    """
+    sign(v) * log10(1 + |v|) -- para graficar series de variación % con
+    outliers extremos (un mes de +28.000% que aplasta visualmente todo lo
+    demás contra el cero) sin perder el signo (positivo/negativo). Un eje
+    logarítmico normal de Plotly (yaxis type="log") NO sirve aquí --
+    descarta silenciosamente los valores negativos, y esta serie los tiene
+    (meses con caída). Usada por primera vez en Control (13-ago-2026,
+    "Variación en el tiempo"), extraída aquí para no triplicar la misma
+    lógica cuando Evolución la necesitó también.
+    """
+    return np.sign(valores) * np.log10(1 + valores.abs())
+
+
+def signed_log_tickvals(valores_transformados: pd.Series) -> tuple[list[float], list[str]]:
+    """
+    tickvals/ticktext para un eje con transformar_signed_log() ya aplicado
+    -- las marcas del eje deben mostrar el PORCENTAJE REAL ("+300%"), no
+    el valor transformado ("2.48"), o nadie que no lea el subtítulo sabe
+    qué significa el número. Genera marcas "redondas" (10, 30, 100, 300,
+    1.000...) acotadas al rango real de los datos, en ambos signos.
+    """
+    validos = valores_transformados.dropna()
+    if validos.empty:
+        return [0.0], ["0%"]
+    transformada_min, transformada_max = float(validos.min()), float(validos.max())
+    candidatos_pct = [10, 30, 100, 300, 1000, 3000, 10000, 30000, 100000]
+    tickvals: list[float] = [0.0]
+    ticktext: list[str] = ["0%"]
+    for pct in candidatos_pct:
+        t = float(np.log10(1 + pct))
+        if t <= transformada_max + 0.05:
+            tickvals.append(t)
+            ticktext.append(f"+{pct:,}%".replace(",", "."))
+        if -t >= transformada_min - 0.05:
+            tickvals.append(-t)
+            ticktext.append(f"-{pct:,}%".replace(",", "."))
+    orden = sorted(range(len(tickvals)), key=lambda i: tickvals[i])
+    return [tickvals[i] for i in orden], [ticktext[i] for i in orden]
 
 
 def build_sparkline_figure(

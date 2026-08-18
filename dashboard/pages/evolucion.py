@@ -23,7 +23,9 @@ from components.ui import (
     page_header,
     register_filters_summary_callback,
     register_month_year_picker_callback,
+    signed_log_tickvals,
     style_figure,
+    transformar_signed_log,
 )
 from services.queries import (
     get_churn_history,
@@ -332,22 +334,38 @@ def update_evolution(
         variacion_pct = serie.pct_change().replace([float("inf"), float("-inf")], None) * 100
         anterior = serie.shift(1)
         texto_hover = [
-            (f"{p:,.0f} → {c:,.0f} {etiqueta_absoluta}".replace(",", "."))
-            if pd.notna(p) and pd.notna(c) else "Sin mes anterior en el rango"
-            for p, c in zip(anterior, serie)
+            (
+                f"{p:,.0f} → {c:,.0f} {etiqueta_absoluta} ({v:+.1f}%)"
+                .replace(",", ".")
+            ) if pd.notna(p) and pd.notna(c) and pd.notna(v) else "Sin mes anterior en el rango"
+            for p, c, v in zip(anterior, serie, variacion_pct)
         ]
         colores = [
             PALETTE["teal"] if pd.notna(v) and v >= 0 else PALETTE["red"]
             for v in variacion_pct
         ]
+        # Transformación signo*log10(1+|%|) -- el histórico 2011-2012
+        # arranca desde una base casi en cero (el sistema recién empezaba
+        # a acumular reportes), así que los primeros meses producen
+        # variaciones de miles de % que aplastan visualmente todo el
+        # resto de la serie contra el cero en un eje lineal. Mismo
+        # mecanismo que "Variación en el tiempo" en Control -- ver
+        # components/ui.py:transformar_signed_log(). El HOVER siempre
+        # muestra el % real (en texto), nunca el valor transformado.
+        variacion_transformada = transformar_signed_log(variacion_pct)
         fig = go.Figure(go.Bar(
-            x=evolution_ordenada["periodo"], y=variacion_pct,
+            x=evolution_ordenada["periodo"], y=variacion_transformada,
             marker_color=colores,
             text=texto_hover,
-            hovertemplate="%{text}<br>Variación: %{y:.1f}%<extra></extra>",
+            hovertemplate="%{text}<extra></extra>",
         ))
         style_figure(fig, hovermode="closest")
-        fig.update_yaxes(title="Variación %", zeroline=True, zerolinecolor="#c7d2dc")
+        tickvals, ticktext = signed_log_tickvals(variacion_transformada)
+        fig.update_yaxes(
+            title="Variación % (escala log, signo preservado)",
+            zeroline=True, zerolinecolor="#c7d2dc",
+            tickvals=tickvals, ticktext=ticktext,
+        )
         return fig
 
     lines_variation_fig = _grafico_variacion("lineas_reportadas", "cuentas")
