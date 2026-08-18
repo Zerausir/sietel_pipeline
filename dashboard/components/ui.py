@@ -401,7 +401,16 @@ def chart_card(title: str, graph_id: str, subtitle: str | None = None) -> html.D
 def page_header(title: str, subtitle: str) -> html.Div:
     return html.Div(
         className="page-header",
-        children=[html.H1(title), html.P(subtitle)],
+        children=[
+            html.Div(
+                className="page-header-title-row",
+                children=[
+                    html.Span(className="page-header-tab"),
+                    html.H1(title),
+                ],
+            ),
+            html.P(subtitle),
+        ],
     )
 
 

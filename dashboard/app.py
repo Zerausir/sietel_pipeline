@@ -183,7 +183,11 @@ def serve_layout() -> html.Div:
             ),
             html.Main(dash.page_container, className="page-container"),
             html.Footer(
-                "Fuente: vistas analíticas del esquema mart en PostgreSQL.",
+                children=[
+                    html.Img(src="/assets/logo_gobierno.png", className="footer-logo",
+                             alt="Gobierno del Ecuador"),
+                    html.Div("Fuente: vistas analíticas del esquema mart en PostgreSQL."),
+                ],
                 className="footer",
             ),
         ],
