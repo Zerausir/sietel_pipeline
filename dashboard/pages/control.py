@@ -506,14 +506,17 @@ def update_variacion(seleccion, start_period, end_period, opera_estados, isp_nom
     style_figure(tiempo_fig, height=360, hovermode="closest")
     tiempo_fig.update_xaxes(title="Período")
 
-    # tickvals/ticktext fuerzan las marcas del eje a porcentajes "redondos"
-    # reales (+300%, +1.000%...), no el valor transformado (-2, 0, 2, 4)
-    # que no significa nada para quien no leyó el subtítulo.
-    tickvals, ticktext = signed_log_tickvals(df["variacion_transformada"])
+    # tickvals/ticktext/range fuerzan las marcas del eje a porcentajes
+    # "redondos" reales (+300%, +1.000%...), no el valor transformado
+    # (-2, 0, 2, 4) que no significa nada para quien no leyó el subtítulo
+    # -- y "range" fuerza que el eje visible siempre llegue hasta -100%,
+    # aunque el dato real de este territorio/rango no baje tanto (ver el
+    # docstring de signed_log_tickvals()).
+    tickvals, ticktext, rango = signed_log_tickvals(df["variacion_transformada"])
     tiempo_fig.update_yaxes(
         title="Variación % (escala log, signo preservado)",
         zeroline=True, zerolinecolor="#c7d2dc",
-        tickvals=tickvals, ticktext=ticktext,
+        tickvals=tickvals, ticktext=ticktext, range=rango,
     )
 
     columnas = [

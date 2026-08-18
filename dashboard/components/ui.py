@@ -118,27 +118,36 @@ def transformar_signed_log(valores: pd.Series) -> pd.Series:
     return np.sign(valores) * np.log10(1 + valores.abs())
 
 
-def signed_log_tickvals(valores_transformados: pd.Series) -> tuple[list[float], list[str]]:
+def signed_log_tickvals(valores_transformados: pd.Series) -> tuple[list[float], list[str], list[float]]:
     """
-    tickvals/ticktext para un eje con transformar_signed_log() ya aplicado
-    -- las marcas del eje deben mostrar el PORCENTAJE REAL ("+300%"), no
-    el valor transformado ("2.48"), o nadie que no lea el subtítulo sabe
-    qué significa el número. Genera marcas "redondas" (10, 30, 100, 300,
-    1.000...) acotadas al rango real de los datos, en ambos signos.
+    tickvals/ticktext/range para un eje con transformar_signed_log() ya
+    aplicado -- las marcas del eje deben mostrar el PORCENTAJE REAL
+    ("+300%"), no el valor transformado ("2.48"), o nadie que no lea el
+    subtítulo sabe qué significa el número. Genera marcas "redondas" (10,
+    30, 100, 300, 1.000...) acotadas al rango real de los datos, en ambos
+    signos.
 
-    "-100%" se incluye SIEMPRE, sin importar si los datos llegan tan
-    abajo -- a pedido del usuario (14-ago-2026): a diferencia del lado
-    positivo (sin techo natural), el lado negativo tiene un piso
-    matemático real -- una cantidad no negativa (cuentas, prestadores) no
-    puede caer más del 100% de lo que tenía. Mostrar siempre esa marca da
-    una referencia fija de "qué tan cerca del colapso total" está una
-    caída, igual que "0%" siempre se muestra sin importar si algún punto
-    cae exactamente ahí.
+    "-100%" se incluye SIEMPRE en tickvals/ticktext, sin importar si los
+    datos llegan tan abajo -- a pedido del usuario (14-ago-2026): a
+    diferencia del lado positivo (sin techo natural), el lado negativo
+    tiene un piso matemático real -- una cantidad no negativa (cuentas,
+    prestadores) no puede caer más del 100% de lo que tenía.
+
+    CORRECCIÓN (14-ago-2026): agregar la marca a tickvals NO alcanza --
+    Plotly autoajusta el RANGO visible del eje según el dato real de cada
+    gráfico, y una marca fuera de ese rango simplemente no se dibuja,
+    aunque esté declarada. Confirmado en producción: "Cuentas reportadas"
+    sí mostraba "-100%" (algún mes real cae cerca de ese extremo, así que
+    el rango automático ya lo cubría por coincidencia); "Prestadores que
+    reportaron" no (el dato real nunca baja de ~-30%, así que Plotly
+    recortaba el eje ahí). El tercer valor devuelto es el `range` que hay
+    que pasarle explícitamente a `update_yaxes()` para que el rango
+    visible SIEMPRE llegue hasta -100%, independientemente del dato real.
     """
     t100 = float(np.log10(1 + 100))
     validos = valores_transformados.dropna()
     if validos.empty:
-        return [-t100, 0.0], ["-100%", "0%"]
+        return [-t100, 0.0], ["-100%", "0%"], [-t100 - 0.1, 0.1]
     transformada_min, transformada_max = float(validos.min()), float(validos.max())
     candidatos_pct = [10, 30, 100, 300, 1000, 3000, 10000, 30000, 100000]
     tickvals: list[float] = [0.0, -t100]
@@ -152,7 +161,9 @@ def signed_log_tickvals(valores_transformados: pd.Series) -> tuple[list[float], 
             tickvals.append(-t)
             ticktext.append(f"-{pct:,}%".replace(",", "."))
     orden = sorted(range(len(tickvals)), key=lambda i: tickvals[i])
-    return [tickvals[i] for i in orden], [ticktext[i] for i in orden]
+    rango_min = min(transformada_min, -t100) - 0.15
+    rango_max = max(transformada_max, 0.0) + 0.15
+    return [tickvals[i] for i in orden], [ticktext[i] for i in orden], [rango_min, rango_max]
 
 
 def build_linked_magnitude_variation_figure(
@@ -222,10 +233,10 @@ def build_linked_magnitude_variation_figure(
 
     style_figure(fig, height=height, hovermode="x unified")
     fig.update_yaxes(title=titulo_magnitud, tickformat=tickformat_magnitud, rangemode="tozero", row=1, col=1)
-    tickvals, ticktext = signed_log_tickvals(variacion_transformada)
+    tickvals, ticktext, rango = signed_log_tickvals(variacion_transformada)
     fig.update_yaxes(
         title=titulo_variacion, zeroline=True, zerolinecolor="#c7d2dc",
-        tickvals=tickvals, ticktext=ticktext, row=2, col=1,
+        tickvals=tickvals, ticktext=ticktext, range=rango, row=2, col=1,
     )
     fig.update_xaxes(title="Período", row=2, col=1)
     return fig
