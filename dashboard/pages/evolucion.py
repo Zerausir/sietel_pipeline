@@ -128,6 +128,20 @@ def layout():
                                "Solo datos reales (reportados) -- no incluye relleno interior (imputado)."),
                     chart_card("Prestadores que reportaron", "evo-providers-chart",
                                "Cantidad de prestadores con al menos un reporte real cada mes."),
+                ],
+            ),
+            html.Section(
+                className="chart-grid two",
+                children=[
+                    chart_card("Variación mensual de cuentas reportadas", "evo-lines-variation-chart",
+                               "Cambio % respecto al mes anterior -- misma serie de arriba, solo datos reales."),
+                    chart_card("Variación de prestadores que reportaron", "evo-providers-variation-chart",
+                               "Cambio % respecto al mes anterior en la cantidad de prestadores activos."),
+                ],
+            ),
+            html.Section(
+                className="chart-grid two",
+                children=[
                     chart_card("Composición por velocidad", "evo-speed-composition-chart",
                                "Distribución mensual por rango de velocidad."),
                     chart_card("Diferencia mensual por velocidad", "evo-speed-difference-chart",
@@ -157,6 +171,8 @@ register_filters_summary_callback(PREFIX)
     Output("evo-kpi-churn-spark", "figure"),
     Output("evo-lines-chart", "figure"),
     Output("evo-providers-chart", "figure"),
+    Output("evo-lines-variation-chart", "figure"),
+    Output("evo-providers-variation-chart", "figure"),
     Output("evo-speed-composition-chart", "figure"),
     Output("evo-speed-difference-chart", "figure"),
     Output("evo-message", "children"),
@@ -189,7 +205,7 @@ def update_evolution(
     isp_nombres = isp_nombres or []
 
     if not territory_id or start_period is None or end_period is None:
-        figures = [empty_figure("Seleccione todos los filtros") for _ in range(4)]
+        figures = [empty_figure("Seleccione todos los filtros") for _ in range(6)]
         return ("—", "", "—", "", "—", "", "—", "", empty_figure(), *figures, "", "Estado actual",
                 "Resumen del rango seleccionado", "—", "", "—", "", "—", "", "—", "")
 
@@ -199,12 +215,12 @@ def update_evolution(
         evolution = get_evolution_filtrado(territory_id, start_period, end_period, opera_estados, isp_nombres)
         velocities = get_velocities(territory_id, start_period, end_period, speed_type, opera_estados, isp_nombres)
     except Exception as exc:
-        figures = [empty_figure("Error al consultar PostgreSQL") for _ in range(4)]
+        figures = [empty_figure("Error al consultar PostgreSQL") for _ in range(6)]
         return ("—", "", "—", "", "—", "", "—", "", empty_figure(), *figures, str(exc), "Estado actual",
                 "Resumen del rango seleccionado", "—", "", "—", "", "—", "", "—", "")
 
     if evolution.empty:
-        figures = [empty_figure() for _ in range(4)]
+        figures = [empty_figure() for _ in range(6)]
         return ("—", "", "—", "", "—", "", "—", "", empty_figure(), *figures,
                 "No existen datos para este territorio, período y filtros seleccionados.",
                 "Estado actual", "Resumen del rango seleccionado", "—", "", "—", "", "—", "", "—", "")
@@ -294,6 +310,48 @@ def update_evolution(
     providers_fig.update_traces(line_color=PALETTE["blue"], marker_color=PALETTE["blue"])
     style_figure(providers_fig, hovermode="x unified")
     providers_fig.update_yaxes(title="Prestadores", rangemode="tozero")
+
+    # Variación mensual (%) -- barras divergentes, NO líneas, a diferencia
+    # de los dos gráficos de arriba. Es una elección deliberada y distinta:
+    # la magnitud absoluta es una trayectoria continua (línea correcta);
+    # la variación mes a mes es una serie de eventos discretos e
+    # independientes ("¿este mes subió o bajó, y cuánto?"), donde una
+    # barra con color según el signo se lee de un vistazo como un patrón
+    # de meses buenos/malos -- mismo lenguaje visual que "Diferencia
+    # mensual por velocidad" (abajo) y el ranking de variación en Control.
+    #
+    # Sin consulta nueva a PostgreSQL: "evolution" ya trae solo datos
+    # reales (nunca relleno interior, ver subtítulo del gráfico de
+    # arriba), así que pct_change() directo sobre esa serie ya filtrada
+    # es automáticamente consistente con la metodología del proyecto --
+    # no hay imputados que excluir, porque nunca entraron a esta suma.
+    evolution_ordenada = evolution.sort_values("periodo")
+
+    def _grafico_variacion(columna: str, etiqueta_absoluta: str) -> go.Figure:
+        serie = evolution_ordenada[columna]
+        variacion_pct = serie.pct_change().replace([float("inf"), float("-inf")], None) * 100
+        anterior = serie.shift(1)
+        texto_hover = [
+            (f"{p:,.0f} → {c:,.0f} {etiqueta_absoluta}".replace(",", "."))
+            if pd.notna(p) and pd.notna(c) else "Sin mes anterior en el rango"
+            for p, c in zip(anterior, serie)
+        ]
+        colores = [
+            PALETTE["teal"] if pd.notna(v) and v >= 0 else PALETTE["red"]
+            for v in variacion_pct
+        ]
+        fig = go.Figure(go.Bar(
+            x=evolution_ordenada["periodo"], y=variacion_pct,
+            marker_color=colores,
+            text=texto_hover,
+            hovertemplate="%{text}<br>Variación: %{y:.1f}%<extra></extra>",
+        ))
+        style_figure(fig, hovermode="closest")
+        fig.update_yaxes(title="Variación %", zeroline=True, zerolinecolor="#c7d2dc")
+        return fig
+
+    lines_variation_fig = _grafico_variacion("lineas_reportadas", "cuentas")
+    providers_variation_fig = _grafico_variacion("numero_prestadores", "prestadores")
 
     if velocities.empty:
         speed_comp_fig = empty_figure("No existen datos de velocidad")
@@ -419,7 +477,7 @@ def update_evolution(
         providers_value, providers_note,
         change_value, change_note,
         churn_value, churn_note, churn_spark,
-        lines_fig, providers_fig, speed_comp_fig, speed_diff_fig,
+        lines_fig, providers_fig, lines_variation_fig, providers_variation_fig, speed_comp_fig, speed_diff_fig,
         message,
         titulo_estado_actual, titulo_resumen_rango,
         rango_prestadores_value, rango_prestadores_note,

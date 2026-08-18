@@ -5,20 +5,19 @@ Filtro geográfico para el módulo Control -- geografía de LÍNEAS reportadas
 territory_filters.py (Evolución/Concentración), NO la geografía de nodos
 ISP (components/node_territory_filters.py).
 
-CORRECCIÓN (12-ago-2026): el primer intento de este filtro reusó
-territory_filter_layout() de components/territory_filters.py tal cual --
-eso trae "Nivel geográfico" y selección de un solo valor por nivel, que
-Iván explícitamente NO pidió para Control. Lo que pidió es el mismo patrón
-ya usado en Mapa de nodos/Discrepancias de geografía: Provincia, Cantón y
-Parroquia siempre visibles, cada uno de selección múltiple e independiente
-(sin jerarquía obligatoria) -- ver components/node_territory_filters.py,
-que sigue exactamente ese mismo patrón pero sobre geografía de nodos.
-
 Es deliberadamente un módulo aparte, no una generalización de
 node_territory_filters.py -- unificarlos exigiría parametrizar la función
 de opciones (get_territory_options vs. get_node_territory_options) y
 tocar mapa_nodos.py/discrepancias_geografia.py, que ya funcionan en
 producción; la duplicación aquí es más segura que ese riesgo.
+
+FILTRADO CRUZADO (13-ago-2026, a pedido de Iván): elegir un valor en
+cualquiera de los tres selectores acota las opciones de los OTROS DOS,
+no solo hacia abajo (Provincia→Cantón→Parroquia) como antes. Mismo
+mecanismo y misma decisión de diseño que node_territory_filters.py --
+ver el docstring de ese módulo para el porqué completo (evitar una
+dependencia circular real en el grafo de callbacks de Dash, y no borrar
+selecciones explícitas del usuario solo porque otro campo cambió).
 
 Store final: {"provincias": [...], "cantones": [...], "parroquias": [...]}
 -- NO comparte store con territory_filters.py (Nivel/single-select) ni con
@@ -30,7 +29,7 @@ from __future__ import annotations
 
 from dash import Input, Output, callback, dcc, html
 
-from services.queries import get_territory_options
+from services.queries import get_territory_hierarchy, opciones_geograficas_facetadas
 
 
 def lines_territory_filter_layout(prefix: str) -> html.Div:
@@ -42,8 +41,7 @@ def lines_territory_filter_layout(prefix: str) -> html.Div:
                 children=[
                     html.Label("Provincia"),
                     dcc.Dropdown(
-                        id=f"{prefix}-province", options=get_territory_options("PROVINCIA"), value=[], multi=True,
-                        placeholder="Todas",
+                        id=f"{prefix}-province", options=[], value=[], multi=True, placeholder="Todas",
                     ),
                 ],
             ),
@@ -71,46 +69,54 @@ def lines_territory_filter_layout(prefix: str) -> html.Div:
 
 
 def register_lines_territory_callbacks(prefix: str) -> None:
+    # --- Opciones: reaccionan a los DOS hermanos, filtrado cruzado real ---
+    @callback(
+        Output(f"{prefix}-province", "options"),
+        Input(f"{prefix}-canton", "value"),
+        Input(f"{prefix}-parish", "value"),
+    )
+    def opciones_provincia(cantones, parroquias):
+        jerarquia = get_territory_hierarchy()
+        return opciones_geograficas_facetadas(
+            jerarquia, "codigo_provincia", "pro_nombre",
+            {"codigo_canton": cantones or [], "codigo_parroquia": parroquias or []},
+        )
+
     @callback(
         Output(f"{prefix}-canton", "options"),
         Input(f"{prefix}-province", "value"),
+        Input(f"{prefix}-parish", "value"),
     )
-    def update_cantons(provincias):
-        if provincias:
-            opciones = []
-            for codigo in provincias:
-                opciones.extend(get_territory_options("CANTON", province_code=codigo))
-            return opciones
-        return get_territory_options("CANTON")
+    def opciones_canton(provincias, parroquias):
+        jerarquia = get_territory_hierarchy()
+        return opciones_geograficas_facetadas(
+            jerarquia, "codigo_canton", "ciu_nombre",
+            {"codigo_provincia": provincias or [], "codigo_parroquia": parroquias or []},
+        )
 
     @callback(
         Output(f"{prefix}-parish", "options"),
         Input(f"{prefix}-province", "value"),
         Input(f"{prefix}-canton", "value"),
     )
-    def update_parishes(provincias, cantones):
-        # codigo_canton en INEC ya incluye el prefijo de provincia (ej.
-        # 1701 = Quito), es único a nivel nacional -- filtrar por
-        # canton_code solo es suficiente, no hace falta combinarlo con
-        # provincia (y hacerlo produciría duplicados si el usuario eligió
-        # varias provincias). Mismo razonamiento que node_territory_filters.py.
-        if cantones:
-            opciones = []
-            for canton in cantones:
-                opciones.extend(get_territory_options("PARROQUIA", canton_code=canton))
-            return opciones
-        if provincias:
-            opciones = []
-            for codigo in provincias:
-                opciones.extend(get_territory_options("PARROQUIA", province_code=codigo))
-            return opciones
-        return get_territory_options("PARROQUIA")
+    def opciones_parroquia(provincias, cantones):
+        jerarquia = get_territory_hierarchy()
+        return opciones_geograficas_facetadas(
+            jerarquia, "codigo_parroquia", "par_nombre",
+            {"codigo_provincia": provincias or [], "codigo_canton": cantones or []},
+        )
+
+    # --- Valor: sin store compartido entre páginas para Control (a
+    # diferencia de node_territory_filters.py) -- no hace falta un
+    # callback de "restaurar al montar", el valor inicial [] de cada
+    # dropdown ya es correcto la primera vez que se abre Control. ---
 
     @callback(
         Output(f"{prefix}-territory-selection", "data"),
         Input(f"{prefix}-province", "value"),
         Input(f"{prefix}-canton", "value"),
         Input(f"{prefix}-parish", "value"),
+        prevent_initial_call=True,
     )
     def resolve_selection(provincias, cantones, parroquias):
         return {

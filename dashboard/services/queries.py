@@ -1417,3 +1417,83 @@ def get_churn_history(territory_id: str, end_period: int, meses: int = 12) -> pd
         {"territory_id": territory_id, "end_period": end_period},
     )
     return df
+
+
+# ============================================================
+# FILTRADO CRUZADO (bidireccional) de selectores geográficos
+# ============================================================
+# A pedido del usuario (13-ago-2026): elegir una Parroquia debe acotar
+# también las opciones de Cantón/Provincia, no solo al revés (que ya
+# funcionaba). Se resuelve con una tabla de referencia completa
+# Provincia-Cantón-Parroquia (pequeña, ~1.000 filas) cacheada una hora y
+# filtrada en memoria con pandas -- evita escribir una consulta SQL
+# distinta por cada combinación posible de filtros activos.
+
+@cache.memoize(timeout=3600)
+def get_territory_hierarchy() -> pd.DataFrame:
+    """
+    Provincia-Cantón-Parroquia completos, geografía de LÍNEAS
+    (mart.dim_territorio vía vw_dashboard_filtros_geograficos) -- para el
+    filtrado cruzado de components/lines_territory_filters.py (Control).
+    """
+    return _read(
+        """
+        SELECT codigo_provincia, pro_nombre, codigo_canton, ciu_nombre, codigo_parroquia, par_nombre
+        FROM mart.vw_dashboard_filtros_geograficos
+        WHERE nivel_geografico = 'PARROQUIA'
+        """
+    )
+
+
+@cache.memoize(timeout=3600)
+def get_node_territory_hierarchy() -> pd.DataFrame:
+    """
+    Igual que get_territory_hierarchy() pero para geografía de NODOS
+    (mart.dim_territorio_nodo vía vw_dashboard_filtros_geograficos_nodo) --
+    para el filtrado cruzado de components/node_territory_filters.py
+    (Mapa de nodos, Discrepancias de geografía).
+    """
+    return _read(
+        """
+        SELECT codigo_provincia, nombre_provincia, codigo_canton, nombre_canton, codigo_parroquia, nombre_parroquia
+        FROM mart.vw_dashboard_filtros_geograficos_nodo
+        WHERE nivel_geografico = 'PARROQUIA'
+        """
+    )
+
+
+def opciones_geograficas_facetadas(
+        jerarquia: pd.DataFrame,
+        columna_codigo: str,
+        columna_nombre: str,
+        filtros: dict[str, list[str]],
+) -> list[dict[str, str]]:
+    """
+    Opciones para UN nivel del filtro geográfico (Provincia/Cantón/
+    Parroquia), acotadas por lo elegido en los OTROS dos niveles --
+    filtrado cruzado real, no solo hacia abajo. `filtros` es
+    {columna_del_otro_nivel: [códigos elegidos]}; nunca debe incluir
+    columna_codigo (no tiene sentido acotar un nivel por su propio valor).
+
+    Deduplicado por código -- `jerarquia` trae una fila por PARROQUIA, así
+    que un mismo cantón aparece repetido una vez por cada una de sus
+    parroquias.
+
+    Función pura, sin acceso a base de datos -- se llama con
+    get_territory_hierarchy()/get_node_territory_hierarchy() ya resueltas
+    (cacheadas), reutilizable por ambos filtros geográficos del dashboard.
+    """
+    df = jerarquia
+    for columna, codigos in filtros.items():
+        if codigos:
+            df = df[df[columna].isin(codigos)]
+    opciones = (
+        df[[columna_codigo, columna_nombre]]
+        .dropna()
+        .drop_duplicates(subset=[columna_codigo])
+        .sort_values(columna_nombre)
+    )
+    return [
+        {"label": str(fila[columna_nombre]), "value": str(fila[columna_codigo])}
+        for _, fila in opciones.iterrows()
+    ]

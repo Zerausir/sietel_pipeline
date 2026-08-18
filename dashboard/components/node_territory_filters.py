@@ -9,26 +9,46 @@ servir a varias parroquias de líneas, no hay relación 1:1.
 REDISEÑO (11-ago-2026, a pedido de Iván): se elimina el selector "Nivel
 geográfico" -- Provincia, Cantón y Parroquia quedan siempre visibles, cada
 uno de SELECCIÓN MÚLTIPLE e independiente entre sí (estilo segmentadores de
-Power BI), no una jerarquía de un solo nivel a la vez como antes. Cantón se
-sigue acotando a las provincias elegidas (si hay alguna elegida) y Parroquia
-a los cantones elegidos, solo para reducir ruido en la lista -- pero el
-filtrado real en SQL aplica los tres criterios de forma independiente
-(AND entre dimensiones, OR dentro de cada lista): es posible, por ejemplo,
-elegir una parroquia sin haber elegido su provincia primero.
+Power BI), no una jerarquía de un solo nivel a la vez como antes.
+
+FILTRADO CRUZADO (13-ago-2026, a pedido de Iván): antes, Cantón se acotaba
+a la Provincia elegida y Parroquia al Cantón/Provincia elegidos, pero NUNCA
+al revés -- elegir una Parroquia sin tocar Provincia dejaba el selector de
+Provincia mostrando las 26 opciones completas, no solo la que corresponde.
+Ahora los tres niveles se acotan entre sí en cualquier dirección (ver
+services.queries.opciones_geograficas_facetadas()).
+
+DECISIÓN DE DISEÑO IMPORTANTE, no un descuido: el filtrado cruzado SOLO
+acota las OPCIONES visibles de los otros dos selectores -- nunca borra un
+VALOR que el usuario ya eligió, aunque ese valor deje de aparecer en la
+lista visible del selector cruzado. Dos razones, no una sola:
+  1. Borrar automáticamente una selección explícita del usuario porque
+     OTRO campo cambió es una sorpresa desagradable -- Iván pidió "que se
+     acoten las opciones", no "que se me borre lo que elegí".
+  2. Es estructuralmente necesario: si Output(Provincia.value) dependiera
+     de Input(Cantón.value) Y Output(Cantón.value) dependiera de
+     Input(Provincia.value) al mismo tiempo, Dash detecta esto como una
+     DEPENDENCIA CIRCULAR real en su grafo de callbacks (no en tiempo de
+     ejecución -- en el grafo estático, sin importar qué tan inofensiva
+     sea la lógica interna) y la aplicación no arrancaría. Por eso las
+     opciones y el valor de cada selector viven en callbacks SEPARADOS:
+     las opciones reaccionan a los hermanos (Input), el valor solo se
+     restaura desde el store compartido al montar la página (nunca desde
+     un hermano) -- ver register_node_territory_callbacks() más abajo.
 
 NO comparte dcc.Store con territory_filters.py -- "shared-territory" es de
 Evolución/Concentración (geografía de líneas). Las páginas de nodos usan su
 propio store local ("nodo-shared-territory"), sincronizado solo entre ellas
-(Mapa de Nodos y Discrepancias de Geografía). Su forma cambió de
-{level, province, canton, parish, territory_id} (un solo valor por nivel) a
+(Mapa de Nodos y Discrepancias de Geografía). Su forma es
 {provincias, cantones, parroquias} (listas), reflejando la selección
 múltiple -- ver app.py para el valor inicial del Store.
 """
 from __future__ import annotations
 
+import dash
 from dash import Input, Output, State, callback, dcc, html
 
-from services.queries import get_node_territory_options
+from services.queries import get_node_territory_hierarchy, opciones_geograficas_facetadas
 
 
 def node_territory_filter_layout(prefix: str) -> html.Div:
@@ -68,73 +88,76 @@ def node_territory_filter_layout(prefix: str) -> html.Div:
 
 
 def register_node_territory_callbacks(prefix: str) -> None:
+    # --- Opciones: reaccionan a los DOS hermanos, filtrado cruzado real ---
     @callback(
         Output(f"{prefix}-province", "options"),
-        Output(f"{prefix}-province", "value"),
-        Input("nodo-shared-territory", "modified_timestamp"),
-        State("nodo-shared-territory", "data"),
-        State(f"{prefix}-province", "value"),
+        Input(f"{prefix}-canton", "value"),
+        Input(f"{prefix}-parish", "value"),
     )
-    def init_provinces(_ts, shared_data, current_value):
-        options = get_node_territory_options("PROVINCIA")
-        valores_validos = {o["value"] for o in options}
-        # Al restaurar desde el store compartido (primera carga o al volver
-        # de la otra página de nodos), usa lo guardado; en interacción
-        # normal, respeta lo que el usuario ya tiene elegido en ESTE dropdown.
-        deseado = current_value if current_value else (shared_data or {}).get("provincias", [])
-        value = [v for v in (deseado or []) if v in valores_validos]
-        return options, value
+    def opciones_provincia(cantones, parroquias):
+        jerarquia = get_node_territory_hierarchy()
+        return opciones_geograficas_facetadas(
+            jerarquia, "codigo_provincia", "nombre_provincia",
+            {"codigo_canton": cantones or [], "codigo_parroquia": parroquias or []},
+        )
 
     @callback(
         Output(f"{prefix}-canton", "options"),
-        Output(f"{prefix}-canton", "value"),
         Input(f"{prefix}-province", "value"),
-        Input("nodo-shared-territory", "modified_timestamp"),
-        State("nodo-shared-territory", "data"),
-        State(f"{prefix}-canton", "value"),
+        Input(f"{prefix}-parish", "value"),
     )
-    def update_cantons(provincias, _ts, shared_data, current_value):
-        # Sin provincia elegida: TODOS los cantones del país (no deshabilitado
-        # como antes -- ya no hay jerarquía obligatoria, el usuario puede
-        # empezar por Cantón directamente).
-        options: list = []
-        if provincias:
-            for codigo in provincias:
-                options.extend(get_node_territory_options("CANTON", province_code=codigo))
-        else:
-            options = get_node_territory_options("CANTON")
-        valores_validos = {o["value"] for o in options}
-        deseado = current_value if current_value else (shared_data or {}).get("cantones", [])
-        value = [v for v in (deseado or []) if v in valores_validos]
-        return options, value
+    def opciones_canton(provincias, parroquias):
+        jerarquia = get_node_territory_hierarchy()
+        return opciones_geograficas_facetadas(
+            jerarquia, "codigo_canton", "nombre_canton",
+            {"codigo_provincia": provincias or [], "codigo_parroquia": parroquias or []},
+        )
 
     @callback(
         Output(f"{prefix}-parish", "options"),
-        Output(f"{prefix}-parish", "value"),
         Input(f"{prefix}-province", "value"),
         Input(f"{prefix}-canton", "value"),
-        Input("nodo-shared-territory", "modified_timestamp"),
-        State("nodo-shared-territory", "data"),
-        State(f"{prefix}-parish", "value"),
     )
-    def update_parishes(provincias, cantones, _ts, shared_data, current_value):
-        # codigo_canton en INEC ya incluye el prefijo de provincia (ej. 1701
-        # = Quito), es único a nivel nacional -- filtrar por canton_code solo
-        # es suficiente, no hace falta combinarlo con provincia (y hacerlo
-        # produciría duplicados si el usuario eligió varias provincias).
-        options: list = []
-        if cantones:
-            for canton in cantones:
-                options.extend(get_node_territory_options("PARROQUIA", canton_code=canton))
-        elif provincias:
-            for codigo in provincias:
-                options.extend(get_node_territory_options("PARROQUIA", province_code=codigo))
-        else:
-            options = get_node_territory_options("PARROQUIA")
-        valores_validos = {o["value"] for o in options}
-        deseado = current_value if current_value else (shared_data or {}).get("parroquias", [])
-        value = [v for v in (deseado or []) if v in valores_validos]
-        return options, value
+    def opciones_parroquia(provincias, cantones):
+        jerarquia = get_node_territory_hierarchy()
+        return opciones_geograficas_facetadas(
+            jerarquia, "codigo_parroquia", "nombre_parroquia",
+            {"codigo_provincia": provincias or [], "codigo_canton": cantones or []},
+        )
+
+    # --- Valor: SOLO se restaura desde el store compartido al montar la
+    # página (nunca desde un hermano) -- ver el docstring del módulo para
+    # por qué esto tiene que vivir separado de las opciones.
+    #
+    # Se valida contra la jerarquía COMPLETA (todos los códigos reales),
+    # no contra el "options" actual del propio selector vía State -- ese
+    # State podría leerse ANTES de que opciones_provincia()/opciones_canton()/
+    # opciones_parroquia() hayan corrido en la primera carga (Dash no
+    # garantiza el orden de ejecución entre un State y el callback que
+    # produce ese valor, solo entre Input/Output). Validar contra la
+    # jerarquía completa evita esa carrera por completo -- cualquier
+    # código real pasa, cualquier código inválido se descarta igual. ---
+    def _restaurar_valor(campo: str, columna_codigo: str):
+        @callback(
+            Output(f"{prefix}-{campo}", "value"),
+            Input("nodo-shared-territory", "modified_timestamp"),
+            State("nodo-shared-territory", "data"),
+            State(f"{prefix}-{campo}", "value"),
+        )
+        def restaurar(_ts, shared_data, current_value):
+            if current_value:
+                return dash.no_update
+            clave = {"province": "provincias", "canton": "cantones", "parish": "parroquias"}[campo]
+            deseado = (shared_data or {}).get(clave, [])
+            jerarquia = get_node_territory_hierarchy()
+            valores_validos = set(jerarquia[columna_codigo].dropna().astype(str).unique())
+            return [v for v in deseado if v in valores_validos]
+
+        return restaurar
+
+    _restaurar_valor("province", "codigo_provincia")
+    _restaurar_valor("canton", "codigo_canton")
+    _restaurar_valor("parish", "codigo_parroquia")
 
     @callback(
         Output(f"{prefix}-territory-selection", "data"),
