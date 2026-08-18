@@ -11,6 +11,7 @@ from components.territory_filters import register_territory_callbacks, territory
 from components.ui import (
     OKABE_ITO,
     PALETTE,
+    build_linked_magnitude_variation_figure,
     build_sparkline_figure,
     chart_card,
     empty_figure,
@@ -23,9 +24,7 @@ from components.ui import (
     page_header,
     register_filters_summary_callback,
     register_month_year_picker_callback,
-    signed_log_tickvals,
     style_figure,
-    transformar_signed_log,
 )
 from services.queries import (
     get_churn_history,
@@ -126,19 +125,13 @@ def layout():
             html.Section(
                 className="chart-grid two",
                 children=[
-                    chart_card("Cuentas reportadas por mes", "evo-lines-chart",
-                               "Solo datos reales (reportados) -- no incluye relleno interior (imputado)."),
-                    chart_card("Prestadores que reportaron", "evo-providers-chart",
-                               "Cantidad de prestadores con al menos un reporte real cada mes."),
-                ],
-            ),
-            html.Section(
-                className="chart-grid two",
-                children=[
-                    chart_card("Variación mensual de cuentas reportadas", "evo-lines-variation-chart",
-                               "Cambio % respecto al mes anterior -- misma serie de arriba, solo datos reales."),
-                    chart_card("Variación de prestadores que reportaron", "evo-providers-variation-chart",
-                               "Cambio % respecto al mes anterior en la cantidad de prestadores activos."),
+                    chart_card("Cuentas reportadas por mes", "evo-lines-combined-chart",
+                               "Arriba: magnitud (solo datos reales). Abajo: variación % respecto al mes "
+                               "anterior, mismo eje de tiempo -- pase el cursor por cualquiera de los dos "
+                               "paneles para ver el mismo punto en ambos."),
+                    chart_card("Prestadores que reportaron", "evo-providers-combined-chart",
+                               "Arriba: cantidad de prestadores con al menos un reporte real cada mes. "
+                               "Abajo: variación % respecto al mes anterior, mismo eje de tiempo."),
                 ],
             ),
             html.Section(
@@ -171,10 +164,8 @@ register_filters_summary_callback(PREFIX)
     Output("evo-kpi-churn", "children"),
     Output("evo-kpi-churn-note", "children"),
     Output("evo-kpi-churn-spark", "figure"),
-    Output("evo-lines-chart", "figure"),
-    Output("evo-providers-chart", "figure"),
-    Output("evo-lines-variation-chart", "figure"),
-    Output("evo-providers-variation-chart", "figure"),
+    Output("evo-lines-combined-chart", "figure"),
+    Output("evo-providers-combined-chart", "figure"),
     Output("evo-speed-composition-chart", "figure"),
     Output("evo-speed-difference-chart", "figure"),
     Output("evo-message", "children"),
@@ -207,7 +198,7 @@ def update_evolution(
     isp_nombres = isp_nombres or []
 
     if not territory_id or start_period is None or end_period is None:
-        figures = [empty_figure("Seleccione todos los filtros") for _ in range(6)]
+        figures = [empty_figure("Seleccione todos los filtros") for _ in range(4)]
         return ("—", "", "—", "", "—", "", "—", "", empty_figure(), *figures, "", "Estado actual",
                 "Resumen del rango seleccionado", "—", "", "—", "", "—", "", "—", "")
 
@@ -217,12 +208,12 @@ def update_evolution(
         evolution = get_evolution_filtrado(territory_id, start_period, end_period, opera_estados, isp_nombres)
         velocities = get_velocities(territory_id, start_period, end_period, speed_type, opera_estados, isp_nombres)
     except Exception as exc:
-        figures = [empty_figure("Error al consultar PostgreSQL") for _ in range(6)]
+        figures = [empty_figure("Error al consultar PostgreSQL") for _ in range(4)]
         return ("—", "", "—", "", "—", "", "—", "", empty_figure(), *figures, str(exc), "Estado actual",
                 "Resumen del rango seleccionado", "—", "", "—", "", "—", "", "—", "")
 
     if evolution.empty:
-        figures = [empty_figure() for _ in range(6)]
+        figures = [empty_figure() for _ in range(4)]
         return ("—", "", "—", "", "—", "", "—", "", empty_figure(), *figures,
                 "No existen datos para este territorio, período y filtros seleccionados.",
                 "Estado actual", "Resumen del rango seleccionado", "—", "", "—", "", "—", "", "—", "")
@@ -290,86 +281,33 @@ def update_evolution(
     except Exception:
         churn_spark = empty_figure()
 
-    # Líneas, no barras -- son series mensuales de hasta 180 puntos (15
-    # años); una barra por mes en un rango así es ruido visual, la línea
-    # es la elección estándar para tendencia-en-el-tiempo (misma razón por
-    # la que "Evolución histórica del IHH" en Concentración ya es línea).
-    # Con marcadores porque en rangos cortos (pocos meses) una línea sola,
-    # sin puntos, se ve vacía.
-    lines_fig = px.line(
-        evolution, x="periodo", y="lineas_reportadas", markers=True,
-        labels={"lineas_reportadas": "Cuentas reportadas", "periodo": "Período"},
-    )
-    lines_fig.update_traces(line_color=PALETTE["blue"], marker_color=PALETTE["blue"], fill="tozeroy",
-                            fillcolor="rgba(20, 100, 244, 0.08)")
-    style_figure(lines_fig, hovermode="x unified")
-    lines_fig.update_yaxes(title="Cuentas reportadas", tickformat=",", rangemode="tozero")
-
-    providers_fig = px.line(
-        evolution, x="periodo", y="numero_prestadores", markers=True,
-        labels={"numero_prestadores": "Prestadores que reportaron", "periodo": "Período"},
-    )
-    providers_fig.update_traces(line_color=PALETTE["blue"], marker_color=PALETTE["blue"])
-    style_figure(providers_fig, hovermode="x unified")
-    providers_fig.update_yaxes(title="Prestadores", rangemode="tozero")
-
-    # Variación mensual (%) -- barras divergentes, NO líneas, a diferencia
-    # de los dos gráficos de arriba. Es una elección deliberada y distinta:
-    # la magnitud absoluta es una trayectoria continua (línea correcta);
-    # la variación mes a mes es una serie de eventos discretos e
-    # independientes ("¿este mes subió o bajó, y cuánto?"), donde una
-    # barra con color según el signo se lee de un vistazo como un patrón
-    # de meses buenos/malos -- mismo lenguaje visual que "Diferencia
-    # mensual por velocidad" (abajo) y el ranking de variación en Control.
-    #
-    # Sin consulta nueva a PostgreSQL: "evolution" ya trae solo datos
-    # reales (nunca relleno interior, ver subtítulo del gráfico de
-    # arriba), así que pct_change() directo sobre esa serie ya filtrada
-    # es automáticamente consistente con la metodología del proyecto --
-    # no hay imputados que excluir, porque nunca entraron a esta suma.
     evolution_ordenada = evolution.sort_values("periodo")
 
-    def _grafico_variacion(columna: str, etiqueta_absoluta: str) -> go.Figure:
-        serie = evolution_ordenada[columna]
-        variacion_pct = serie.pct_change().replace([float("inf"), float("-inf")], None) * 100
-        anterior = serie.shift(1)
-        texto_hover = [
-            (
-                f"{p:,.0f} → {c:,.0f} {etiqueta_absoluta} ({v:+.1f}%)"
-                .replace(",", ".")
-            ) if pd.notna(p) and pd.notna(c) and pd.notna(v) else "Sin mes anterior en el rango"
-            for p, c, v in zip(anterior, serie, variacion_pct)
-        ]
-        colores = [
-            PALETTE["teal"] if pd.notna(v) and v >= 0 else PALETTE["red"]
-            for v in variacion_pct
-        ]
-        # Transformación signo*log10(1+|%|) -- el histórico 2011-2012
-        # arranca desde una base casi en cero (el sistema recién empezaba
-        # a acumular reportes), así que los primeros meses producen
-        # variaciones de miles de % que aplastan visualmente todo el
-        # resto de la serie contra el cero en un eje lineal. Mismo
-        # mecanismo que "Variación en el tiempo" en Control -- ver
-        # components/ui.py:transformar_signed_log(). El HOVER siempre
-        # muestra el % real (en texto), nunca el valor transformado.
-        variacion_transformada = transformar_signed_log(variacion_pct)
-        fig = go.Figure(go.Bar(
-            x=evolution_ordenada["periodo"], y=variacion_transformada,
-            marker_color=colores,
-            text=texto_hover,
-            hovertemplate="%{text}<extra></extra>",
-        ))
-        style_figure(fig, hovermode="closest")
-        tickvals, ticktext = signed_log_tickvals(variacion_transformada)
-        fig.update_yaxes(
-            title="Variación % (escala log, signo preservado)",
-            zeroline=True, zerolinecolor="#c7d2dc",
-            tickvals=tickvals, ticktext=ticktext,
-        )
-        return fig
+    # Un solo gráfico combinado por métrica (magnitud + variación, eje X
+    # compartido, hover unificado) en vez de dos dcc.Graph sueltos -- a
+    # pedido del usuario (14-ago-2026), ver
+    # components/ui.py:build_linked_magnitude_variation_figure(). Sin
+    # consulta nueva a PostgreSQL: "evolution" ya trae solo datos reales
+    # (nunca relleno interior, ver subtítulo de la tarjeta), así que
+    # pct_change() directo sobre esa serie ya filtrada es automáticamente
+    # consistente con la metodología del proyecto.
+    lines_variacion_pct = (
+            evolution_ordenada["lineas_reportadas"].pct_change().replace([float("inf"), float("-inf")], None) * 100
+    )
+    lines_combined_fig = build_linked_magnitude_variation_figure(
+        evolution_ordenada["periodo"], evolution_ordenada["lineas_reportadas"], lines_variacion_pct,
+        titulo_magnitud="Cuentas reportadas", titulo_variacion="Variación % (escala log, signo preservado)",
+        etiqueta_absoluta="cuentas", color=PALETTE["blue"], rellenar_area=True,
+    )
 
-    lines_variation_fig = _grafico_variacion("lineas_reportadas", "cuentas")
-    providers_variation_fig = _grafico_variacion("numero_prestadores", "prestadores")
+    providers_variacion_pct = (
+            evolution_ordenada["numero_prestadores"].pct_change().replace([float("inf"), float("-inf")], None) * 100
+    )
+    providers_combined_fig = build_linked_magnitude_variation_figure(
+        evolution_ordenada["periodo"], evolution_ordenada["numero_prestadores"], providers_variacion_pct,
+        titulo_magnitud="Prestadores", titulo_variacion="Variación % (escala log, signo preservado)",
+        etiqueta_absoluta="prestadores", color=PALETTE["blue"], rellenar_area=False,
+    )
 
     if velocities.empty:
         speed_comp_fig = empty_figure("No existen datos de velocidad")
@@ -495,7 +433,7 @@ def update_evolution(
         providers_value, providers_note,
         change_value, change_note,
         churn_value, churn_note, churn_spark,
-        lines_fig, providers_fig, lines_variation_fig, providers_variation_fig, speed_comp_fig, speed_diff_fig,
+        lines_combined_fig, providers_combined_fig, speed_comp_fig, speed_diff_fig,
         message,
         titulo_estado_actual, titulo_resumen_rango,
         rango_prestadores_value, rango_prestadores_note,

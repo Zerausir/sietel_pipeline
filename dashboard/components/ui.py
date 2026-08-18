@@ -125,24 +125,110 @@ def signed_log_tickvals(valores_transformados: pd.Series) -> tuple[list[float], 
     el valor transformado ("2.48"), o nadie que no lea el subtítulo sabe
     qué significa el número. Genera marcas "redondas" (10, 30, 100, 300,
     1.000...) acotadas al rango real de los datos, en ambos signos.
+
+    "-100%" se incluye SIEMPRE, sin importar si los datos llegan tan
+    abajo -- a pedido del usuario (14-ago-2026): a diferencia del lado
+    positivo (sin techo natural), el lado negativo tiene un piso
+    matemático real -- una cantidad no negativa (cuentas, prestadores) no
+    puede caer más del 100% de lo que tenía. Mostrar siempre esa marca da
+    una referencia fija de "qué tan cerca del colapso total" está una
+    caída, igual que "0%" siempre se muestra sin importar si algún punto
+    cae exactamente ahí.
     """
+    t100 = float(np.log10(1 + 100))
     validos = valores_transformados.dropna()
     if validos.empty:
-        return [0.0], ["0%"]
+        return [-t100, 0.0], ["-100%", "0%"]
     transformada_min, transformada_max = float(validos.min()), float(validos.max())
     candidatos_pct = [10, 30, 100, 300, 1000, 3000, 10000, 30000, 100000]
-    tickvals: list[float] = [0.0]
-    ticktext: list[str] = ["0%"]
+    tickvals: list[float] = [0.0, -t100]
+    ticktext: list[str] = ["0%", "-100%"]
     for pct in candidatos_pct:
         t = float(np.log10(1 + pct))
         if t <= transformada_max + 0.05:
             tickvals.append(t)
             ticktext.append(f"+{pct:,}%".replace(",", "."))
-        if -t >= transformada_min - 0.05:
+        if pct != 100 and -t >= transformada_min - 0.05:
             tickvals.append(-t)
             ticktext.append(f"-{pct:,}%".replace(",", "."))
     orden = sorted(range(len(tickvals)), key=lambda i: tickvals[i])
     return [tickvals[i] for i in orden], [ticktext[i] for i in orden]
+
+
+def build_linked_magnitude_variation_figure(
+        periodos: pd.Series,
+        magnitud: pd.Series,
+        variacion_pct: pd.Series,
+        *,
+        titulo_magnitud: str,
+        titulo_variacion: str,
+        etiqueta_absoluta: str,
+        color: str = "#1464f4",
+        tickformat_magnitud: str = ",",
+        rellenar_area: bool = False,
+        height: int = 560,
+) -> go.Figure:
+    """
+    Panel superior (línea, magnitud absoluta) + panel inferior (barras
+    divergentes, variación % mes a mes) en UNA sola figura con eje X
+    COMPARTIDO -- a pedido del usuario (14-ago-2026): antes eran dos
+    dcc.Graph independientes que no tenían forma de quedar alineados ni
+    de mostrar el mismo punto al pasar el cursor por uno u otro. Con
+    plotly.subplots.make_subplots(shared_xaxes=True) + hovermode="x
+    unified", ambas cosas quedan resueltas de forma nativa -- no es un
+    hack con JavaScript, es el mecanismo que Plotly ya provee para
+    paneles vinculados.
+
+    "variacion_pct" se transforma con transformar_signed_log() (ver esa
+    función) antes de graficarse -- mismo criterio que Control y que la
+    versión anterior de este gráfico en Evolución.
+    """
+    from plotly.subplots import make_subplots
+
+    hex_color = color.lstrip("#")
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+
+    anterior = magnitud.shift(1)
+    texto_hover_variacion = [
+        f"{p:,.0f} → {c:,.0f} {etiqueta_absoluta} ({v:+.1f}%)".replace(",", ".")
+        if pd.notna(p) and pd.notna(c) and pd.notna(v) else "Sin mes anterior en el rango"
+        for p, c, v in zip(anterior, magnitud, variacion_pct)
+    ]
+    colores_variacion = [
+        PALETTE["teal"] if pd.notna(v) and v >= 0 else PALETTE["red"]
+        for v in variacion_pct
+    ]
+    variacion_transformada = transformar_signed_log(variacion_pct)
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.62, 0.38])
+
+    trace_magnitud: dict[str, Any] = {
+        "x": periodos, "y": magnitud, "mode": "lines+markers",
+        "line": {"color": color, "width": 2.4}, "marker": {"color": color, "size": 5},
+        "hovertemplate": "%{y:,.0f}<extra></extra>", "showlegend": False,
+    }
+    if rellenar_area:
+        trace_magnitud["fill"] = "tozeroy"
+        trace_magnitud["fillcolor"] = f"rgba({r}, {g}, {b}, 0.08)"
+    fig.add_trace(go.Scatter(**trace_magnitud), row=1, col=1)
+
+    fig.add_trace(
+        go.Bar(
+            x=periodos, y=variacion_transformada, marker_color=colores_variacion,
+            text=texto_hover_variacion, hovertemplate="%{text}<extra></extra>", showlegend=False,
+        ),
+        row=2, col=1,
+    )
+
+    style_figure(fig, height=height, hovermode="x unified")
+    fig.update_yaxes(title=titulo_magnitud, tickformat=tickformat_magnitud, rangemode="tozero", row=1, col=1)
+    tickvals, ticktext = signed_log_tickvals(variacion_transformada)
+    fig.update_yaxes(
+        title=titulo_variacion, zeroline=True, zerolinecolor="#c7d2dc",
+        tickvals=tickvals, ticktext=ticktext, row=2, col=1,
+    )
+    fig.update_xaxes(title="Período", row=2, col=1)
+    return fig
 
 
 def build_sparkline_figure(
