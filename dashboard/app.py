@@ -98,7 +98,7 @@ def navigation() -> html.Header:
 # "Control" -- renombrado el grupo a propósito para evitar el "Control >
 # Control" confuso que resultaba de usar el mismo nombre en ambos niveles.
 GRUPOS_NAV: list[tuple[str, list[tuple[str, str]]]] = [
-    ("Mercados", [
+    ("Estadísticas", [
         ("Evolución", "/sai/evolucion"),
         ("IHH y participación", "/sai/concentracion"),
     ]),
