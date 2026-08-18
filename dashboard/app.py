@@ -92,6 +92,62 @@ def navigation() -> html.Header:
     )
 
 
+# Estructura de navegación: dos grupos desplegables en vez de cinco
+# pestañas planas (12-ago-2026, a pedido del usuario). El grupo superior
+# "Control e Infraestructura" contiene una página que también se llama
+# "Control" -- renombrado el grupo a propósito para evitar el "Control >
+# Control" confuso que resultaba de usar el mismo nombre en ambos niveles.
+GRUPOS_NAV: list[tuple[str, list[tuple[str, str]]]] = [
+    ("Mercados", [
+        ("Evolución", "/sai/evolucion"),
+        ("IHH y participación", "/sai/concentracion"),
+    ]),
+    ("Control e Infraestructura", [
+        ("Control", "/sai/control"),
+        ("Mapa de nodos", "/sai/mapa-nodos"),
+        ("Discrepancias de geografía", "/sai/discrepancias-geografia"),
+    ]),
+]
+
+
+def _grupo_menu(nombre_grupo: str, items: list[tuple[str, str]], pathname: str) -> dmc.Menu:
+    """
+    dmc.Menu, no un dropdown CSS/JS hecho a mano -- tres razones, no
+    preferencia estética: (1) dash-mantine-components ya es dependencia
+    del proyecto (calendario de períodos, steppers numéricos), no agrega
+    una librería nueva; (2) dmc.MenuItem(href=...) navega igual que
+    dcc.Link -- confirmado en el changelog de la librería, no es una
+    integración improvisada; (3) el trigger por defecto es clic, no hover
+    -- la propia documentación de Mantine advierte que un menú que solo
+    se abre con hover no es accesible para quien navega con teclado.
+    """
+    activo_grupo = any(pathname == href for _, href in items)
+    return dmc.Menu(
+        [
+            dmc.MenuTarget(
+                html.Button(
+                    [nombre_grupo, html.Span(" ▾", className="nav-menu-caret")],
+                    className="nav-link nav-menu-trigger" + (" active" if activo_grupo else ""),
+                )
+            ),
+            dmc.MenuDropdown(
+                [
+                    dmc.MenuItem(
+                        label, href=href,
+                        className="nav-menu-item" + (" active" if pathname == href else ""),
+                    )
+                    for label, href in items
+                ],
+                className="nav-menu-dropdown",
+            ),
+        ],
+        trigger="click",
+        position="bottom-start",
+        shadow="md",
+        withinPortal=True,
+    )
+
+
 @callback(
     Output("obtel-nav-links", "children"),
     Output("obtel-brand-subtitle", "children"),
@@ -110,22 +166,10 @@ def actualizar_navegacion(pathname: str | None):
     if not dentro_de_sai:
         return [], "Observatorio de Telecomunicaciones"
 
-    def _nav_link(label: str, href: str) -> dcc.Link:
-        # Compara contra pathname exacto -- las rutas de este dashboard no
-        # tienen sub-rutas anidadas bajo /sai/*, así que no hace falta
-        # startswith() aquí (eso sí se necesita para decidir si mostrar la
-        # barra completa, arriba).
-        clase = "nav-link active" if pathname == href else "nav-link"
-        return dcc.Link(label, href=href, className=clase)
-
     nav = [
         dcc.Link("← Panel", href="/", className="nav-link nav-back"),
         html.Div(className="topbar-sep"),
-        _nav_link("Evolución", "/sai/evolucion"),
-        _nav_link("IHH y participación", "/sai/concentracion"),
-        _nav_link("Mapa de nodos", "/sai/mapa-nodos"),
-        _nav_link("Discrepancias de geografía", "/sai/discrepancias-geografia"),
-        _nav_link("Control", "/sai/control"),
+        *[_grupo_menu(nombre, items, pathname) for nombre, items in GRUPOS_NAV],
     ]
     return nav, "Servicio de Acceso a Internet — SAI"
 

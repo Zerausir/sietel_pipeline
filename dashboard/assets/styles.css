@@ -113,9 +113,60 @@ body {
    aquí" más allá de mirar la URL. Clase agregada por actualizar_navegacion()
    en app.py, comparando cada href contra el pathname actual. */
 .nav-link.active {
-    background: rgba(242, 180, 11, 0.16);
+    background: rgba(255, 198, 0, 0.16);
     color: white;
     box-shadow: inset 0 -2px 0 var(--gold);
+}
+
+/* ---------- Menú desplegable de navegación (dmc.Menu) ----------
+   Grupos "Mercados" / "Control e Infraestructura" -- dmc.MenuTarget
+   envuelve un <button> con las mismas clases .nav-link que las pestañas
+   sueltas, así que hereda tipografía/color/hover sin duplicar reglas;
+   esto solo agrega lo específico del menú (flecha, panel desplegado,
+   ítems dentro). */
+.nav-menu-trigger {
+    border: none;
+    background: transparent;
+    font-family: inherit;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+}
+
+.nav-menu-caret {
+    font-size: 10px;
+    margin-left: 5px;
+    opacity: .75;
+}
+
+.nav-menu-dropdown {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 6px;
+    min-width: 220px;
+}
+
+.nav-menu-item {
+    display: block;
+    padding: 9px 12px;
+    border-radius: 7px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    text-decoration: none;
+    transition: .15s ease;
+}
+
+.nav-menu-item:hover {
+    background: #eef0fb;
+    color: var(--brand-indigo);
+}
+
+.nav-menu-item.active {
+    background: rgba(255, 198, 0, 0.16);
+    color: var(--brand-indigo);
+    box-shadow: inset 3px 0 0 var(--gold);
 }
 
 .topbar-sep {
