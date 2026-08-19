@@ -49,13 +49,16 @@ from dash import Input, Output, callback, dcc, html, register_page
 
 from components.lines_territory_filters import lines_territory_filter_layout, register_lines_territory_callbacks
 from components.ui import (
-    PALETTE, chart_card, clean_records, empty_figure, error_panel, excel_download_button, format_number, kpi_card,
-    month_year_picker, numeric_stepper, page_header, register_excel_download_callback,
-    register_month_year_picker_callback, signed_log_tickvals, style_figure, transformar_signed_log,
+    PALETTE, build_linked_magnitude_variation_figure, build_sparkline_figure, chart_card, clean_records,
+    empty_figure, error_panel, excel_download_button, format_number, format_signed, kpi_card, month_year_picker,
+    numeric_stepper, page_header, register_excel_download_callback, register_month_year_picker_callback,
+    signed_log_tickvals, style_figure, transformar_signed_log,
 )
 from services.queries import (
-    get_operation_states, get_periods, get_prestadores_nunca_reportaron_detalle,
-    get_prestadores_reporte_detenido_detalle, get_provider_options, get_variacion_mensual_anomala,
+    get_churn_history_multiselect, get_evolution_filtrado_multiselect, get_operation_states, get_periods,
+    get_prestadores_nunca_reportaron_detalle, get_prestadores_reporte_detenido_detalle,
+    get_provider_count_in_range_multiselect, get_provider_options, get_reporting_summary_multiselect,
+    get_variacion_mensual_anomala, resolve_period_id,
 )
 
 register_page(__name__, path="/sai/control", name="Control", order=4)
@@ -127,6 +130,57 @@ def layout():
                 "Estado/Prestador (sin geografía ni período: la fuente no los tiene); 'Reporte detenido' usa "
                 "Desde/Hasta sobre la fecha del último reporte, no sobre 'meses mínimos sin reportar'.",
                 className="chart-subtitle",
+            ),
+
+            # Bloque duplicado de Evolución (14-ago-2026, a pedido de Iván)
+            # -- mismo contenido, contexto general del mercado antes de
+            # entrar a las tres inconsistencias específicas de abajo. NO
+            # incluye "Nunca han reportado" del bloque "Resumen del rango"
+            # de Evolución -- Control ya tiene su propia sección dedicada
+            # a eso más abajo, con más detalle (KPIs por clasificación +
+            # gráfico + tabla completa); repetirla aquí sería el mismo
+            # número dos veces en la misma página. Usa las versiones
+            # "_multiselect" de services/queries.py -- el filtro de
+            # Control (Provincia/Cantón/Parroquia independientes, sin
+            # Nivel) no es compatible con las funciones originales de
+            # Evolución (territory_id único).
+            html.H3(id="ctrl-resumen-titulo-estado", children="Estado actual"),
+            html.Section(
+                className="kpi-grid four",
+                children=[
+                    kpi_card("Cuentas reportadas (último período)", "ctrl-resumen-kpi-cuentas",
+                             "ctrl-resumen-kpi-cuentas-note"),
+                    kpi_card("Prestadores que reportaron", "ctrl-resumen-kpi-prestadores",
+                             "ctrl-resumen-kpi-prestadores-note"),
+                    kpi_card("Cambio mensual (reportadas)", "ctrl-resumen-kpi-cambio",
+                             "ctrl-resumen-kpi-cambio-note"),
+                    kpi_card("Dejaron de reportar este mes", "ctrl-resumen-kpi-churn",
+                             "ctrl-resumen-kpi-churn-note", "ctrl-resumen-kpi-churn-spark"),
+                ],
+            ),
+            html.H3(id="ctrl-resumen-titulo-rango", children="Resumen del rango seleccionado"),
+            html.Section(
+                className="kpi-grid three",
+                children=[
+                    kpi_card("Prestadores con actividad en el rango", "ctrl-resumen-kpi-rango-prestadores",
+                             "ctrl-resumen-kpi-rango-prestadores-note"),
+                    kpi_card("Total de prestadores (con o sin reportes)", "ctrl-resumen-kpi-rango-total",
+                             "ctrl-resumen-kpi-rango-total-note"),
+                    kpi_card("Tasa de entrega de reportes", "ctrl-resumen-kpi-rango-tasa",
+                             "ctrl-resumen-kpi-rango-tasa-note"),
+                ],
+            ),
+            html.Div(id="ctrl-resumen-message", className="data-message"),
+            html.Section(
+                className="chart-grid two",
+                children=[
+                    chart_card("Cuentas reportadas por mes", "ctrl-resumen-lines-chart",
+                               "Arriba: magnitud (solo datos reales). Abajo: variación % respecto al mes "
+                               "anterior, mismo eje de tiempo."),
+                    chart_card("Prestadores que reportaron", "ctrl-resumen-providers-chart",
+                               "Arriba: cantidad de prestadores con al menos un reporte real cada mes. "
+                               "Abajo: variación % respecto al mes anterior, mismo eje de tiempo."),
+                ],
             ),
 
             html.H3("Prestadores que nunca han reportado", style={"marginTop": "20px"}),
@@ -295,6 +349,212 @@ register_month_year_picker_callback("ctrl-end-period")
 register_excel_download_callback("ctrl-nunca-grid", "prestadores_sin_reportar.xlsx")
 register_excel_download_callback("ctrl-detenido-grid", "prestadores_reporte_detenido.xlsx")
 register_excel_download_callback("ctrl-variacion-grid", "variacion_mensual_anomala.xlsx")
+
+
+@callback(
+    Output("ctrl-resumen-kpi-cuentas", "children"),
+    Output("ctrl-resumen-kpi-cuentas-note", "children"),
+    Output("ctrl-resumen-kpi-prestadores", "children"),
+    Output("ctrl-resumen-kpi-prestadores-note", "children"),
+    Output("ctrl-resumen-kpi-cambio", "children"),
+    Output("ctrl-resumen-kpi-cambio-note", "children"),
+    Output("ctrl-resumen-kpi-churn", "children"),
+    Output("ctrl-resumen-kpi-churn-note", "children"),
+    Output("ctrl-resumen-kpi-churn-spark", "figure"),
+    Output("ctrl-resumen-lines-chart", "figure"),
+    Output("ctrl-resumen-providers-chart", "figure"),
+    Output("ctrl-resumen-message", "children"),
+    Output("ctrl-resumen-titulo-estado", "children"),
+    Output("ctrl-resumen-titulo-rango", "children"),
+    Output("ctrl-resumen-kpi-rango-prestadores", "children"),
+    Output("ctrl-resumen-kpi-rango-prestadores-note", "children"),
+    Output("ctrl-resumen-kpi-rango-total", "children"),
+    Output("ctrl-resumen-kpi-rango-total-note", "children"),
+    Output("ctrl-resumen-kpi-rango-tasa", "children"),
+    Output("ctrl-resumen-kpi-rango-tasa-note", "children"),
+    Input("ctrl-territory-selection", "data"),
+    Input("ctrl-start-period", "data"),
+    Input("ctrl-end-period", "data"),
+    Input("ctrl-opera-estado", "value"),
+    Input("ctrl-isp-nombre", "value"),
+)
+def update_resumen(seleccion, start_period, end_period, opera_estados, isp_nombres):
+    """
+    Duplica el bloque "Estado actual"/"Resumen del rango seleccionado" de
+    Evolución (14-ago-2026, a pedido de Iván) -- mismo contenido, MISMA
+    lógica de cálculo, pero usando las versiones "_multiselect" de
+    services/queries.py: el filtro de Control (Provincia/Cantón/Parroquia
+    independientes, sin Nivel geográfico) no es compatible con las
+    funciones que usa Evolución (territory_id único). Ver el docstring de
+    esa sección en queries.py para el porqué completo.
+
+    NO incluye "Nunca han reportado" -- Control ya tiene su propia sección
+    dedicada a eso, con más detalle, más abajo en esta misma página.
+    """
+    seleccion = seleccion or {}
+    provincias = tuple(seleccion.get("provincias") or ())
+    cantones = tuple(seleccion.get("cantones") or ())
+    parroquias = tuple(seleccion.get("parroquias") or ())
+    opera_estados = tuple(opera_estados or ())
+    isp_nombres = tuple(isp_nombres or ())
+
+    if start_period is None or end_period is None:
+        figures = [empty_figure("Seleccione un rango de períodos") for _ in range(2)]
+        return ("—", "", "—", "", "—", "", "—", "", empty_figure(), *figures, "", "Estado actual",
+                "Resumen del rango seleccionado", "—", "", "—", "", "—", "")
+
+    start_period, end_period = sorted((int(start_period), int(end_period)))
+
+    try:
+        evolution = get_evolution_filtrado_multiselect(
+            provincias, cantones, parroquias, start_period, end_period, opera_estados, isp_nombres,
+        )
+    except Exception as exc:
+        figures = [empty_figure("Error al consultar PostgreSQL") for _ in range(2)]
+        return ("—", "", "—", "", "—", "", "—", "", empty_figure(), *figures, str(exc), "Estado actual",
+                "Resumen del rango seleccionado", "—", "", "—", "", "—", "")
+
+    if evolution.empty:
+        figures = [empty_figure() for _ in range(2)]
+        return ("—", "", "—", "", "—", "", "—", "", empty_figure(), *figures,
+                "No existen datos para este territorio, período y filtros seleccionados.",
+                "Estado actual", "Resumen del rango seleccionado", "—", "", "—", "", "—", "")
+
+    evolution = evolution.copy()
+    evolution["periodo"] = pd.to_datetime(evolution["periodo"])
+    for columna in ["total_lineas", "lineas_reportadas", "numero_prestadores",
+                    "diferencia_mensual_lineas", "variacion_mensual_porcentaje"]:
+        if columna in evolution:
+            evolution[columna] = pd.to_numeric(evolution[columna], errors="coerce")
+
+    latest = evolution.sort_values("periodo_id").iloc[-1]
+    latest_label = str(latest.get("anio_mes", ""))
+
+    lines_value = format_number(latest.get("lineas_reportadas"))
+    lines_note = f"Período {latest_label}"
+
+    providers_value = format_number(latest.get("numero_prestadores"))
+    providers_note = f"Con reporte real en {latest_label}"
+
+    change_value = format_signed(latest.get("diferencia_mensual_lineas"))
+    change_note = (
+        f"{format_signed(latest.get('variacion_mensual_porcentaje'), 2, '%')} respecto al mes anterior "
+        "(sobre reportadas)"
+    )
+
+    # "Dejaron de reportar este mes" y su sparkline comparten la MISMA
+    # consulta (get_churn_history_multiselect) -- el valor puntual es
+    # simplemente la última fila de esa misma serie, no una consulta
+    # aparte (ver services/queries.py para por qué no puede reusar
+    # get_participation/get_churn_history originales aquí).
+    churn_value, churn_note, churn_spark = "—", "", empty_figure()
+    try:
+        periodo_actual_id = int(latest["periodo_id"])
+        churn_hist = get_churn_history_multiselect(provincias, cantones, parroquias, periodo_actual_id, meses=12)
+        if not churn_hist.empty:
+            fila_actual = churn_hist[churn_hist["periodo_id"] == periodo_actual_id]
+            if not fila_actual.empty:
+                churn_actual = int(pd.to_numeric(fila_actual.iloc[0]["churn"], errors="coerce") or 0)
+                fecha_mes_anterior = (latest["periodo"] - pd.DateOffset(months=1)).date().isoformat()
+                periodo_anterior_id = resolve_period_id(fecha_mes_anterior)
+                activos_anterior = (
+                    get_provider_count_in_range_multiselect(
+                        provincias, cantones, parroquias, periodo_anterior_id, periodo_anterior_id,
+                    ) if periodo_anterior_id is not None else 0
+                )
+                churn_value = format_number(churn_actual)
+                churn_note = f"De {format_number(activos_anterior)} activos en el mes anterior"
+            churn_spark = build_sparkline_figure(
+                pd.to_numeric(churn_hist["churn"], errors="coerce").tolist(), PALETTE["red"],
+            )
+    except Exception:
+        churn_value, churn_note, churn_spark = "—", "No se pudo calcular", empty_figure()
+
+    evolution_ordenada = evolution.sort_values("periodo")
+    lines_variacion_pct = (
+            evolution_ordenada["lineas_reportadas"].pct_change().replace([float("inf"), float("-inf")], None) * 100
+    )
+    lines_combined_fig = build_linked_magnitude_variation_figure(
+        evolution_ordenada["periodo"], evolution_ordenada["lineas_reportadas"], lines_variacion_pct,
+        titulo_magnitud="Cuentas reportadas", titulo_variacion="Variación % (escala log, signo preservado)",
+        etiqueta_absoluta="cuentas", color=PALETTE["blue"], rellenar_area=True,
+    )
+    providers_variacion_pct = (
+            evolution_ordenada["numero_prestadores"].pct_change().replace([float("inf"), float("-inf")], None) * 100
+    )
+    providers_combined_fig = build_linked_magnitude_variation_figure(
+        evolution_ordenada["periodo"], evolution_ordenada["numero_prestadores"], providers_variacion_pct,
+        titulo_magnitud="Prestadores", titulo_variacion="Variación % (escala log, signo preservado)",
+        etiqueta_absoluta="prestadores", color=PALETTE["blue"], rellenar_area=False,
+    )
+
+    filtros_txt = []
+    if provincias or cantones or parroquias:
+        partes = []
+        if provincias:
+            partes.append(f"{len(provincias)} provincia(s)")
+        if cantones:
+            partes.append(f"{len(cantones)} cantón(es)")
+        if parroquias:
+            partes.append(f"{len(parroquias)} parroquia(s)")
+        filtros_txt.append("Territorio: " + ", ".join(partes))
+    else:
+        filtros_txt.append("Territorio: Nacional")
+    if opera_estados:
+        filtros_txt.append(f"Estado: {', '.join(opera_estados)}")
+    if isp_nombres:
+        filtros_txt.append(f"Prestador: {', '.join(isp_nombres)}")
+    message = f"{'; '.join(filtros_txt)} · Último período visible: {latest_label}"
+
+    titulo_estado_actual = f"Estado actual — {latest_label}"
+    primero = evolution.sort_values("periodo_id").iloc[0]
+    rango_desde_label = str(primero.get("anio_mes", ""))
+    rango_hasta_label = latest_label
+    titulo_resumen_rango = f"Resumen del rango seleccionado — {rango_desde_label} a {rango_hasta_label}"
+
+    try:
+        cantidad_rango = get_provider_count_in_range_multiselect(
+            provincias, cantones, parroquias, start_period, end_period,
+        )
+        rango_prestadores_value = format_number(cantidad_rango)
+        rango_prestadores_note = (
+            f"Con al menos un reporte real entre {rango_desde_label} y {rango_hasta_label}. "
+            "No equivale a título habilitante vigente."
+        )
+    except Exception:
+        rango_prestadores_value, rango_prestadores_note = "—", "No se pudo calcular"
+
+    try:
+        resumen = get_reporting_summary_multiselect(
+            provincias, cantones, parroquias, start_period, end_period, opera_estados, isp_nombres,
+        )
+        rango_total_value = format_number(resumen["total_prestadores"])
+        rango_total_note = (
+            f"Con al menos un reporte real, registrados hasta {rango_hasta_label}. "
+            "No incluye a quienes nunca han reportado -- ver la sección de abajo para ese caso."
+        )
+        tasa = resumen["tasa_entrega_porcentaje"]
+        rango_tasa_value = f"{format_number(tasa, 1)}%" if tasa is not None else "—"
+        rango_tasa_note = (
+            f"{format_number(resumen['celdas_reportadas'])} de {format_number(resumen['celdas_esperadas'])} "
+            "meses-prestador con reporte real, contados desde que cumplen un año del título habilitante."
+        )
+    except Exception:
+        rango_total_value, rango_total_note = "—", "No se pudo calcular"
+        rango_tasa_value, rango_tasa_note = "—", "No se pudo calcular"
+
+    return (
+        lines_value, lines_note,
+        providers_value, providers_note,
+        change_value, change_note,
+        churn_value, churn_note, churn_spark,
+        lines_combined_fig, providers_combined_fig,
+        message,
+        titulo_estado_actual, titulo_resumen_rango,
+        rango_prestadores_value, rango_prestadores_note,
+        rango_total_value, rango_total_note,
+        rango_tasa_value, rango_tasa_note,
+    )
 
 
 @callback(

@@ -1497,3 +1497,266 @@ def opciones_geograficas_facetadas(
         {"label": str(fila[columna_nombre]), "value": str(fila[columna_codigo])}
         for _, fila in opciones.iterrows()
     ]
+
+
+# ============================================================
+# Versiones "multiselect" para Control (14-ago-2026)
+# ============================================================
+# Duplican get_evolution_filtrado/get_provider_count_in_range/
+# get_reporting_summary/get_churn_history para el filtro geográfico
+# multi-select e independiente de Control (Provincia/Cantón/Parroquia,
+# SIN Nivel) -- NO reemplazan a las originales, que Evolución sigue
+# usando con su propio modelo de territory_id único + Nivel. Duplicadas a
+# propósito: mismo criterio que lines_territory_filters.py vs
+# node_territory_filters.py -- tocar las funciones originales arriesgaría
+# páginas que ya funcionan en producción por evitar unas líneas repetidas.
+#
+# get_churn_history_multiselect() NO puede reusar
+# mart.vw_dashboard_participacion/fact_participacion_mercado como la
+# original -- esa vista materializada está pre-agregada por territorio_id
+# ÚNICO (join contra bridge_geografia_territorio en tiempo de
+# CONSTRUCCIÓN del mart, no de consulta), no es descomponible a una
+# combinación independiente de Provincia/Cantón/Parroquia. Se recalcula
+# "activo" directo desde mart.fact_lineas_geografia_mes, mismo patrón que
+# get_variacion_mensual_anomala.
+#
+# get_reporting_summary_multiselect() NO incluye la población "nunca han
+# reportado" (parámetro incluir_nunca_reportaron del original) -- Control
+# ya tiene su propia sección dedicada a eso, con más detalle; agregarla
+# aquí también sería el mismo número repetido en la misma página.
+
+@cache.memoize(timeout=300)
+def get_evolution_filtrado_multiselect(
+        provincias: tuple[str, ...],
+        cantones: tuple[str, ...],
+        parroquias: tuple[str, ...],
+        start_period: int,
+        end_period: int,
+        opera_estados: tuple[str, ...] = (),
+        isp_nombres: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    """Ver get_evolution_filtrado() -- misma lógica, filtro geográfico multi-select de Control."""
+    territorio_sql, territorio_params = _lines_territory_clauses("f.geografia_id", provincias, cantones, parroquias)
+    territorio_where = f"AND {territorio_sql}" if territorio_sql else ""
+
+    clauses = ["f.periodo_id BETWEEN :start_period AND :end_period"]
+    params: dict[str, Any] = {"start_period": start_period, "end_period": end_period}
+    params.update(territorio_params)
+    if opera_estados:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
+            "WHERE p.opera_actual ILIKE '%' || estado || '%')"
+        )
+        params["opera_estados"] = list(opera_estados)
+    if isp_nombres:
+        clauses.append("p.isp_nombre = ANY(:isp_nombres)")
+        params["isp_nombres"] = list(isp_nombres)
+
+    df = _read(
+        f"""
+        SELECT
+            f.periodo_id,
+            f.periodo,
+            SUM(f.total_lineas) AS total_lineas,
+            SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas,
+            COUNT(DISTINCT f.prestador_id) FILTER (WHERE f.tiene_reportado) AS numero_prestadores
+        FROM mart.fact_lineas_geografia_mes f
+        JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
+        WHERE {' AND '.join(clauses)}
+          {territorio_where}
+        GROUP BY f.periodo_id, f.periodo
+        ORDER BY f.periodo_id
+        """,
+        params,
+    )
+    if df.empty:
+        return df
+    periods = get_periods()[["periodo_id", "anio_mes"]]
+    df = df.merge(periods, on="periodo_id", how="left")
+    df = df.sort_values("periodo_id").reset_index(drop=True)
+    df["diferencia_mensual_lineas"] = df["lineas_reportadas"].diff()
+    df["variacion_mensual_porcentaje"] = df["lineas_reportadas"].pct_change() * 100
+    return df
+
+
+@cache.memoize(timeout=300)
+def get_provider_count_in_range_multiselect(
+        provincias: tuple[str, ...],
+        cantones: tuple[str, ...],
+        parroquias: tuple[str, ...],
+        start_period: int,
+        end_period: int,
+) -> int:
+    """Ver get_provider_count_in_range() -- misma lógica, filtro geográfico multi-select de Control."""
+    territorio_sql, territorio_params = _lines_territory_clauses("f.geografia_id", provincias, cantones, parroquias)
+    territorio_where = f"AND {territorio_sql}" if territorio_sql else ""
+    params: dict[str, Any] = {"start_period": start_period, "end_period": end_period}
+    params.update(territorio_params)
+    df = _read(
+        f"""
+        SELECT COUNT(DISTINCT f.prestador_id) AS cantidad
+        FROM mart.fact_lineas_geografia_mes f
+        WHERE f.periodo_id BETWEEN :start_period AND :end_period
+          AND f.tiene_reportado = TRUE
+          {territorio_where}
+        """,
+        params,
+    )
+    if df.empty:
+        return 0
+    return int(df.iloc[0]["cantidad"])
+
+
+@cache.memoize(timeout=300)
+def get_reporting_summary_multiselect(
+        provincias: tuple[str, ...],
+        cantones: tuple[str, ...],
+        parroquias: tuple[str, ...],
+        start_period: int,
+        end_period: int,
+        opera_estados: tuple[str, ...] = (),
+        isp_nombres: tuple[str, ...] = (),
+) -> dict[str, float]:
+    """
+    Ver get_reporting_summary() -- misma lógica (incluida la regla del año
+    de gracia), sin la población "nunca han reportado" (ver docstring de
+    esta sección) y con el filtro geográfico multi-select de Control.
+    """
+    territorio_sql, territorio_params = _lines_territory_clauses("f.geografia_id", provincias, cantones, parroquias)
+    territorio_where = f"AND {territorio_sql}" if territorio_sql else ""
+
+    clauses_registro = ["f.periodo_id <= :end_period"]
+    params: dict[str, Any] = {"start_period": start_period, "end_period": end_period}
+    params.update(territorio_params)
+    if opera_estados:
+        clauses_registro.append(
+            "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
+            "WHERE p.opera_actual ILIKE '%' || estado || '%')"
+        )
+        params["opera_estados"] = list(opera_estados)
+    if isp_nombres:
+        clauses_registro.append("p.isp_nombre = ANY(:isp_nombres)")
+        params["isp_nombres"] = list(isp_nombres)
+
+    df = _read(
+        f"""
+        WITH registro_total AS (
+            SELECT DISTINCT f.prestador_id
+            FROM mart.fact_lineas_geografia_mes f
+            JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
+            WHERE {' AND '.join(clauses_registro)}
+              {territorio_where}
+              AND f.tiene_reportado = TRUE
+        ),
+        periodos_rango AS (
+            SELECT periodo_id
+            FROM mart.dim_periodo
+            WHERE periodo_id BETWEEN :start_period AND :end_period
+        ),
+        prestador_con_obligacion AS (
+            SELECT
+                r.prestador_id,
+                CASE
+                    WHEN p.fechapermiso IS NULL THEN NULL
+                    ELSE (
+                        EXTRACT(YEAR FROM (p.fechapermiso + INTERVAL '1 year'))::int * 100
+                        + EXTRACT(MONTH FROM (p.fechapermiso + INTERVAL '1 year'))::int
+                    )
+                END AS periodo_inicio_obligacion
+            FROM registro_total r
+            JOIN mart.dim_prestador p ON p.prestador_id = r.prestador_id
+        ),
+        celdas_esperadas_calc AS (
+            SELECT pco.prestador_id, pr.periodo_id
+            FROM prestador_con_obligacion pco
+            CROSS JOIN periodos_rango pr
+            WHERE pco.periodo_inicio_obligacion IS NULL
+               OR pr.periodo_id >= pco.periodo_inicio_obligacion
+        ),
+        reportes_reales AS (
+            SELECT DISTINCT f.prestador_id, f.periodo_id
+            FROM mart.fact_lineas_geografia_mes f
+            WHERE f.periodo_id BETWEEN :start_period AND :end_period
+              AND f.tiene_reportado = TRUE
+              {territorio_where}
+        )
+        SELECT
+            (SELECT COUNT(*) FROM registro_total) AS total_prestadores,
+            (SELECT COUNT(*) FROM celdas_esperadas_calc) AS celdas_esperadas,
+            (
+                SELECT COUNT(*)
+                FROM celdas_esperadas_calc cec
+                JOIN reportes_reales rr
+                  ON rr.prestador_id = cec.prestador_id AND rr.periodo_id = cec.periodo_id
+            ) AS celdas_reportadas
+        """,
+        params,
+    )
+
+    if df.empty or df.iloc[0]["celdas_esperadas"] in (0, None):
+        return {"total_prestadores": 0, "celdas_esperadas": 0, "celdas_reportadas": 0, "tasa_entrega_porcentaje": None}
+
+    fila = df.iloc[0]
+    tasa = (fila["celdas_reportadas"] / fila["celdas_esperadas"] * 100) if fila["celdas_esperadas"] else None
+    return {
+        "total_prestadores": int(fila["total_prestadores"]),
+        "celdas_esperadas": int(fila["celdas_esperadas"]),
+        "celdas_reportadas": int(fila["celdas_reportadas"]),
+        "tasa_entrega_porcentaje": float(tasa) if tasa is not None else None,
+    }
+
+
+@cache.memoize(timeout=300)
+def get_churn_history_multiselect(
+        provincias: tuple[str, ...],
+        cantones: tuple[str, ...],
+        parroquias: tuple[str, ...],
+        end_period: int,
+        meses: int = 12,
+) -> pd.DataFrame:
+    """
+    Ver get_churn_history() -- NO usa mart.vw_dashboard_participacion (ver
+    docstring de esta sección, esa vista no es descomponible al filtro
+    multi-select de Control). Recalcula "activo" directo desde
+    mart.fact_lineas_geografia_mes, agregado por prestador y mes dentro
+    del territorio elegido, mismo patrón que get_variacion_mensual_anomala.
+    """
+    meses = max(2, int(meses))
+    territorio_sql, territorio_params = _lines_territory_clauses("f.geografia_id", provincias, cantones, parroquias)
+    territorio_where = f"AND {territorio_sql}" if territorio_sql else ""
+    params: dict[str, Any] = {"end_period": end_period}
+    params.update(territorio_params)
+
+    df = _read(
+        f"""
+        WITH ancla AS (
+            SELECT periodo FROM mart.dim_periodo WHERE periodo_id = :end_period
+        ),
+        serie AS (
+            SELECT
+                f.periodo_id,
+                f.prestador_id,
+                (BOOL_OR(f.tiene_reportado) AND SUM(COALESCE(f.lineas_reportadas, 0)) > 0) AS activo
+            FROM mart.fact_lineas_geografia_mes f, ancla
+            WHERE f.periodo BETWEEN (ancla.periodo - INTERVAL '{meses} months') AND ancla.periodo
+              {territorio_where}
+            GROUP BY f.periodo_id, f.prestador_id
+        ),
+        con_lag AS (
+            SELECT
+                periodo_id, prestador_id, activo,
+                LAG(activo) OVER (PARTITION BY prestador_id ORDER BY periodo_id) AS activo_anterior
+            FROM serie
+        )
+        SELECT
+            c.periodo_id,
+            d.anio_mes,
+            COUNT(*) FILTER (WHERE c.activo_anterior = TRUE AND c.activo = FALSE) AS churn
+        FROM con_lag c
+        JOIN mart.dim_periodo d ON d.periodo_id = c.periodo_id
+        GROUP BY c.periodo_id, d.anio_mes
+        ORDER BY c.periodo_id
+        """,
+        params,
+    )
+    return df

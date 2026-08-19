@@ -386,7 +386,8 @@ body {
     grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-h3[id^="evo-titulo-"] {
+h3[id^="evo-titulo-"],
+h3[id^="ctrl-resumen-titulo-"] {
     margin: 24px 0 10px;
     font-size: 15px;
     font-weight: 750;
