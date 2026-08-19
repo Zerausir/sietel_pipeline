@@ -2679,7 +2679,7 @@ COMMENT ON VIEW mart.vw_geometria_territorio_nodo IS
 'Geometría GeoJSON precomputada por nivel geográfico (parroquia/cantón/provincia), para el polígono del mapa de nodos. Cantón y provincia ya vienen disueltas desde mart/cargar_parroquias.py (gdf.dissolve) -- el dashboard solo hace SELECT, nunca une polígonos en tiempo de consulta.';
 
 -- ============================================================
--- 18. RE-OTORGAR ACCESO A dashboard_lector -- sobrevive a la reconstrucción
+-- 18. RE-OTORGAR ACCESO A dashboard_lector Y eda_lector -- sobrevive a la reconstrucción
 -- ============================================================
 -- CRÍTICO: el DROP SCHEMA mart CASCADE del inicio de este archivo borra
 -- TODOS los privilegios existentes sobre el esquema -- incluido el
@@ -2690,9 +2690,18 @@ COMMENT ON VIEW mart.vw_geometria_territorio_nodo IS
 -- 03_ddl_auth.sql a mano -- confirmado como falla real en producción
 -- (29-jul-2026, tras el primer refresco automatizado vía Airflow).
 --
+-- eda_lector agregado aquí el 05-ago-2026 tras repetir EXACTAMENTE el
+-- mismo fallo con el rol de EDA -- sql/05_roles_eda.sql le otorgó acceso
+-- por fuera de este archivo, y el primer refresco de mart posterior lo
+-- dejó sin USAGE ON SCHEMA, igual que le pasó a dashboard_lector antes.
+-- Lección para cualquier rol de lectura futuro sobre mart: el GRANT tiene
+-- que vivir AQUÍ, en este bloque condicional de 02_ddl_mart.sql -- no
+-- alcanza con un script separado que se corre una sola vez.
+--
 -- Condicionado a que el rol ya exista: en una instalación nueva donde
--- 02_ddl_mart.sql corre ANTES de que exista dashboard_lector, este bloque
--- simplemente no hace nada -- no rompe la construcción de mart por eso.
+-- 02_ddl_mart.sql corre ANTES de que exista dashboard_lector o eda_lector,
+-- este bloque simplemente no hace nada para ese rol -- no rompe la
+-- construcción de mart por eso.
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dashboard_lector') THEN
@@ -2700,6 +2709,12 @@ BEGIN
         GRANT SELECT ON ALL TABLES IN SCHEMA mart TO dashboard_lector;
         ALTER DEFAULT PRIVILEGES FOR ROLE mart_user IN SCHEMA mart
             GRANT SELECT ON TABLES TO dashboard_lector;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'eda_lector') THEN
+        GRANT USAGE ON SCHEMA mart TO eda_lector;
+        GRANT SELECT ON ALL TABLES IN SCHEMA mart TO eda_lector;
+        ALTER DEFAULT PRIVILEGES FOR ROLE mart_user IN SCHEMA mart
+            GRANT SELECT ON TABLES TO eda_lector;
     END IF;
 END $$;
 
