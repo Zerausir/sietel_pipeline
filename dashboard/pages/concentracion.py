@@ -27,6 +27,7 @@ from components.ui import (
     style_figure,
 )
 from services.queries import (
+    get_dependencia_geografica_dominante_ausente,
     get_ihh,
     get_ihh_filtrado,
     get_participation,
@@ -109,11 +110,23 @@ def layout():
                 className="chart-grid two",
                 children=[
                     chart_card("Evolución histórica del IHH", "con-ihh-chart",
-                               "Calculado solo sobre prestadores con reporte real cada mes."),
+                               "Calculado solo sobre prestadores con reporte real cada mes.",
+                               note_id="con-ihh-dominante-nota"),
                     chart_card("CR2 y CR4 en el tiempo", "con-cr-chart",
                                "Concentración acumulada de los 2 y 4 principales prestadores -- el IHH resume "
                                "todo el mercado en un número, CR2/CR4 responden una pregunta más concreta: "
                                "¿cuánto controlan los líderes?"),
+                ],
+            ),
+            html.Section(
+                className="chart-grid",
+                children=[
+                    chart_card(
+                        "Dependencia geográfica del prestador ausente", "con-dependencia-geografica-chart",
+                        "Solo aparece cuando el prestador dominante (Nacional) no reportó en el período de "
+                        "participación elegido -- % que representaría su última huella geográfica conocida "
+                        "sobre el total actual de cada provincia, si retomara el reporte.",
+                    ),
                 ],
             ),
             html.Section(
@@ -237,6 +250,8 @@ def update_provider_options(territory_id: str, period_id: int, opera_estados: li
     Output("con-kpi-cr4", "children"),
     Output("con-kpi-cr4-note", "children"),
     Output("con-ihh-chart", "figure"),
+    Output("con-ihh-dominante-nota", "children"),
+    Output("con-dependencia-geografica-chart", "figure"),
     Output("con-cr-chart", "figure"),
     Output("con-participation-chart", "figure"),
     Output("con-contribution-chart", "figure"),
@@ -260,11 +275,12 @@ def update_concentration(
     opera_estados = opera_estados or []
     isp_nombres = isp_nombres or []
 
-    empty_figures = [empty_figure() for _ in range(4)]
+    empty_figures = [empty_figure() for _ in range(5)]
     empty_spark = empty_figure()
     empty_return = (
         "—", "", "—", "", empty_spark, "—", "", "—", "", empty_spark, "—", "", "—", "",
-        *empty_figures, [], "",
+        empty_figures[0], "", empty_figures[1], empty_figures[2], empty_figures[3], empty_figures[4],
+        [], "",
     )
     if not territory_id or None in (start_period, end_period, current_period):
         return empty_return
@@ -340,16 +356,114 @@ def update_concentration(
     cr4_value = f"{format_number(selected_row.get('cr4'), 2)}%"
     cr4_note = "Participación conjunta de los cuatro primeros (sobre el mercado reportado)"
 
+    texto_hover_ihh = [
+        f"{p.strftime('%Y-%m')}<br>IHH: {v:,.0f}" + (
+            f"<br>⚠ {n or 'prestador dominante'} ausente ese mes" if a else ""
+        )
+        for p, v, a, n in zip(
+            ihh["periodo"], ihh["ihh"],
+            ihh["prestador_dominante_ausente"].fillna(False),
+            ihh["prestadores_dominantes_ausentes_nombres"],
+        )
+    ]
     ihh_fig = go.Figure()
     ihh_fig.add_trace(
         go.Scatter(
             x=ihh["periodo"], y=ihh["ihh"], mode="lines+markers", name="IHH",
             line={"color": PALETTE["blue"], "width": 3},
             fill="tozeroy", fillcolor="rgba(20, 100, 244, 0.08)",
+            text=texto_hover_ihh, hovertemplate="%{text}<extra></extra>",
         )
     )
     style_figure(ihh_fig)
     ihh_fig.update_yaxes(title="IHH", rangemode="tozero")
+
+    # CONEXIÓN (14-ago-2026, hallazgo #1 del EDA, marcado ahí como "el más
+    # importante de todo el análisis"): prestador_dominante_ausente ya
+    # llegaba al DataFrame de esta página desde hace semanas (get_ihh hace
+    # SELECT * sobre mart.vw_dashboard_ihh, que la trae desde el parche #08)
+    # -- pero el código de esta página nunca la usaba. Cuando el prestador
+    # líder de un territorio (ej. CNT a nivel Nacional) deja de reportar,
+    # el IHH cae mecánicamente -- no porque el mercado se volvió más
+    # competitivo, sino porque falta quien más pesa. Sin esta marca, ese
+    # tramo del gráfico se lee como una mejora real de competencia.
+    #
+    # SOLO tiene sentido a nivel NACIONAL -- confirmado en sql/08_patch_
+    # fact_ihh_geografico.sql: la columna viene forzada a FALSE en
+    # cualquier otro nivel geográfico (el concepto de "prestador dominante"
+    # está definido y validado solo ahí).
+    tiene_ausencias = ihh["prestador_dominante_ausente"].fillna(False).astype(bool).any()
+    if territory_id == "NACIONAL|ECUADOR" and tiene_ausencias:
+        ihh_ordenado = ihh.sort_values("periodo").reset_index(drop=True)
+        ausente_serie = ihh_ordenado["prestador_dominante_ausente"].fillna(False).astype(bool)
+        # Agrupa períodos CONSECUTIVOS con el mismo valor de "ausente" --
+        # cada cambio de valor (False->True o True->False) incrementa el
+        # número de grupo; permite mostrar un solo rectángulo sombreado por
+        # episodio (ej. "2012-01 a 2015-12"), no un rectángulo por mes.
+        grupo = (ausente_serie != ausente_serie.shift()).cumsum()
+        rangos = (
+            ihh_ordenado.assign(_ausente=ausente_serie, _grupo=grupo)
+            .groupby("_grupo")
+            .agg(inicio=("periodo", "min"), fin=("periodo", "max"), ausente=("_ausente", "first"),
+                 nombres=("prestadores_dominantes_ausentes_nombres", "first"))
+        )
+        rangos = rangos[rangos["ausente"]]
+
+        for _, rango in rangos.iterrows():
+            ihh_fig.add_vrect(
+                x0=rango["inicio"], x1=rango["fin"] + pd.DateOffset(months=1),
+                fillcolor=PALETTE["red"], opacity=0.08, line_width=0,
+            )
+
+        etiquetas_rango = [
+            f"{r['inicio'].strftime('%Y-%m')} a {r['fin'].strftime('%Y-%m')}" for _, r in rangos.iterrows()
+        ]
+        nombres_unicos = sorted({n for n in rangos["nombres"].dropna().unique() if n})
+        dominante_nota = (
+            f"⚠ IHH no comparable en {', '.join(etiquetas_rango)}: "
+            f"{' / '.join(nombres_unicos) if nombres_unicos else 'el prestador líder habitual'} "
+            "no reportó ese período -- la caída del índice refleja su ausencia, no más competencia real."
+        )
+    else:
+        dominante_nota = ""
+
+    # Dependencia geográfica del prestador ausente (hallazgo 9.6 del EDA)
+    # -- generaliza el caso CNT (el EDA hardcodeaba su nombre y un período
+    # fijo '2024-06-01') a cualquier prestador dominante ausente en el
+    # período de PARTICIPACIÓN elegido (current_period, no el rango
+    # histórico completo) -- es una foto de un momento específico, no una
+    # serie de tiempo. Ver services/queries.py:
+    # get_dependencia_geografica_dominante_ausente().
+    ausente_periodo_actual = bool(selected_row.get("prestador_dominante_ausente"))
+    if territory_id == "NACIONAL|ECUADOR" and ausente_periodo_actual:
+        try:
+            dependencia = get_dependencia_geografica_dominante_ausente(current_period)
+        except Exception:
+            dependencia = pd.DataFrame()
+        if dependencia.empty:
+            dependencia_fig = empty_figure(
+                "El prestador ausente no tiene huella geográfica histórica registrada"
+            )
+        else:
+            dependencia = dependencia.sort_values("pct_potencial_subestimado")
+            dependencia_fig = go.Figure(go.Bar(
+                x=dependencia["pct_potencial_subestimado"], y=dependencia["provincia"], orientation="h",
+                marker_color=PALETTE["red"],
+                text=dependencia["cuentas_ausente"],
+                hovertemplate=(
+                    "%{y}<br>Subestimación potencial: %{x}%"
+                    "<br>Cuentas del ausente (último reporte): %{text:,.0f}<extra></extra>"
+                ),
+            ))
+            style_figure(dependencia_fig, height=max(280, 24 * len(dependencia)), hovermode="closest")
+            dependencia_fig.update_xaxes(title="% potencial de subestimación por provincia")
+            dependencia_fig.update_yaxes(title="")
+    else:
+        motivo = (
+            "Este análisis solo aplica a nivel Nacional." if territory_id != "NACIONAL|ECUADOR"
+            else "El prestador dominante sí reportó en el período de participación elegido -- nada que mostrar."
+        )
+        dependencia_fig = empty_figure(motivo)
 
     # CR2/CR4 en el tiempo -- responde una pregunta que el IHH por sí solo
     # no responde directamente ("¿cuánto controlan específicamente los 2 o
@@ -434,7 +548,7 @@ def update_concentration(
         leader_share_value, leader_share_note, leader_share_spark,
         cr2_value, cr2_note,
         cr4_value, cr4_note,
-        ihh_fig, cr_fig, participation_fig, contribution_fig,
+        ihh_fig, dominante_nota, dependencia_fig, cr_fig, participation_fig, contribution_fig,
         grid_rows, message,
     )
 

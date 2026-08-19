@@ -1813,3 +1813,140 @@ def get_churn_history_multiselect(
         params,
     )
     return df
+
+
+# ============================================================
+# Puntos 2.6 y 9.6 del EDA (14-ago-2026): "Universo consolidado de
+# incumplimiento activo" y "dependencia geográfica de prestador
+# dominante ausente" -- información que hasta ahora solo existía en el
+# notebook de análisis, sin ningún equivalente en el dashboard real.
+# ============================================================
+
+def get_universo_incumplimiento_consolidado(
+        opera_estados: tuple[str, ...] = (),
+        isp_nombres: tuple[str, ...] = (),
+) -> dict[str, int]:
+    """
+    Suma "nunca han reportado, activos" (mismo criterio que Control/
+    Evolución -- clasificacion_incumplimiento == 'activo_sin_reportar') +
+    "reportaron y detuvieron, materialmente relevantes" -- sin
+    solapamiento por construcción (mart.vw_prestadores_sin_reportar
+    excluye por definición a cualquiera que aparezca en
+    fact_lineas_geografia_mes).
+
+    "Materialmente relevante" usa el MISMO umbral fijo del EDA (sección
+    2.5), NO el "meses_minimo" ajustable de la sección "Reporte detenido"
+    de Control -- es un criterio de materialidad deliberadamente distinto
+    para este KPI ejecutivo específico: opera_actual == "Opera
+    Normalmente", no cancelado, más de 100.000 cuentas en su historial, y
+    al menos 3 meses sin reportar. Reproduce exactamente 104 + 18 = 122,
+    verificado contra el propio EDA.
+    """
+    detalle_nunca = get_prestadores_nunca_reportaron_detalle(opera_estados, isp_nombres)
+    nunca_reporto = int(
+        (detalle_nunca["clasificacion_incumplimiento"] == "activo_sin_reportar").sum()
+    ) if not detalle_nunca.empty else 0
+
+    detenido = get_prestadores_reporte_detenido_detalle(
+        3, opera_estados=opera_estados, isp_nombres=isp_nombres,
+    )
+    if not detenido.empty:
+        historico = pd.to_numeric(detenido["total_lineas_historico"], errors="coerce")
+        meses = pd.to_numeric(detenido["meses_desde_ultimo_reporte"], errors="coerce")
+        relevantes = detenido[
+            (detenido["opera_actual"] == "Opera Normalmente")
+            & (~detenido["es_cancelado_actual"].astype(bool))
+            & (historico > 100000)
+            & (meses >= 3)
+            ]
+        reporto_y_detuvo = len(relevantes)
+    else:
+        reporto_y_detuvo = 0
+
+    return {
+        "nunca_reporto": nunca_reporto,
+        "reporto_y_detuvo": reporto_y_detuvo,
+        "total": nunca_reporto + reporto_y_detuvo,
+    }
+
+
+@cache.memoize(timeout=300)
+def get_dependencia_geografica_dominante_ausente(periodo_id: int) -> pd.DataFrame:
+    """
+    Generaliza el caso CNT del EDA (sección 9.6, que hardcodeaba el
+    nombre del prestador y el período '2024-06-01' encontrados a mano) a
+    CUALQUIER prestador marcado prestador_dominante_ausente a nivel
+    NACIONAL en el período dado -- para que la métrica siga siendo
+    correcta si CNT retoma el reporte, o si en el futuro otro prestador
+    cae en el mismo patrón.
+
+    Por provincia: cuántas cuentas se reportan HOY (sin el/los prestador
+    ausente, que por definición no está incluido), cuántas reportaba ESE
+    prestador la última vez que sí reportó, y qué % de la suma de ambas
+    representaría si volviera a reportar -- mismo cálculo que el EDA
+    (ultimo_reporte / (lineas_reportadas + ultimo_reporte) * 100), sobre
+    datos vivos, no un snapshot fijo en el código.
+
+    Umbral de dominancia (>=30% de participación histórica a nivel
+    NACIONAL) idéntico al que ya usa mart.fact_ihh_geografico -- no se
+    reinventa aquí, se referencia la misma definición vigente en la base.
+    """
+    return _read(
+        """
+        WITH umbral_dominancia AS (
+            SELECT DISTINCT prestador_id
+            FROM mart.fact_participacion_mercado
+            WHERE participacion_porcentaje >= 30 AND territorio_id = 'NACIONAL|ECUADOR'
+        ),
+        ausentes AS (
+            SELECT ud.prestador_id
+            FROM umbral_dominancia ud
+            WHERE NOT EXISTS (
+                SELECT 1 FROM mart.fact_participacion_mercado fpm
+                WHERE fpm.periodo_id = :periodo_id AND fpm.territorio_id = 'NACIONAL|ECUADOR'
+                  AND fpm.prestador_id = ud.prestador_id AND fpm.tiene_reportado
+            )
+        ),
+        ultimo_periodo_ausente AS (
+            SELECT a.prestador_id, MAX(fpm.periodo_id) AS ultimo_periodo_con_reporte
+            FROM ausentes a
+            JOIN mart.fact_participacion_mercado fpm
+              ON fpm.prestador_id = a.prestador_id AND fpm.territorio_id = 'NACIONAL|ECUADOR'
+             AND fpm.tiene_reportado
+            WHERE fpm.periodo_id < :periodo_id
+            GROUP BY a.prestador_id
+        ),
+        huella_ausente AS (
+            SELECT g.pro_nombre AS provincia, SUM(f.lineas_reportadas) AS cuentas_ausente
+            FROM ultimo_periodo_ausente u
+            JOIN mart.fact_lineas_geografia_mes f
+              ON f.prestador_id = u.prestador_id AND f.periodo_id = u.ultimo_periodo_con_reporte
+            JOIN mart.dim_geografia g ON g.geografia_id = f.geografia_id
+            GROUP BY g.pro_nombre
+        ),
+        totales_actuales AS (
+            SELECT g.pro_nombre AS provincia, SUM(f.lineas_reportadas) AS cuentas_actuales
+            FROM mart.fact_lineas_geografia_mes f
+            JOIN mart.dim_geografia g ON g.geografia_id = f.geografia_id
+            WHERE f.periodo_id = :periodo_id AND f.tiene_reportado = TRUE
+            GROUP BY g.pro_nombre
+        )
+        SELECT
+            COALESCE(t.provincia, h.provincia) AS provincia,
+            COALESCE(t.cuentas_actuales, 0) AS cuentas_actuales,
+            COALESCE(h.cuentas_ausente, 0) AS cuentas_ausente,
+            CASE
+                WHEN (COALESCE(t.cuentas_actuales, 0) + COALESCE(h.cuentas_ausente, 0)) > 0
+                THEN ROUND(
+                    100.0 * COALESCE(h.cuentas_ausente, 0)
+                    / (COALESCE(t.cuentas_actuales, 0) + COALESCE(h.cuentas_ausente, 0)), 1
+                )
+                ELSE 0
+            END AS pct_potencial_subestimado
+        FROM totales_actuales t
+        FULL OUTER JOIN huella_ausente h ON h.provincia = t.provincia
+        WHERE COALESCE(h.cuentas_ausente, 0) > 0
+        ORDER BY pct_potencial_subestimado DESC
+        """,
+        {"periodo_id": periodo_id},
+    )

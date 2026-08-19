@@ -524,17 +524,22 @@ def register_excel_download_callback(grid_id: str, filename: str) -> None:
         return dcc.send_data_frame(df.to_excel, filename, index=False, engine="openpyxl")
 
 
-def chart_card(title: str, graph_id: str, subtitle: str | None = None) -> html.Div:
+def chart_card(title: str, graph_id: str, subtitle: str | None = None, note_id: str | None = None) -> html.Div:
     header: list[Any] = [html.H3(title, className="chart-title")]
     if subtitle:
         header.append(html.P(subtitle, className="chart-subtitle"))
-    return html.Div(
-        className="chart-card",
-        children=[
-            html.Div(header, className="chart-header"),
-            dcc.Loading(dcc.Graph(id=graph_id, config={"displaylogo": False}), type="circle"),
-        ],
-    )
+    children: list[Any] = [
+        html.Div(header, className="chart-header"),
+        dcc.Loading(dcc.Graph(id=graph_id, config={"displaylogo": False}), type="circle"),
+    ]
+    if note_id:
+        # Nota dinámica bajo el gráfico -- distinta de "subtitle" (fijo,
+        # escrito una vez en el layout): esta se actualiza por callback,
+        # para advertencias que dependen de los datos del período/territorio
+        # elegido (ej. "prestador dominante ausente" en el IHH). Vacía por
+        # defecto -- el propio callback decide cuándo mostrar contenido.
+        children.append(html.Div(id=note_id, className="chart-note"))
+    return html.Div(className="chart-card", children=children)
 
 
 def page_header(title: str, subtitle: str) -> html.Div:

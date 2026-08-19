@@ -58,7 +58,7 @@ from services.queries import (
     get_churn_history_multiselect, get_evolution_filtrado_multiselect, get_operation_states, get_periods,
     get_prestadores_nunca_reportaron_detalle, get_prestadores_reporte_detenido_detalle,
     get_provider_count_in_range_multiselect, get_provider_options, get_reporting_summary_multiselect,
-    get_variacion_mensual_anomala, resolve_period_id,
+    get_universo_incumplimiento_consolidado, get_variacion_mensual_anomala, resolve_period_id,
 )
 
 register_page(__name__, path="/sai/control", name="Control", order=4)
@@ -274,6 +274,33 @@ def layout():
                         style={"height": "420px", "width": "100%"},
                     ),
                     excel_download_button("ctrl-detenido-grid"),
+                ],
+            ),
+
+            # Universo consolidado (14-ago-2026, hallazgo 2.6 del EDA) --
+            # suma "nunca reportaron, activos" (arriba) + "reportaron y
+            # detuvieron, materialmente relevantes" (justo arriba de esto)
+            # -- sin este KPI, un analista tendría que sumar los dos
+            # números a mano para responder "¿cuál es mi universo TOTAL de
+            # incumplimiento activo hoy?". Umbral de materialidad para la
+            # segunda mitad DISTINTO del "meses_minimo" ajustable de
+            # arriba -- ver services/queries.py:get_universo_incumplimiento_consolidado.
+            html.H3("Universo consolidado de incumplimiento activo", style={"marginTop": "28px"}),
+            html.P(
+                "Nunca han reportado (activo, arriba) + reportaron y detuvieron (materialmente "
+                "relevante: opera normalmente, no cancelado, más de 100.000 cuentas históricas, "
+                "3+ meses sin reportar -- umbral fijo, distinto del ajustable de la sección de "
+                "arriba). Sin solapamiento entre ambos grupos por construcción.",
+                className="chart-subtitle",
+            ),
+            html.Section(
+                className="kpi-grid three",
+                children=[
+                    kpi_card("Nunca reportaron (activo)", "ctrl-universo-kpi-nunca",
+                             "ctrl-universo-kpi-nunca-note"),
+                    kpi_card("Reportaron y detuvieron (relevante)", "ctrl-universo-kpi-detenido",
+                             "ctrl-universo-kpi-detenido-note"),
+                    kpi_card("Universo total", "ctrl-universo-kpi-total", "ctrl-universo-kpi-total-note"),
                 ],
             ),
 
@@ -641,6 +668,35 @@ def update_nunca_reportaron(opera_estados, isp_nombres):
         format_number(zona_gris), "Estado ambiguo en 'opera' -- requiere revisión caso por caso",
         format_number(total), "Total de prestadores con título habilitante y cero reportes en toda su historia",
         nunca_fig, clean_records(df),
+    )
+
+
+@callback(
+    Output("ctrl-universo-kpi-nunca", "children"),
+    Output("ctrl-universo-kpi-nunca-note", "children"),
+    Output("ctrl-universo-kpi-detenido", "children"),
+    Output("ctrl-universo-kpi-detenido-note", "children"),
+    Output("ctrl-universo-kpi-total", "children"),
+    Output("ctrl-universo-kpi-total-note", "children"),
+    Input("ctrl-opera-estado", "value"),
+    Input("ctrl-isp-nombre", "value"),
+)
+def update_universo_consolidado(opera_estados, isp_nombres):
+    """Hallazgo 2.6 del EDA -- ver services/queries.py:get_universo_incumplimiento_consolidado."""
+    try:
+        resumen = get_universo_incumplimiento_consolidado(tuple(opera_estados or ()), tuple(isp_nombres or ()))
+    except Exception as exc:
+        vacio = ("—", f"No se pudo calcular: {exc}")
+        return (*vacio, *vacio, *vacio)
+
+    return (
+        format_number(resumen["nunca_reporto"]),
+        "Mismo criterio que 'Activo sin reportar' arriba.",
+        format_number(resumen["reporto_y_detuvo"]),
+        "Opera normalmente, no cancelado, más de 100.000 cuentas históricas, 3+ meses sin reportar.",
+        format_number(resumen["total"]),
+        "Sin solapamiento entre ambos grupos -- quien nunca reportó, por definición, no puede "
+        "aparecer también en 'reporte detenido'.",
     )
 
 

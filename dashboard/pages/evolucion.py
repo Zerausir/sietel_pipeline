@@ -31,7 +31,7 @@ from services.queries import (
     get_evolution_filtrado,
     get_participation,
     get_periods,
-    get_prestadores_sin_reportar,
+    get_prestadores_nunca_reportaron_detalle,
     get_provider_count_in_range,
     get_reporting_summary,
     get_velocities,
@@ -416,11 +416,25 @@ def update_evolution(
 
     if territory_id == "NACIONAL|ECUADOR":
         try:
-            nunca_reportaron_value = format_number(get_prestadores_sin_reportar(opera_estados, isp_nombres))
+            # CORRECCIÓN (14-ago-2026, hallazgo #2 del EDA): antes esta
+            # tarjeta mostraba get_prestadores_sin_reportar() -- el
+            # universo CRUDO de mart.vw_prestadores_sin_reportar (285),
+            # sin aplicar ninguna clasificación. Control, en el mismo
+            # concepto, sí aplica la clasificación de tres vías
+            # (activo_sin_reportar/no_operativo/zona_gris) y muestra 104
+            # como "el caso de incumplimiento real" -- mismo dato, dos
+            # criterios distintos según la página. Se unifica aquí: esta
+            # tarjeta ahora cuenta lo mismo que "Activo sin reportar" en
+            # Control (título vigente, opera, cero reportes), no el bruto.
+            detalle_nunca = get_prestadores_nunca_reportaron_detalle(tuple(opera_estados), tuple(isp_nombres))
+            activo_sin_reportar = int(
+                (detalle_nunca["clasificacion_incumplimiento"] == "activo_sin_reportar").sum()
+            ) if not detalle_nunca.empty else 0
+            nunca_reportaron_value = format_number(activo_sin_reportar)
             nunca_reportaron_note = (
-                "Título habilitante otorgado, cero reportes en toda su historia. "
-                "Solo disponible a nivel Nacional -- SIETEL no registra la geografía "
-                "de un prestador que nunca llegó a reportar."
+                "Título vigente, opera, cero reportes en toda su historia -- el caso de incumplimiento "
+                "real (excluye cancelados/revocados y casos administrativamente ambiguos). Ver Control "
+                "para el desglose completo por clasificación."
             )
         except Exception:
             nunca_reportaron_value, nunca_reportaron_note = "—", "No se pudo calcular"
