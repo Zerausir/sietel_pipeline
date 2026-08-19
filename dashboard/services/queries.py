@@ -488,22 +488,6 @@ def get_evolution_filtrado(
         """,
         params,
     )
-    # DIAGNÓSTICO TEMPORAL (15-ago-2026) -- Iván reporta que filtrar por
-    # "1000TEL CIA. LTDA." en Evolución no cambia los datos (sigue
-    # mostrando el total sin filtrar), pero SÍ funciona con "MEGADATOS
-    # S.A." y con la misma consulta corrida a mano contra la base. Esto
-    # imprime a stdout (visible en `docker logs`) si la función REALMENTE
-    # se ejecuta y qué devuelve -- si este print nunca aparece al elegir
-    # "1000TEL CIA. LTDA.", es un cache hit de Flask-Caching (SimpleCache,
-    # por proceso -- 2 workers de gunicorn) devolviendo un resultado
-    # viejo sin volver a correr la consulta. Si SÍ aparece con los datos
-    # correctos, el problema está más adelante (en cómo evolucion.py usa
-    # el resultado), no aquí. QUITAR una vez diagnosticado.
-    print(
-        f"[DEBUG get_evolution_filtrado] territory_id={territory_id!r} isp_nombres={isp_nombres!r} "
-        f"filas_resultado={len(df)} suma_lineas_reportadas={df['lineas_reportadas'].sum() if not df.empty else 0}",
-        flush=True,
-    )
 
     if df.empty:
         return df

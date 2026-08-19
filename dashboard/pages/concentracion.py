@@ -301,6 +301,25 @@ def update_concentration(
         values[-1] = str(exc)
         return tuple(values)
 
+    if not ihh.empty and "prestador_dominante_ausente" not in ihh.columns:
+        # CORRECCIÓN (19-ago-2026): bug real en producción, confirmado con
+        # "1000TEL CIA. LTDA." -- get_ihh_filtrado() (recalcula el IHH EN
+        # VIVO cuando hay Estado/Prestador elegido) nunca tuvo estas dos
+        # columnas -- solo existen en mart.vw_dashboard_ihh, que get_ihh()
+        # (sin filtros) sí consulta directamente. El código de abajo las
+        # asume presentes sin importar la ruta, y con "hay_filtros=True"
+        # lanzaba KeyError, tumbando el callback completo (Dash no
+        # actualiza nada cuando un callback falla -- por eso el filtro
+        # "parecía" no hacer nada). Además, conceptualmente: una vez que
+        # se filtra a un prestador específico, "¿está ausente el
+        # prestador dominante del mercado completo?" deja de tener una
+        # respuesta clara -- se completan como ausentes por defecto
+        # (False) y la sección de dependencia geográfica simplemente no
+        # aplica en esta ruta, sin intentar replicar esa lógica en vivo.
+        ihh = ihh.copy()
+        ihh["prestador_dominante_ausente"] = False
+        ihh["prestadores_dominantes_ausentes_nombres"] = None
+
     if ihh.empty:
         values = list(empty_return)
         values[-1] = "No existen datos de IHH para los filtros seleccionados."

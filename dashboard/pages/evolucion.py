@@ -292,7 +292,8 @@ def update_evolution(
     # pct_change() directo sobre esa serie ya filtrada es automáticamente
     # consistente con la metodología del proyecto.
     lines_variacion_pct = (
-            evolution_ordenada["lineas_reportadas"].pct_change().replace([float("inf"), float("-inf")], None) * 100
+            evolution_ordenada["lineas_reportadas"].pct_change().replace([float("inf"), float("-inf")],
+                                                                         float("nan")) * 100
     )
     lines_combined_fig = build_linked_magnitude_variation_figure(
         evolution_ordenada["periodo"], evolution_ordenada["lineas_reportadas"], lines_variacion_pct,
@@ -301,7 +302,8 @@ def update_evolution(
     )
 
     providers_variacion_pct = (
-            evolution_ordenada["numero_prestadores"].pct_change().replace([float("inf"), float("-inf")], None) * 100
+            evolution_ordenada["numero_prestadores"].pct_change().replace([float("inf"), float("-inf")],
+                                                                          float("nan")) * 100
     )
     providers_combined_fig = build_linked_magnitude_variation_figure(
         evolution_ordenada["periodo"], evolution_ordenada["numero_prestadores"], providers_variacion_pct,

@@ -114,8 +114,24 @@ def transformar_signed_log(valores: pd.Series) -> pd.Series:
     (meses con caída). Usada por primera vez en Control (13-ago-2026,
     "Variación en el tiempo"), extraída aquí para no triplicar la misma
     lógica cuando Evolución la necesitó también.
+
+    CORRECCIÓN (19-ago-2026): bug real en producción, no hipotético --
+    confirmado con "1000TEL CIA. LTDA." (prestador chico, con una
+    transición real de 0 a un valor positivo en su historial). Quien
+    llama a esta función solía limpiar +inf/-inf con
+    ".replace([inf, -inf], None)" -- reemplazar por el objeto None de
+    Python (no float("nan")) en una serie numérica la convierte a dtype
+    "object", mezclando None con floats; np.sign() no puede comparar eso
+    y lanza "TypeError: unorderable types for comparison". Como Dash NO
+    actualiza la pantalla cuando un callback lanza una excepción, el
+    síntoma visible era "el filtro no cambia nada" -- en realidad la
+    consulta sí filtraba bien, la página se caía silenciosamente después.
+    pd.to_numeric() aquí es la segunda capa de defensa: sin importar lo
+    que le llegue (None, object dtype, strings numéricos), esta función
+    ya no vuelve a fallar por el tipo de dato.
     """
-    return np.sign(valores) * np.log10(1 + valores.abs())
+    valores_numericos = pd.to_numeric(valores, errors="coerce")
+    return np.sign(valores_numericos) * np.log10(1 + valores_numericos.abs())
 
 
 def signed_log_tickvals(valores_transformados: pd.Series) -> tuple[list[float], list[str], list[float]]:

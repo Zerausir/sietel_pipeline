@@ -499,7 +499,8 @@ def update_resumen(seleccion, start_period, end_period, opera_estados, isp_nombr
 
     evolution_ordenada = evolution.sort_values("periodo")
     lines_variacion_pct = (
-            evolution_ordenada["lineas_reportadas"].pct_change().replace([float("inf"), float("-inf")], None) * 100
+            evolution_ordenada["lineas_reportadas"].pct_change().replace([float("inf"), float("-inf")],
+                                                                         float("nan")) * 100
     )
     lines_combined_fig = build_linked_magnitude_variation_figure(
         evolution_ordenada["periodo"], evolution_ordenada["lineas_reportadas"], lines_variacion_pct,
@@ -507,7 +508,8 @@ def update_resumen(seleccion, start_period, end_period, opera_estados, isp_nombr
         etiqueta_absoluta="cuentas", color=PALETTE["blue"], rellenar_area=True,
     )
     providers_variacion_pct = (
-            evolution_ordenada["numero_prestadores"].pct_change().replace([float("inf"), float("-inf")], None) * 100
+            evolution_ordenada["numero_prestadores"].pct_change().replace([float("inf"), float("-inf")],
+                                                                          float("nan")) * 100
     )
     providers_combined_fig = build_linked_magnitude_variation_figure(
         evolution_ordenada["periodo"], evolution_ordenada["numero_prestadores"], providers_variacion_pct,
