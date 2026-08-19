@@ -1616,16 +1616,31 @@ def get_reporting_summary_multiselect(
         end_period: int,
         opera_estados: tuple[str, ...] = (),
         isp_nombres: tuple[str, ...] = (),
+        incluir_nunca_reportaron: bool = False,
 ) -> dict[str, float]:
     """
     Ver get_reporting_summary() -- misma lógica (incluida la regla del año
-    de gracia), sin la población "nunca han reportado" (ver docstring de
-    esta sección) y con el filtro geográfico multi-select de Control.
+    de gracia y la fusión opcional con "nunca han reportado"), con el
+    filtro geográfico multi-select de Control.
+
+    CORRECCIÓN (14-ago-2026): la primera versión de esta función omitía
+    por completo la fusión con incluir_nunca_reportaron -- confirmado en
+    producción: con Control sin ningún territorio elegido (equivalente a
+    "Nacional"), "Total de prestadores" mostraba 1.369 y Evolución (mismo
+    filtro) mostraba 1.654 -- la diferencia exacta, 285, es el propio
+    "Total" de la sección "Nunca han reportado" que ya existe más abajo
+    en esta misma página. No es un cálculo distinto entre páginas, era
+    lógica faltante. `incluir_nunca_reportaron` sigue sin exponerse como
+    tarjeta KPI aparte en el bloque duplicado (esa decisión no cambia,
+    Control ya tiene su propia sección con más detalle) -- solo se
+    restaura su efecto en estos dos números, para que coincidan con
+    Evolución bajo el mismo filtro.
     """
     territorio_sql, territorio_params = _lines_territory_clauses("f.geografia_id", provincias, cantones, parroquias)
     territorio_where = f"AND {territorio_sql}" if territorio_sql else ""
 
     clauses_registro = ["f.periodo_id <= :end_period"]
+    clauses_nunca = ["1 = 1"]
     params: dict[str, Any] = {"start_period": start_period, "end_period": end_period}
     params.update(territorio_params)
     if opera_estados:
@@ -1633,10 +1648,24 @@ def get_reporting_summary_multiselect(
             "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
             "WHERE p.opera_actual ILIKE '%' || estado || '%')"
         )
+        clauses_nunca.append(
+            "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
+            "WHERE v.opera ILIKE '%' || estado || '%')"
+        )
         params["opera_estados"] = list(opera_estados)
     if isp_nombres:
         clauses_registro.append("p.isp_nombre = ANY(:isp_nombres)")
+        clauses_nunca.append("v.isp_nombre = ANY(:isp_nombres)")
         params["isp_nombres"] = list(isp_nombres)
+
+    sql_nunca_reportaron = (
+        "SELECT peva_codigo AS prestador_id, fechapermiso FROM mart.vw_prestadores_sin_reportar v WHERE 1 = 0"
+    )
+    if incluir_nunca_reportaron:
+        sql_nunca_reportaron = (
+            f"SELECT v.peva_codigo AS prestador_id, v.fechapermiso "
+            f"FROM mart.vw_prestadores_sin_reportar v WHERE {' AND '.join(clauses_nunca)}"
+        )
 
     df = _read(
         f"""
@@ -1647,6 +1676,9 @@ def get_reporting_summary_multiselect(
             WHERE {' AND '.join(clauses_registro)}
               {territorio_where}
               AND f.tiene_reportado = TRUE
+        ),
+        nunca_reportaron AS (
+            {sql_nunca_reportaron}
         ),
         periodos_rango AS (
             SELECT periodo_id
@@ -1666,12 +1698,31 @@ def get_reporting_summary_multiselect(
             FROM registro_total r
             JOIN mart.dim_prestador p ON p.prestador_id = r.prestador_id
         ),
+        nunca_con_obligacion AS (
+            SELECT
+                n.prestador_id,
+                CASE
+                    WHEN n.fechapermiso IS NULL THEN NULL
+                    ELSE (
+                        EXTRACT(YEAR FROM (n.fechapermiso + INTERVAL '1 year'))::int * 100
+                        + EXTRACT(MONTH FROM (n.fechapermiso + INTERVAL '1 year'))::int
+                    )
+                END AS periodo_inicio_obligacion
+            FROM nunca_reportaron n
+        ),
         celdas_esperadas_calc AS (
             SELECT pco.prestador_id, pr.periodo_id
             FROM prestador_con_obligacion pco
             CROSS JOIN periodos_rango pr
             WHERE pco.periodo_inicio_obligacion IS NULL
                OR pr.periodo_id >= pco.periodo_inicio_obligacion
+        ),
+        celdas_esperadas_nunca AS (
+            SELECT nco.prestador_id, pr.periodo_id
+            FROM nunca_con_obligacion nco
+            CROSS JOIN periodos_rango pr
+            WHERE nco.periodo_inicio_obligacion IS NULL
+               OR pr.periodo_id >= nco.periodo_inicio_obligacion
         ),
         reportes_reales AS (
             SELECT DISTINCT f.prestador_id, f.periodo_id
@@ -1681,8 +1732,10 @@ def get_reporting_summary_multiselect(
               {territorio_where}
         )
         SELECT
-            (SELECT COUNT(*) FROM registro_total) AS total_prestadores,
-            (SELECT COUNT(*) FROM celdas_esperadas_calc) AS celdas_esperadas,
+            (SELECT COUNT(*) FROM registro_total) + (SELECT COUNT(*) FROM nunca_reportaron)
+                AS total_prestadores,
+            (SELECT COUNT(*) FROM celdas_esperadas_calc) + (SELECT COUNT(*) FROM celdas_esperadas_nunca)
+                AS celdas_esperadas,
             (
                 SELECT COUNT(*)
                 FROM celdas_esperadas_calc cec
