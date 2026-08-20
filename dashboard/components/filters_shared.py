@@ -18,6 +18,21 @@ Dos responsabilidades separadas a propósito, nunca en el mismo callback:
    (20-ago-2026, ampliado desde el alcance anterior -- antes solo viajaba
    entre Evolución y Concentración). El mismo dcc.Store "shared-filters"
    de siempre (definido en app.py), con más páginas leyendo/escribiendo.
+
+CORRECCIÓN (20-ago-2026, confirmado con logging de producción): Estado de
+operación persistía correctamente al cambiar de página, pero Prestador
+volvía a "Todos". Causa real: al navegar a una página nueva, Dash dispara
+guardar_filtros() con el valor [] recién montado del layout ANTES de que
+la restauración termine su consulta a PostgreSQL (get_full_provider_
+options) -- ese disparo "fantasma" del montaje podía llegar DESPUÉS del
+resultado correcto de la restauración y pisarlo. Estado de operación casi
+nunca lo sufría porque su parte de la restauración es puramente
+sincrónica (solo lee un diccionario ya en memoria); Prestador, que sí
+depende de una consulta real, sí. La solución: un Store "armado" por
+página que solo se pone en True cuando restaurar_filtros() ya corrió --
+guardar_filtros() se queda callado (no_update) hasta entonces, sin
+importar cuántas veces se dispare de más el disparo fantasma ni en qué
+orden llegue.
 """
 from __future__ import annotations
 
@@ -26,6 +41,19 @@ from typing import Callable
 from dash import Input, Output, State, callback, dcc, html, no_update
 
 from services.queries import get_operation_states, get_provider_options
+
+
+def sync_armado_store(prefix: str) -> dcc.Store:
+    """
+    Un Store booleano por página, en False hasta que TANTO
+    restaurar_opera_estado como restaurar_isp_nombre hayan corrido al
+    menos una vez -- ver el docstring del módulo para el porqué completo.
+    Debe incluirse en el layout() de cada página que llame a
+    register_universal_opera_isp_sync() (shared_filters_layout() ya lo
+    incluye para Evolución/Concentración; Control, Mapa de nodos y
+    Discrepancias lo agregan a mano en su propio layout()).
+    """
+    return dcc.Store(id=f"{prefix}-sync-armado", data=False)
 
 
 def shared_filters_layout(prefix: str) -> html.Div:
@@ -63,6 +91,7 @@ def shared_filters_layout(prefix: str) -> html.Div:
                     ),
                 ],
             ),
+            sync_armado_store(prefix),
         ],
     )
 
@@ -101,7 +130,9 @@ def register_universal_opera_isp_sync(prefix: str, get_full_provider_options: Ca
     (20-ago-2026, a pedido del usuario: "quiero que Estado/Prestador sea
     un solo estado universal compartido entre los 5 módulos"). Se llama
     UNA VEZ por página, con los ids "{prefix}-opera-estado"/
-    "{prefix}-isp-nombre" que esa página ya usa.
+    "{prefix}-isp-nombre" que esa página ya usa -- y esa página DEBE
+    incluir sync_armado_store(prefix) en su layout() (ver docstring de esa
+    función).
 
     `get_full_provider_options` es una función SIN argumentos que
     devuelve la lista COMPLETA (nacional, sin acotar por territorio ni
@@ -113,82 +144,80 @@ def register_universal_opera_isp_sync(prefix: str, get_full_provider_options: Ca
     corrigió en node_territory_filters.py se evita aquí desde el diseño,
     no reapareció por descuido).
 
-    Dos callbacks separados para el valor de Estado y de Prestador, más
-    uno de escritura -- nunca un callback que lea Y escriba el mismo
-    Store en la misma dirección (ver el docstring de
-    register_shared_period_sync en components/ui.py para la explicación
-    completa de por qué esto es obligatorio, no una preferencia de
-    estilo).
+    CORRECCIÓN (20-ago-2026, confirmado con logging real de producción):
+    la primera versión tenía DOS callbacks de restauración separados
+    (uno por campo), cada uno escribiendo a "{prefix}-sync-armado" con
+    allow_duplicate=True -- pero Dash exige prevent_initial_call=True en
+    cualquier callback con una salida allow_duplicate, y el valor especial
+    prevent_initial_call="initial_duplicate" está reportado como roto por
+    callback individual (se comporta como True igual, bloqueando el
+    disparo inicial que la restauración necesita -- ver
+    github.com/plotly/dash/issues/2974). Eso habría dejado la
+    restauración completamente muerta, un problema peor que el que se
+    quería corregir.
+
+    La solución real: UN SOLO callback que restaura los dos campos Y
+    arma el candado, sin ninguna salida duplicada en ningún lado. Se
+    ejecuta de principio a fin en el servidor antes de devolver nada --
+    aunque get_full_provider_options() tarde un round-trip real a
+    PostgreSQL, esa espera ocurre DENTRO de la misma llamada a la función,
+    nunca en un callback aparte -- así que cuando el candado pasa a True,
+    los dos valores YA están aplicados, sin ninguna ventana intermedia
+    donde uno esté listo y el otro no.
+
+    guardar_filtros() sigue exactamente igual que antes: se queda callado
+    (no_update) mientras el candado no esté armado -- así, cualquier
+    disparo "fantasma" del montaje de la página (el [] por defecto del
+    layout, ANTES de que este callback termine) nunca llega a pisar nada
+    en el store compartido, sin importar cuántas veces se dispare de
+    más ni en qué orden.
     """
 
     @callback(
         Output(f"{prefix}-opera-estado", "value"),
+        Output(f"{prefix}-isp-nombre", "value"),
+        Output(f"{prefix}-sync-armado", "data"),
         Input("shared-filters", "modified_timestamp"),
         State("shared-filters", "data"),
         State(f"{prefix}-opera-estado", "value"),
-    )
-    def restaurar_opera_estado(_ts, shared_data, valor_actual):
-        if valor_actual:
-            # Ya hay algo elegido en ESTA página -- no lo pisa. En la
-            # práctica esto solo importa dentro de la misma carga (Dash
-            # Pages destruye y reconstruye el árbol de cada página al
-            # navegar, así que un valor "ya elegido" en una carga nueva
-            # siempre es el [] por defecto del layout, nunca algo viejo).
-            return no_update
-        return (shared_data or {}).get("opera_estados", [])
-
-    @callback(
-        Output(f"{prefix}-isp-nombre", "value"),
-        Input("shared-filters", "modified_timestamp"),
-        State("shared-filters", "data"),
         State(f"{prefix}-isp-nombre", "value"),
     )
-    def restaurar_isp_nombre(_ts, shared_data, valor_actual):
-        if valor_actual:
-            print(f"[DEBUG {prefix}] restaurar_isp_nombre: ya hay valor propio ({valor_actual!r}), no pisa", flush=True)
-            return no_update
-        deseados = (shared_data or {}).get("isp_nombres", [])
-        # DIAGNÓSTICO TEMPORAL (20-ago-2026) -- Iván reporta que Estado de
-        # operación sí persiste al cambiar de pestaña, pero Prestador no
-        # (vuelve a "Todos"). Diferencia estructural real entre ambos
-        # callbacks: restaurar_opera_estado es puramente sincrónico (solo
-        # lee un diccionario ya en memoria); este SÍ depende de una
-        # consulta real a PostgreSQL (get_full_provider_options) sin
-        # ningún manejo de excepción -- si esa consulta falla o el store
-        # llega vacío en este instante, el callback completo puede
-        # fallar/no actualizar nada, dejando el valor en el [] por
-        # defecto del layout ("Todos"). Este print + try/except aísla
-        # exactamente cuál de los dos es. QUITAR una vez diagnosticado.
-        try:
+    def restaurar_filtros(_ts, shared_data, opera_actual, isp_actual):
+        shared_data = shared_data or {}
+
+        opera_resultado = no_update if opera_actual else shared_data.get("opera_estados", [])
+
+        if isp_actual:
+            isp_resultado = no_update
+        else:
+            deseados = shared_data.get("isp_nombres", [])
             opciones_completas = get_full_provider_options()
             valores_validos = {o["value"] for o in opciones_completas}
-            resultado = [v for v in deseados if v in valores_validos]
-            print(
-                f"[DEBUG {prefix}] restaurar_isp_nombre: deseados={deseados!r} "
-                f"opciones_completas_count={len(opciones_completas)} resultado={resultado!r}",
-                flush=True,
-            )
-            return resultado
-        except Exception as exc:
-            print(f"[DEBUG {prefix}] restaurar_isp_nombre: EXCEPCION -> {type(exc).__name__}: {exc}", flush=True)
-            raise
+            isp_resultado = [v for v in deseados if v in valores_validos]
+
+        return opera_resultado, isp_resultado, True
 
     @callback(
         Output("shared-filters", "data", allow_duplicate=True),
         Input(f"{prefix}-opera-estado", "value"),
         Input(f"{prefix}-isp-nombre", "value"),
+        State(f"{prefix}-sync-armado", "data"),
         prevent_initial_call=True,
         # allow_duplicate=True: las 5 páginas registran esta misma salida
         # -- solo la página visible tiene sus Inputs "vivos" en un momento
-        # dado, así que en la práctica nunca compiten entre sí.
+        # dado, así que en la práctica nunca compiten entre sí. Esta SÍ
+        # necesita allow_duplicate (5 callbacks distintos, cada uno de una
+        # página, apuntan al mismo "shared-filters.data"), pero como es la
+        # ÚNICA salida a ese destino en cada uno de estos 5 callbacks
+        # (nunca dos salidas al mismo lugar EN EL MISMO callback), no cae
+        # en el bug de "initial_duplicate" -- prevent_initial_call=True
+        # normal es suficiente y correcto aquí.
     )
-    def guardar_filtros(opera_estados: list[str] | None, isp_nombres: list[str] | None):
-        # DIAGNÓSTICO TEMPORAL (20-ago-2026) -- ver restaurar_isp_nombre.
-        # Si esto se dispara con isp_nombres=[] justo después de navegar a
-        # una página nueva (ANTES de que restaurar_isp_nombre termine),
-        # estaría borrando el valor compartido con el [] recién montado
-        # de esta página -- exactamente el síntoma reportado. QUITAR una
-        # vez diagnosticado.
-        print(f"[DEBUG {prefix}] guardar_filtros: opera_estados={opera_estados!r} isp_nombres={isp_nombres!r}",
-              flush=True)
+    def guardar_filtros(opera_estados: list[str] | None, isp_nombres: list[str] | None, armado: bool):
+        if not armado:
+            # Todavía no terminó de correr restaurar_filtros() en esta
+            # página -- cualquier valor que se vea aquí puede ser el []
+            # recién montado del layout, no una elección real. Ver
+            # docstring de esta función.
+            return no_update
         return {"opera_estados": opera_estados or [], "isp_nombres": isp_nombres or []}

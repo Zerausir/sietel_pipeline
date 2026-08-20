@@ -47,7 +47,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from dash import Input, Output, callback, dcc, html, register_page
 
-from components.filters_shared import register_universal_opera_isp_sync
+from components.filters_shared import register_universal_opera_isp_sync, sync_armado_store
 from components.lines_territory_filters import lines_territory_filter_layout, register_lines_territory_callbacks
 from components.ui import (
     PALETTE, build_linked_magnitude_variation_figure, build_sparkline_figure, chart_card, clean_records,
@@ -88,6 +88,7 @@ def layout():
                 "Inconsistencias de reporte para seguimiento regulatorio -- prestadores sin reportar, "
                 "reportes detenidos y variaciones mensuales fuera de lo normal.",
             ),
+            sync_armado_store(PREFIX),
             html.Section(
                 className="filter-panel",
                 children=[
