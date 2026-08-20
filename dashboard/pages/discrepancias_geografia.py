@@ -192,13 +192,13 @@ register_excel_download_callback(f"{PREFIX}-grid", "detalle_de_discrepancias.xls
 @callback(
     Output(f"{PREFIX}-isp-nombre", "options"),
     Input(f"{PREFIX}-territory-selection", "data"),
+    Input("shared-filters", "data"),
     State(f"{PREFIX}-isp-nombre", "value"),
-    State("shared-filters", "data"),
 )
 def update_isp_options(
         seleccion,
-        valores_actuales,
         shared_data,
+        valores_actuales,
 ):
     """
     Actualiza las opciones de Prestador conservando la selección universal.

@@ -46,7 +46,7 @@ dentro de "options" los valores actualmente seleccionados.
 
 from __future__ import annotations
 
-from dash import Input, Output, State, callback, dcc, html, no_update
+from dash import Input, Output, State, callback, ctx, dcc, html, no_update
 
 from services.queries import get_operation_states, get_provider_options
 
@@ -170,28 +170,64 @@ def register_shared_filters_callbacks(prefix: str) -> None:
     @callback(
         Output(f"{prefix}-isp-nombre", "options"),
         Input(f"{prefix}-territory-id", "data"),
+        Input("shared-filters", "data"),
         State(f"{prefix}-isp-nombre", "value"),
-        State("shared-filters", "data"),
     )
     def actualizar_opciones_isp(
-            territory_id: str | None,
-            valores_actuales: list[str] | None,
-            shared_data: dict | None,
+            territory_id,
+            shared_data,
+            valores_actuales,
     ):
-        if not territory_id:
-            return []
+        """
+        Construye las opciones del Prestador y garantiza que cualquier Prestador
+        seleccionado en shared-filters permanezca representable en el Dropdown.
 
-        opciones = get_provider_options(territory_id)
+        Approach:
+        Las opciones normales provienen del territorio de la página. Después se
+        agregan los valores seleccionados universalmente que todavía no estén
+        presentes.
+
+        Reasoning:
+        Dash Dropdown necesita que los valores seleccionados sean representables
+        dentro de options. Los cinco módulos no necesariamente tienen el mismo
+        universo de Prestadores para un territorio dado.
+
+        Test Cases:
+
+        shared = {"isp_nombres": ["CNT EP"]}
+        opciones SQL = ["CONECEL", "MOVISTAR"]
+        resultado:
+            ["CONECEL", "MOVISTAR", "CNT EP"]
+
+        shared = {"isp_nombres": []}
+        opciones SQL = ["CONECEL", "MOVISTAR"]
+        resultado:
+            ["CONECEL", "MOVISTAR"]
+        """
+
+        if not territory_id:
+            opciones = []
+        else:
+            opciones = get_provider_options(territory_id)
+
+        shared_data = shared_data or {}
+
+        valores_compartidos = (
+                shared_data.get("isp_nombres", [])
+                or []
+        )
 
         valores_actuales = valores_actuales or []
-        valores_compartidos = (shared_data or {}).get("isp_nombres", []) or []
 
-        valores_a_conservar = set(valores_actuales) | set(valores_compartidos)
+        valores_a_conservar = (
+                set(valores_actuales)
+                | set(valores_compartidos)
+        )
 
-        if not valores_a_conservar:
-            return opciones
-
-        existentes = {str(opcion["value"]) for opcion in opciones}
+        existentes = {
+            str(opcion["value"])
+            for opcion in opciones
+        }
 
         for valor in valores_a_conservar:
             if str(valor) not in existentes:
@@ -210,8 +246,9 @@ def register_universal_opera_isp_sync(
         get_full_provider_options=None,
 ) -> None:
     """
-    Sincroniza el VALOR de Estado de operación y Prestador entre las cinco
-    páginas:
+    Sincroniza Estado de operación y Prestador mediante shared-filters.
+
+    Los cinco módulos participantes son:
 
         - Evolución
         - IHH y participación
@@ -219,110 +256,87 @@ def register_universal_opera_isp_sync(
         - Mapa de nodos
         - Discrepancias de geografía
 
-    `shared-filters` es la única fuente de verdad.
+    shared-filters es la única fuente de verdad del VALOR seleccionado.
 
-    Las opciones de cada Dropdown siguen siendo responsabilidad de cada
-    página porque cada módulo puede tener un universo geográfico diferente.
+    Las OPTIONS de cada Dropdown siguen siendo locales a cada página.
 
     Approach:
-    1. Cuando una página aparece, sync-armado=False dispara la restauración.
-    2. La restauración lee directamente shared-filters.
-    3. El valor del Dropdown SIEMPRE se reemplaza por el valor compartido.
-    4. Una vez terminada la restauración, sync-armado=True.
-    5. Los cambios posteriores del usuario actualizan shared-filters.
-    6. Un cambio posterior en shared-filters vuelve a actualizar el Dropdown.
+    Separar completamente navegación/restauración de edición/persistencia.
+
+    RESTAURACIÓN:
+        obtel-url.pathname + shared-filters.data
+            -> Dropdown.value
+
+    PERSISTENCIA:
+        Dropdown.value
+            -> shared-filters.data
+
+    No usamos sync-armado para determinar si una modificación corresponde al
+    usuario. La navegación se detecta mediante dcc.Location(id="obtel-url"),
+    que vive fuera de dash.page_container y cambia en cada navegación de
+    Dash Pages.
 
     Reasoning:
-    El callback anterior utilizaba shared-filters.modified_timestamp como
-    único Input de restauración. Eso no garantiza una ejecución al entrar
-    nuevamente a una página si el Store no cambió durante la navegación.
+    Un Store ubicado dentro de una página no es una señal fiable de
+    navegación. Además, usar el mismo Store local como Input y Output del
+    callback de restauración introduce una dependencia circular innecesaria.
 
-    Además, usar:
-
-        no_update if isp_actual else prestadores_compartidos
-
-    impide la sincronización bidireccional cuando el Dropdown ya tiene un
-    valor diferente.
-
-    Aquí el Store es explícitamente la fuente de verdad. Por tanto, cuando
-    shared-filters contiene un valor, el Dropdown debe adoptar ese valor,
-    aunque previamente tuviera otro.
+    La URL, en cambio, es una señal explícita de navegación.
 
     Test Cases:
 
-    Caso 1:
-        shared-filters = {"isp_nombres": ["CNT EP"]}
-        entrar a Evolución
-        -> evo-isp-nombre = ["CNT EP"]
+    1. Evolución selecciona ["CNT EP"]:
+       shared-filters = {"isp_nombres": ["CNT EP"]}
 
-    Caso 2:
-        shared-filters = {"isp_nombres": ["CNT EP"]}
-        navegar a IHH
-        -> con-isp-nombre = ["CNT EP"]
+    2. Navegar a /sai/concentracion:
+       con-isp-nombre.value = ["CNT EP"]
 
-    Caso 3:
-        shared-filters = {"isp_nombres": ["CNT EP"]}
-        navegar a Mapa de nodos
-        -> mnodo-isp-nombre = ["CNT EP"]
+    3. Navegar a /sai/mapa-nodos:
+       mnodo-isp-nombre.value = ["CNT EP"]
 
-    Caso 4:
-        shared-filters = {"isp_nombres": ["CNT EP"]}
-        navegar a Discrepancias
-        -> dnodo-isp-nombre = ["CNT EP"]
+    4. Navegar a /sai/discrepancias-geografia:
+       dnodo-isp-nombre.value = ["CNT EP"]
 
-    Caso 5:
-        Control cambia a ["CONECEL"]
-        -> shared-filters = ["CONECEL"]
-        -> las demás páginas adoptan ["CONECEL"]
+    5. Control selecciona ["CONECEL"]:
+       shared-filters = {"isp_nombres": ["CONECEL"]}
 
-    Caso 6:
-        Mapa de nodos cambia a ["MOVISTAR"]
-        -> shared-filters = ["MOVISTAR"]
-        -> Evolución, IHH, Control y Discrepancias adoptan ["MOVISTAR"]
+    6. Navegar a Evolución:
+       evo-isp-nombre.value = ["CONECEL"]
 
-    Caso 7:
-        usuario limpia Prestador
-        -> shared-filters = []
-        -> todos los módulos quedan []
+    7. Usuario limpia Prestador:
+       shared-filters["isp_nombres"] = []
 
-    Caso 8:
-        Dropdown recién montado tiene []
-        y shared-filters tiene ["CNT EP"]
-        -> [] NO sobrescribe el Store porque sync-armado=False.
+    8. Navegar a cualquier módulo:
+       Dropdown.value = []
 
-    Caso 9:
-        usuario selecciona [] después de que sync-armado=True
-        -> shared-filters sí se actualiza a [].
+    9. El Dropdown inicial de una página es []:
+       nunca sobrescribe shared-filters por el simple hecho de montar
+       la página, porque la restauración se produce mediante pathname.
     """
 
     # ------------------------------------------------------------------
-    # RESTAURACIÓN
+    # RESTAURACIÓN DESDE shared-filters
     # ------------------------------------------------------------------
-    #
-    # sync-armado es Input, no State.
-    #
-    # Cuando una página entra en el DOM:
-    #
-    #     sync-armado = False
-    #
-    # eso provoca inmediatamente la restauración desde shared-filters.
-    #
-    # También usamos modified_timestamp para que una página que ya está
-    # montada pueda reaccionar cuando otra página modifica shared-filters.
-    #
+
     @callback(
         Output(f"{prefix}-opera-estado", "value"),
         Output(f"{prefix}-isp-nombre", "value"),
-        Output(f"{prefix}-sync-armado", "data"),
-        Input(f"{prefix}-sync-armado", "data"),
-        Input("shared-filters", "modified_timestamp"),
-        State("shared-filters", "data"),
+        Input("obtel-url", "pathname"),
+        Input("shared-filters", "data"),
     )
     def restaurar_filtros(
-            sync_armado: bool,
-            _shared_timestamp,
+            pathname,
             shared_data,
     ):
+        """
+        Restaura el estado universal cuando:
+
+        1. se navega a esta página, o
+        2. cambia shared-filters.
+
+        Este callback NUNCA escribe shared-filters.
+        """
+
         shared_data = shared_data or {}
 
         estados_compartidos = (
@@ -335,19 +349,17 @@ def register_universal_opera_isp_sync(
                 or []
         )
 
-        # El Store es la fuente de verdad.
+        # No hacemos ninguna consulta SQL.
         #
-        # NO debemos consultar el valor actual del Dropdown y decidir
-        # conservarlo. Si otra página modificó el Store, ese nuevo valor
-        # debe propagarse aquí.
+        # shared-filters ya contiene exactamente el valor que debe mostrar
+        # esta página.
         return (
             estados_compartidos,
             prestadores_compartidos,
-            True,
         )
 
     # ------------------------------------------------------------------
-    # GUARDADO
+    # PERSISTENCIA DEL CAMBIO HECHO POR EL USUARIO
     # ------------------------------------------------------------------
 
     @callback(
@@ -358,40 +370,69 @@ def register_universal_opera_isp_sync(
         ),
         Input(f"{prefix}-opera-estado", "value"),
         Input(f"{prefix}-isp-nombre", "value"),
-        State(f"{prefix}-sync-armado", "data"),
+        State("shared-filters", "data"),
         prevent_initial_call=True,
     )
     def guardar_filtros(
-            opera_estados: list[str] | None,
-            isp_nombres: list[str] | None,
-            armado: bool,
+            opera_estados,
+            isp_nombres,
+            shared_data,
     ):
         """
-        Guarda cambios realizados en la página actual.
+        Persiste únicamente el Dropdown que realmente cambió.
 
         Approach:
-        Ignorar cualquier cambio mientras sync-armado=False y aceptar cambios
-        solamente después de que la restauración inicial haya terminado.
+        ctx.triggered_id identifica si cambió Estado de operación o Prestador.
 
         Reasoning:
-        Al montar una página, sus Dropdowns nacen inicialmente con [].
-        Ese [] no representa una selección del usuario y no debe destruir
+        No debemos reconstruir shared-filters a partir de los dos Dropdowns
+        porque uno de ellos puede contener el estado recién restaurado desde
         shared-filters.
 
-        Una vez armado el callback, [] sí representa una acción válida:
-        limpiar el filtro.
+        Si el usuario cambia Prestador, solamente modificamos isp_nombres.
+
+        Si cambia Estado, solamente modificamos opera_estados.
+
+        Esto evita que un valor local viejo sobrescriba accidentalmente el
+        otro filtro universal.
 
         Test Cases:
-        - armado=False + [] -> no_update.
-        - armado=False + ["CNT EP"] -> no_update.
-        - armado=True + ["CNT EP"] -> guarda ["CNT EP"].
-        - armado=True + [] -> guarda [].
+
+        Prestador:
+            shared = {"opera_estados": ["ACTIVO"], "isp_nombres": ["CNT"]}
+            usuario cambia Prestador a ["CONECEL"]
+            ->
+            {
+                "opera_estados": ["ACTIVO"],
+                "isp_nombres": ["CONECEL"]
+            }
+
+        Estado:
+            shared = {"opera_estados": ["ACTIVO"], "isp_nombres": ["CNT"]}
+            usuario cambia Estado a ["INACTIVO"]
+            ->
+            {
+                "opera_estados": ["INACTIVO"],
+                "isp_nombres": ["CNT"]
+            }
+
+        Limpiar Prestador:
+            isp_nombres = []
+            ->
+            isp_nombres = []
         """
 
-        if not armado:
+        shared_data = dict(shared_data or {})
+
+        triggered_id = ctx.triggered_id
+
+        if triggered_id == f"{prefix}-isp-nombre":
+            shared_data["isp_nombres"] = isp_nombres or []
+
+        elif triggered_id == f"{prefix}-opera-estado":
+            shared_data["opera_estados"] = opera_estados or []
+
+        else:
             return no_update
 
-        return {
-            "opera_estados": opera_estados or [],
-            "isp_nombres": isp_nombres or [],
-        }
+        return shared_data

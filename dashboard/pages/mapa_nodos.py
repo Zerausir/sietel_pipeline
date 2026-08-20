@@ -23,7 +23,7 @@ string único ("CANTON|17|1701"); es tres listas independientes.
 from __future__ import annotations
 
 import plotly.graph_objects as go
-from dash import Input, Output, State,callback, dcc, html, register_page
+from dash import Input, Output, State, callback, dcc, html, register_page
 import dash_ag_grid as dag
 
 from components.filters_shared import register_universal_opera_isp_sync, sync_armado_store
@@ -188,13 +188,13 @@ register_excel_download_callback(f"{PREFIX}-grid", "detalle_de_nodos.xlsx")
 @callback(
     Output(f"{PREFIX}-isp-nombre", "options"),
     Input(f"{PREFIX}-territory-selection", "data"),
+    Input("shared-filters", "data"),
     State(f"{PREFIX}-isp-nombre", "value"),
-    State("shared-filters", "data"),
 )
 def update_isp_options(
         seleccion,
-        valores_actuales,
         shared_data,
+        valores_actuales,
 ):
     """
     Actualiza las opciones de Prestador sin perder el valor universal.
