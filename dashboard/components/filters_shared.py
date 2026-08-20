@@ -211,92 +211,144 @@ def register_universal_opera_isp_sync(
 ) -> None:
     """
     Sincroniza el VALOR de Estado de operación y Prestador entre las cinco
-    páginas.
+    páginas:
 
-    `get_full_provider_options` se conserva como argumento opcional para no
-    romper las llamadas existentes en las páginas, pero YA NO se utiliza.
+        - Evolución
+        - IHH y participación
+        - Control
+        - Mapa de nodos
+        - Discrepancias de geografía
 
-    El valor de shared-filters es la fuente de verdad.
+    `shared-filters` es la única fuente de verdad.
+
+    Las opciones de cada Dropdown siguen siendo responsabilidad de cada
+    página porque cada módulo puede tener un universo geográfico diferente.
 
     Approach:
-    1. Al montar una página, restaurar directamente desde shared-filters.
-    2. Marcar sync-armado=True únicamente después de que la restauración haya
-       terminado.
-    3. Mientras sync-armado=False, ignorar cualquier disparo inicial del
-       Dropdown.
-    4. Una vez armado, cualquier cambio real en Estado o Prestador actualiza
-       shared-filters.
+    1. Cuando una página aparece, sync-armado=False dispara la restauración.
+    2. La restauración lee directamente shared-filters.
+    3. El valor del Dropdown SIEMPRE se reemplaza por el valor compartido.
+    4. Una vez terminada la restauración, sync-armado=True.
+    5. Los cambios posteriores del usuario actualizan shared-filters.
+    6. Un cambio posterior en shared-filters vuelve a actualizar el Dropdown.
 
     Reasoning:
-    El problema anterior hacía que la restauración de Prestador dependiera de
-    una consulta PostgreSQL. Eso creaba una ventana en la cual el Dropdown
-    recién montado podía emitir [] antes de que terminara la restauración.
-    Aquí la restauración es únicamente una lectura del Store en memoria.
+    El callback anterior utilizaba shared-filters.modified_timestamp como
+    único Input de restauración. Eso no garantiza una ejecución al entrar
+    nuevamente a una página si el Store no cambió durante la navegación.
+
+    Además, usar:
+
+        no_update if isp_actual else prestadores_compartidos
+
+    impide la sincronización bidireccional cuando el Dropdown ya tiene un
+    valor diferente.
+
+    Aquí el Store es explícitamente la fuente de verdad. Por tanto, cuando
+    shared-filters contiene un valor, el Dropdown debe adoptar ese valor,
+    aunque previamente tuviera otro.
 
     Test Cases:
-    1. shared-filters contiene ["CNT EP"]:
-       -> entrar a cualquier módulo
-       -> Prestador queda ["CNT EP"].
 
-    2. entrar a una página:
-       -> Dropdown aparece inicialmente []
-       -> sync-armado=False
-       -> [] NO sobrescribe shared-filters.
+    Caso 1:
+        shared-filters = {"isp_nombres": ["CNT EP"]}
+        entrar a Evolución
+        -> evo-isp-nombre = ["CNT EP"]
 
-    3. restauración termina:
-       -> Dropdown recibe el valor compartido
-       -> sync-armado=True.
+    Caso 2:
+        shared-filters = {"isp_nombres": ["CNT EP"]}
+        navegar a IHH
+        -> con-isp-nombre = ["CNT EP"]
 
-    4. usuario selecciona otro Prestador:
-       -> shared-filters recibe el nuevo valor.
+    Caso 3:
+        shared-filters = {"isp_nombres": ["CNT EP"]}
+        navegar a Mapa de nodos
+        -> mnodo-isp-nombre = ["CNT EP"]
 
-    5. usuario limpia Prestador:
-       -> shared-filters recibe [].
+    Caso 4:
+        shared-filters = {"isp_nombres": ["CNT EP"]}
+        navegar a Discrepancias
+        -> dnodo-isp-nombre = ["CNT EP"]
 
-    6. navegar repetidamente entre las cinco páginas:
-       -> el valor continúa siendo el mismo.
+    Caso 5:
+        Control cambia a ["CONECEL"]
+        -> shared-filters = ["CONECEL"]
+        -> las demás páginas adoptan ["CONECEL"]
+
+    Caso 6:
+        Mapa de nodos cambia a ["MOVISTAR"]
+        -> shared-filters = ["MOVISTAR"]
+        -> Evolución, IHH, Control y Discrepancias adoptan ["MOVISTAR"]
+
+    Caso 7:
+        usuario limpia Prestador
+        -> shared-filters = []
+        -> todos los módulos quedan []
+
+    Caso 8:
+        Dropdown recién montado tiene []
+        y shared-filters tiene ["CNT EP"]
+        -> [] NO sobrescribe el Store porque sync-armado=False.
+
+    Caso 9:
+        usuario selecciona [] después de que sync-armado=True
+        -> shared-filters sí se actualiza a [].
     """
 
+    # ------------------------------------------------------------------
+    # RESTAURACIÓN
+    # ------------------------------------------------------------------
+    #
+    # sync-armado es Input, no State.
+    #
+    # Cuando una página entra en el DOM:
+    #
+    #     sync-armado = False
+    #
+    # eso provoca inmediatamente la restauración desde shared-filters.
+    #
+    # También usamos modified_timestamp para que una página que ya está
+    # montada pueda reaccionar cuando otra página modifica shared-filters.
+    #
     @callback(
         Output(f"{prefix}-opera-estado", "value"),
         Output(f"{prefix}-isp-nombre", "value"),
         Output(f"{prefix}-sync-armado", "data"),
+        Input(f"{prefix}-sync-armado", "data"),
         Input("shared-filters", "modified_timestamp"),
         State("shared-filters", "data"),
-        State(f"{prefix}-opera-estado", "value"),
-        State(f"{prefix}-isp-nombre", "value"),
     )
     def restaurar_filtros(
-            _timestamp,
+            sync_armado: bool,
+            _shared_timestamp,
             shared_data,
-            opera_actual,
-            isp_actual,
     ):
         shared_data = shared_data or {}
 
-        estados_compartidos = shared_data.get("opera_estados", []) or []
-        prestadores_compartidos = shared_data.get("isp_nombres", []) or []
-
-        # Si la página ya trae una selección, no la reemplazamos.
-        # En una página recién montada los valores serán [].
-        opera_resultado = (
-            no_update
-            if opera_actual
-            else estados_compartidos
+        estados_compartidos = (
+                shared_data.get("opera_estados", [])
+                or []
         )
 
-        isp_resultado = (
-            no_update
-            if isp_actual
-            else prestadores_compartidos
+        prestadores_compartidos = (
+                shared_data.get("isp_nombres", [])
+                or []
         )
 
-        # El candado se activa SOLO después de haber decidido los dos valores.
+        # El Store es la fuente de verdad.
+        #
+        # NO debemos consultar el valor actual del Dropdown y decidir
+        # conservarlo. Si otra página modificó el Store, ese nuevo valor
+        # debe propagarse aquí.
         return (
-            opera_resultado,
-            isp_resultado,
+            estados_compartidos,
+            prestadores_compartidos,
             True,
         )
+
+    # ------------------------------------------------------------------
+    # GUARDADO
+    # ------------------------------------------------------------------
 
     @callback(
         Output(
@@ -315,22 +367,27 @@ def register_universal_opera_isp_sync(
             armado: bool,
     ):
         """
-        Guarda una selección realizada en la página actual.
+        Guarda cambios realizados en la página actual.
 
         Approach:
-        Usar sync-armado como barrera contra el montaje inicial.
+        Ignorar cualquier cambio mientras sync-armado=False y aceptar cambios
+        solamente después de que la restauración inicial haya terminado.
 
         Reasoning:
-        Dash Pages puede montar un Dropdown con [] y disparar callbacks
-        asociados a ese componente. Ese [] no representa una acción del
-        usuario y jamás debe convertirse en el nuevo estado universal.
+        Al montar una página, sus Dropdowns nacen inicialmente con [].
+        Ese [] no representa una selección del usuario y no debe destruir
+        shared-filters.
+
+        Una vez armado el callback, [] sí representa una acción válida:
+        limpiar el filtro.
 
         Test Cases:
         - armado=False + [] -> no_update.
-        - armado=False + ["CNT"] -> no_update.
-        - armado=True + ["CNT"] -> guarda ["CNT"].
+        - armado=False + ["CNT EP"] -> no_update.
+        - armado=True + ["CNT EP"] -> guarda ["CNT EP"].
         - armado=True + [] -> guarda [].
         """
+
         if not armado:
             return no_update
 
