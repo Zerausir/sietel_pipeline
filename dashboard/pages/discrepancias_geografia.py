@@ -19,7 +19,7 @@ cambio que pages/mapa_nodos.py, ver components/node_territory_filters.py.
 from __future__ import annotations
 
 import plotly.graph_objects as go
-from dash import Input, Output, callback, dcc, html, register_page
+from dash import Input, Output, State, callback, dcc, html, register_page
 import dash_ag_grid as dag
 
 from components.filters_shared import register_universal_opera_isp_sync, sync_armado_store
@@ -192,14 +192,75 @@ register_excel_download_callback(f"{PREFIX}-grid", "detalle_de_discrepancias.xls
 @callback(
     Output(f"{PREFIX}-isp-nombre", "options"),
     Input(f"{PREFIX}-territory-selection", "data"),
+    State(f"{PREFIX}-isp-nombre", "value"),
+    State("shared-filters", "data"),
 )
-def update_isp_options(seleccion):
+def update_isp_options(
+        seleccion,
+        valores_actuales,
+        shared_data,
+):
+    """
+    Actualiza las opciones de Prestador conservando la selección universal.
+
+    Approach:
+    Consultar las opciones correspondientes al territorio y conservar además
+    los valores que ya estén seleccionados.
+
+    Reasoning:
+    La selección universal no debe desaparecer porque el universo geográfico
+    de esta página sea diferente al de la página anterior.
+
+    Test Cases:
+    - [] compartido -> comportamiento normal.
+    - Prestador compartido dentro del territorio -> aparece normalmente.
+    - Prestador compartido fuera del territorio -> sigue presente en options
+      para que Dash pueda representar el value restaurado.
+    """
+
     seleccion = seleccion or {}
-    return get_node_provider_options(
-        tuple(seleccion.get("provincias") or ()),
-        tuple(seleccion.get("cantones") or ()),
-        tuple(seleccion.get("parroquias") or ()),
+
+    provincias = tuple(
+        seleccion.get("provincias") or ()
     )
+    cantones = tuple(
+        seleccion.get("cantones") or ()
+    )
+    parroquias = tuple(
+        seleccion.get("parroquias") or ()
+    )
+
+    opciones = get_node_provider_options(
+        provincias,
+        cantones,
+        parroquias,
+    )
+
+    valores_actuales = valores_actuales or []
+    valores_compartidos = (
+            (shared_data or {}).get("isp_nombres", []) or []
+    )
+
+    valores_a_conservar = (
+            set(valores_actuales)
+            | set(valores_compartidos)
+    )
+
+    existentes = {
+        str(opcion["value"])
+        for opcion in opciones
+    }
+
+    for valor in valores_a_conservar:
+        if str(valor) not in existentes:
+            opciones.append(
+                {
+                    "label": str(valor),
+                    "value": valor,
+                }
+            )
+
+    return opciones
 
 
 @callback(
