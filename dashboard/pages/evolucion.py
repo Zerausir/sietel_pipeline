@@ -6,7 +6,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 from dash import Input, Output, callback, dcc, html, register_page
 
-from components.filters_shared import register_shared_filters_callbacks, shared_filters_layout
+from components.filters_shared import (
+    register_shared_filters_callbacks,
+    register_universal_opera_isp_sync,
+    shared_filters_layout,
+)
 from components.territory_filters import register_territory_callbacks, territory_filter_layout
 from components.ui import (
     OKABE_ITO,
@@ -24,6 +28,7 @@ from components.ui import (
     page_header,
     register_filters_summary_callback,
     register_month_year_picker_callback,
+    register_shared_period_sync,
     style_figure,
 )
 from services.queries import (
@@ -34,6 +39,7 @@ from services.queries import (
     get_periods,
     get_prestadores_nunca_reportaron_detalle,
     get_provider_count_in_range,
+    get_provider_options,
     get_reporting_summary,
     get_velocities,
     resolve_period_id,
@@ -150,8 +156,10 @@ def layout():
 
 register_territory_callbacks(PREFIX)
 register_shared_filters_callbacks(PREFIX)
+register_universal_opera_isp_sync(PREFIX, lambda: get_provider_options("NACIONAL|ECUADOR"))
 register_month_year_picker_callback("evo-start-period")
 register_month_year_picker_callback("evo-end-period")
+register_shared_period_sync("evo-start-period", "evo-end-period")
 register_filters_summary_callback(PREFIX)
 
 

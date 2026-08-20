@@ -47,12 +47,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 from dash import Input, Output, callback, dcc, html, register_page
 
+from components.filters_shared import register_universal_opera_isp_sync
 from components.lines_territory_filters import lines_territory_filter_layout, register_lines_territory_callbacks
 from components.ui import (
     PALETTE, build_linked_magnitude_variation_figure, build_sparkline_figure, chart_card, clean_records,
     empty_figure, error_panel, excel_download_button, format_number, format_signed, kpi_card, month_year_picker,
     numeric_stepper, page_header, register_excel_download_callback, register_month_year_picker_callback,
-    signed_log_tickvals, style_figure, transformar_signed_log,
+    register_shared_period_sync, signed_log_tickvals, style_figure, transformar_signed_log,
 )
 from services.queries import (
     get_churn_history_multiselect, get_evolution_filtrado_multiselect, get_operation_states, get_periods,
@@ -371,8 +372,10 @@ def layout():
 
 
 register_lines_territory_callbacks(PREFIX)
+register_universal_opera_isp_sync(PREFIX, lambda: get_provider_options("NACIONAL|ECUADOR"))
 register_month_year_picker_callback("ctrl-start-period")
 register_month_year_picker_callback("ctrl-end-period")
+register_shared_period_sync("ctrl-start-period", "ctrl-end-period")
 register_excel_download_callback("ctrl-nunca-grid", "prestadores_sin_reportar.xlsx")
 register_excel_download_callback("ctrl-detenido-grid", "prestadores_reporte_detenido.xlsx")
 register_excel_download_callback("ctrl-variacion-grid", "variacion_mensual_anomala.xlsx")

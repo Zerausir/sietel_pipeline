@@ -199,16 +199,34 @@ def serve_layout() -> html.Div:
                     "territory_id": "NACIONAL|ECUADOR",
                 },
             ),
-            # Mismo principio que shared-territory -- vive fuera de
-            # page_container para sobrevivir al cambio de pestaña.
-            # Sincroniza Estado de operación y Prestador entre Evolución y
-            # Concentración (31-jul-2026, a pedido del usuario). NO incluye
-            # "Período de participación" -- ese filtro es exclusivo de
-            # Concentración, no tiene equivalente en Evolución.
+            # AMPLIADO A UNIVERSAL (20-ago-2026, a pedido del usuario) --
+            # antes solo sincronizaba Estado de operación y Prestador entre
+            # Evolución y Concentración; ahora es un solo estado compartido
+            # entre los 5 módulos (Evolución, Concentración, Control, Mapa
+            # de nodos, Discrepancias de geografía) -- ver
+            # components/filters_shared.py:register_universal_opera_isp_sync().
+            # Solo el VALOR elegido se sincroniza -- las OPCIONES siguen
+            # siendo responsabilidad de cada página, porque dependen de su
+            # propio universo geográfico (líneas vs. nodos) y de su propio
+            # modelo de territorio (selección única vs. multi-select).
             dcc.Store(
                 id="shared-filters",
                 storage_type="memory",
                 data={"opera_estados": [], "isp_nombres": []},
+            ),
+            # NUEVO (20-ago-2026, a pedido del usuario): Desde/Hasta (o
+            # Historia Desde/Historia Hasta) sincronizado entre Evolución,
+            # Concentración y Control -- los tres módulos que tienen ese
+            # selector. Los mapas no participan (no tienen selector de
+            # período). "Período de participación" de Concentración
+            # queda deliberadamente FUERA -- es un concepto propio de esa
+            # página (un mes puntual dentro del rango, no un rango en sí),
+            # sin equivalente en Evolución/Control -- ver
+            # components/ui.py:register_shared_period_sync().
+            dcc.Store(
+                id="shared-period",
+                storage_type="memory",
+                data={"start_period": None, "end_period": None},
             ),
             # Store propio para las páginas de nodos ISP (Mapa de Nodos,
             # Discrepancias de Geografía) -- geografía CONALI derivada de

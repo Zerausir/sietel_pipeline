@@ -4,9 +4,13 @@ from __future__ import annotations
 import dash_ag_grid as dag
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Input, Output, callback, dcc, html, register_page
+from dash import Input, Output, State, callback, dcc, html, no_update, register_page
 
-from components.filters_shared import register_shared_filters_callbacks, shared_filters_layout
+from components.filters_shared import (
+    register_shared_filters_callbacks,
+    register_universal_opera_isp_sync,
+    shared_filters_layout,
+)
 from components.territory_filters import register_territory_callbacks, territory_filter_layout
 from components.ui import (
     PALETTE,
@@ -21,9 +25,11 @@ from components.ui import (
     kpi_card,
     month_year_picker,
     page_header,
+    periodo_id_to_iso,
     register_excel_download_callback,
     register_filters_summary_callback,
     register_month_year_picker_callback,
+    register_shared_period_sync,
     style_figure,
 )
 from services.queries import (
@@ -34,6 +40,7 @@ from services.queries import (
     get_participation_filtrado,
     get_periods,
     get_provider_history,
+    get_provider_options,
 )
 
 register_page(__name__, path="/sai/concentracion", name="IHH y participación", order=2)
@@ -194,11 +201,59 @@ def layout():
 
 register_territory_callbacks(PREFIX)
 register_shared_filters_callbacks(PREFIX)
+register_universal_opera_isp_sync(PREFIX, lambda: get_provider_options("NACIONAL|ECUADOR"))
 register_month_year_picker_callback("con-start-period")
 register_month_year_picker_callback("con-end-period")
 register_month_year_picker_callback("con-current-period")
+register_shared_period_sync("con-start-period", "con-end-period")
 register_filters_summary_callback(PREFIX)
 register_excel_download_callback("con-participation-grid", "detalle_de_participacion.xlsx")
+
+
+@callback(
+    Output("con-current-period-picker", "value"),
+    Input("con-opera-estado", "value"),
+    Input("con-isp-nombre", "value"),
+    Input("con-territory-id", "data"),
+    State("con-start-period", "data"),
+    State("con-end-period", "data"),
+    prevent_initial_call=True,
+)
+def auto_ajustar_periodo_participacion(opera_estados, isp_nombres, territory_id, start_period, end_period):
+    """
+    CORRECCIÓN (20-ago-2026, confirmado con 1000TEL CIA. LTDA.): "Período
+    de participación" siempre arrancaba en el ÚLTIMO mes de todo el rango
+    histórico, sin importar qué prestador quedara filtrado -- si ese
+    prestador dejó de reportar antes del fin del rango (1000TEL: último
+    reporte real 2025-09, rango hasta 2025-12), "Participación por
+    prestador", "Aporte individual al IHH", "Detalle de participación" y
+    el dropdown "Prestador para evolución" se quedaban vacíos sin ninguna
+    pista de por qué -- no estaban rotos, el período elegido genuinamente
+    no tenía datos para ese filtro.
+
+    Se dispara con Estado/Prestador/Territorio -- SOLO estos tres, nunca
+    con el propio "con-current-period" como Input (evita el mismo tipo de
+    ciclo real ya corregido antes en este proyecto). Recalcula el ÚLTIMO
+    período con datos reales para el filtro vigente y mueve el calendario
+    ahí -- si el usuario después elige un período distinto a mano, esa
+    elección se respeta hasta el próximo cambio de Estado/Prestador/
+    Territorio.
+    """
+    if not territory_id or start_period is None or end_period is None:
+        return no_update
+    opera_estados = opera_estados or []
+    isp_nombres = isp_nombres or []
+    try:
+        if opera_estados or isp_nombres:
+            df = get_ihh_filtrado(territory_id, int(start_period), int(end_period), opera_estados, isp_nombres)
+        else:
+            df = get_ihh(territory_id, int(start_period), int(end_period))
+    except Exception:
+        return no_update
+    if df.empty:
+        return no_update
+    ultimo_periodo_real = int(df["periodo_id"].max())
+    return periodo_id_to_iso(ultimo_periodo_real)
 
 
 @callback(

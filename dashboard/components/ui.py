@@ -303,17 +303,21 @@ def build_sparkline_figure(
     return fig
 
 
-def _periodo_id_to_iso(periodo_id: int) -> str:
+def periodo_id_to_iso(periodo_id: int) -> str:
     """periodo_id en mart.dim_periodo es SIEMPRE anio*100+mes (ver
     sql/02_ddl_mart.sql, INSERT de dim_periodo) -- la conversión es
     aritmética directa, no requiere consultar la tabla. Se ancla al día 01
     porque MonthPickerInput exige una fecha ISO completa como value/minDate/
-    maxDate, aunque en el calendario no se muestre ni se pueda elegir día."""
+    maxDate, aunque en el calendario no se muestre ni se pueda elegir día.
+
+    Pública (sin guion bajo) desde el 20-ago-2026 -- concentracion.py la
+    necesita para el ajuste automático de "Período de participación" (ver
+    ese archivo, auto_ajustar_periodo_participacion())."""
     anio, mes = divmod(int(periodo_id), 100)
     return f"{anio:04d}-{mes:02d}-01"
 
 
-def _iso_to_periodo_id(iso_value: str) -> int:
+def iso_to_periodo_id(iso_value: str) -> int:
     anio, mes = (int(parte) for parte in iso_value.split("-")[:2])
     return anio * 100 + mes
 
@@ -344,9 +348,9 @@ def month_year_picker(id_: str, label: str, value: int, min_period: int, max_per
             html.Label(label),
             dmc.MonthPickerInput(
                 id=f"{id_}-picker",
-                value=_periodo_id_to_iso(value),
-                minDate=_periodo_id_to_iso(min_period),
-                maxDate=_periodo_id_to_iso(max_period),
+                value=periodo_id_to_iso(value),
+                minDate=periodo_id_to_iso(min_period),
+                maxDate=periodo_id_to_iso(max_period),
                 valueFormat="MMMM YYYY",
                 clearable=False,
                 className="month-year-picker",
@@ -371,7 +375,62 @@ def register_month_year_picker_callback(id_: str) -> None:
             # clearable=False debería impedir esto en la práctica; se deja
             # como defensa explícita en vez de asumir que nunca ocurre.
             return no_update
-        return _iso_to_periodo_id(iso_value)
+        return iso_to_periodo_id(iso_value)
+
+
+def register_shared_period_sync(start_id: str, end_id: str) -> None:
+    """
+    Sincroniza Desde/Hasta (o Historia Desde/Historia Hasta) entre
+    Evolución, Concentración y Control -- los tres módulos con selector de
+    período (20-ago-2026, a pedido del usuario). Los mapas no tienen este
+    selector, así que no participan. Se llama UNA VEZ por página, con los
+    dos ids que esa página le pasó a month_year_picker() para Desde/Hasta
+    (ej. "evo-start-period"/"evo-end-period") -- NUNCA con
+    "con-current-period" en Concentración, que es un concepto propio de
+    esa página (un mes puntual, no un rango) sin equivalente en las otras.
+
+    Dos callbacks separados, nunca uno solo -- mismo motivo que en
+    node_territory_filters.py: si el mismo callback leyera
+    "{start_id}-picker.value" como Input Y lo escribiera como Output (aunque
+    fuera indirectamente, a través de restaurar desde el store), Dash
+    detecta eso como una dependencia circular real en su grafo estático de
+    callbacks y la aplicación no arranca -- no es una posibilidad teórica,
+    ya pasó una vez en este proyecto. Aquí:
+      - "restaurar_periodo" SOLO lee shared-period (vía modified_timestamp,
+        no vía Input directo a "data" -- mismo truco de siempre) y SOLO
+        escribe el valor mostrado en el calendario de cada página.
+      - "guardar_periodo" SOLO lee el Store local ya convertido a
+        periodo_id (id_, no "{id_}-picker") de cada página y SOLO escribe
+        al store compartido. Nunca se cruzan.
+    """
+
+    @callback(
+        Output(f"{start_id}-picker", "value"),
+        Output(f"{end_id}-picker", "value"),
+        Input("shared-period", "modified_timestamp"),
+        State("shared-period", "data"),
+    )
+    def restaurar_periodo(_ts, shared_data):
+        shared_data = shared_data or {}
+        start_period = shared_data.get("start_period")
+        end_period = shared_data.get("end_period")
+        if start_period is None or end_period is None:
+            # Aún no hay nada compartido (primera carga de toda la sesión)
+            # -- se deja el valor por defecto propio de cada página
+            # (min/max de get_periods()), no se sobreescribe con nada.
+            return no_update, no_update
+        return periodo_id_to_iso(int(start_period)), periodo_id_to_iso(int(end_period))
+
+    @callback(
+        Output("shared-period", "data", allow_duplicate=True),
+        Input(start_id, "data"),
+        Input(end_id, "data"),
+        prevent_initial_call=True,
+    )
+    def guardar_periodo(start_period, end_period):
+        if start_period is None or end_period is None:
+            return no_update
+        return {"start_period": start_period, "end_period": end_period}
 
 
 def filters_summary_bar(id_: str) -> html.Div:

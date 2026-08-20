@@ -1,23 +1,39 @@
-"""dashboard/components/filters_shared.py — Estado de operación y Prestador, sincronizados.
+"""dashboard/components/filters_shared.py — Estado de operación y Prestador.
 
-Mismo patrón que components/territory_filters.py: la selección se
-restaura desde -- y se guarda en -- el dcc.Store "shared-filters" que vive
-en app.py, fuera de dash.page_container. Elegir un Estado de operación o
-un Prestador en Evolución y luego entrar a Concentración mantiene la misma
-selección (31-jul-2026, a pedido del usuario).
+Dos responsabilidades separadas a propósito, nunca en el mismo callback:
 
-NO incluye "Período de participación" -- ese filtro es exclusivo de la
-página de Concentración (con-current-period), sin equivalente en
-Evolución, y se queda como estado local de esa página, no sincronizado.
+1. OPCIONES del dropdown de Prestador -- depende del universo geográfico
+   propio de cada página (líneas vs. nodos) y de su propio modelo de
+   territorio (selección única con Nivel vs. multi-select independiente).
+   No se puede generalizar entre las 5 páginas sin forzarlas a compartir
+   un modelo de territorio que deliberadamente no comparten -- cada página
+   sigue resolviendo esto por su cuenta (Evolución/Concentración vía
+   shared_filters_layout()+actualizar_opciones_isp() aquí mismo; Control
+   con una lista nacional fija; Mapa de nodos/Discrepancias con su propio
+   callback ya existente en cada página).
+
+2. VALOR elegido -- SÍ se sincroniza de forma universal entre los 5
+   módulos (Evolución, Concentración, Control, Mapa de nodos,
+   Discrepancias de geografía), a través de register_universal_opera_isp_sync()
+   (20-ago-2026, ampliado desde el alcance anterior -- antes solo viajaba
+   entre Evolución y Concentración). El mismo dcc.Store "shared-filters"
+   de siempre (definido en app.py), con más páginas leyendo/escribiendo.
 """
 from __future__ import annotations
 
-from dash import Input, Output, State, callback, dcc, html
+from typing import Callable
+
+from dash import Input, Output, State, callback, dcc, html, no_update
 
 from services.queries import get_operation_states, get_provider_options
 
 
 def shared_filters_layout(prefix: str) -> html.Div:
+    """Usado únicamente por Evolución y Concentración -- Control, Mapa de
+    nodos y Discrepancias construyen sus propios dropdowns de Estado/
+    Prestador directamente en su layout(), con los mismos ids por
+    convención ("{prefix}-opera-estado"/"{prefix}-isp-nombre"), porque sus
+    opciones de Prestador se calculan distinto (ver docstring del módulo)."""
     return html.Div(
         className="territory-grid",
         children=[
@@ -52,41 +68,97 @@ def shared_filters_layout(prefix: str) -> html.Div:
 
 
 def register_shared_filters_callbacks(prefix: str) -> None:
-    @callback(
-        Output(f"{prefix}-opera-estado", "value"),
-        Input("shared-filters", "data"),
-    )
-    def restore_opera_estado(shared_data):
-        return (shared_data or {}).get("opera_estados", [])
+    """
+    Exclusivo de Evolución/Concentración -- calcula las OPCIONES de
+    Prestador reaccionando a "{prefix}-territory-id" (modelo de territorio
+    de selección única con Nivel, ver components/territory_filters.py).
+
+    CORRECCIÓN (20-ago-2026): antes esta función también restauraba el
+    VALOR desde el store compartido, acoplado a este mismo territory_id --
+    eso impedía generalizar la sincronización de valor a Control/Mapa de
+    nodos/Discrepancias, que no tienen "{prefix}-territory-id" en absoluto.
+    Esa responsabilidad se separó a register_universal_opera_isp_sync(),
+    que valida el valor restaurado contra la lista NACIONAL completa de
+    prestadores (no contra las opciones ya acotadas por territorio de esta
+    página) -- llamar a ambas funciones para Evolución/Concentración.
+    """
 
     @callback(
         Output(f"{prefix}-isp-nombre", "options"),
-        Output(f"{prefix}-isp-nombre", "value"),
         Input(f"{prefix}-territory-id", "data"),
-        State("shared-filters", "data"),
     )
-    def restore_isp_nombre(territory_id: str, shared_data):
-        # Las OPCIONES dependen del territorio (un prestador presente en
-        # Provincia X no necesariamente aparece en la lista de otra
-        # provincia) -- eso NO se sincroniza, se recalcula por página. El
-        # VALOR elegido sí se restaura desde el store compartido, si sigue
-        # siendo una opción válida para el territorio actual.
+    def actualizar_opciones_isp(territory_id: str | None):
         if not territory_id:
-            return [], []
-        options = get_provider_options(territory_id)
+            return []
+        return get_provider_options(territory_id)
+
+
+def register_universal_opera_isp_sync(prefix: str, get_full_provider_options: Callable[[], list[dict]]) -> None:
+    """
+    Sincroniza el VALOR (no las opciones) de Estado de operación y
+    Prestador entre los 5 módulos del dashboard -- Evolución,
+    Concentración, Control, Mapa de nodos, Discrepancias de geografía
+    (20-ago-2026, a pedido del usuario: "quiero que Estado/Prestador sea
+    un solo estado universal compartido entre los 5 módulos"). Se llama
+    UNA VEZ por página, con los ids "{prefix}-opera-estado"/
+    "{prefix}-isp-nombre" que esa página ya usa.
+
+    `get_full_provider_options` es una función SIN argumentos que
+    devuelve la lista COMPLETA (nacional, sin acotar por territorio ni
+    tipo de geografía) de prestadores válidos para el universo de ESA
+    página -- se usa solo para VALIDAR el valor restaurado, nunca las
+    opciones que el dropdown de esa página muestra en este momento (que
+    pueden estar acotadas por territorio, y en la primera carga todavía
+    no haberse calculado -- la misma condición de carrera que ya se
+    corrigió en node_territory_filters.py se evita aquí desde el diseño,
+    no reapareció por descuido).
+
+    Dos callbacks separados para el valor de Estado y de Prestador, más
+    uno de escritura -- nunca un callback que lea Y escriba el mismo
+    Store en la misma dirección (ver el docstring de
+    register_shared_period_sync en components/ui.py para la explicación
+    completa de por qué esto es obligatorio, no una preferencia de
+    estilo).
+    """
+
+    @callback(
+        Output(f"{prefix}-opera-estado", "value"),
+        Input("shared-filters", "modified_timestamp"),
+        State("shared-filters", "data"),
+        State(f"{prefix}-opera-estado", "value"),
+    )
+    def restaurar_opera_estado(_ts, shared_data, valor_actual):
+        if valor_actual:
+            # Ya hay algo elegido en ESTA página -- no lo pisa. En la
+            # práctica esto solo importa dentro de la misma carga (Dash
+            # Pages destruye y reconstruye el árbol de cada página al
+            # navegar, así que un valor "ya elegido" en una carga nueva
+            # siempre es el [] por defecto del layout, nunca algo viejo).
+            return no_update
+        return (shared_data or {}).get("opera_estados", [])
+
+    @callback(
+        Output(f"{prefix}-isp-nombre", "value"),
+        Input("shared-filters", "modified_timestamp"),
+        State("shared-filters", "data"),
+        State(f"{prefix}-isp-nombre", "value"),
+    )
+    def restaurar_isp_nombre(_ts, shared_data, valor_actual):
+        if valor_actual:
+            return no_update
         deseados = (shared_data or {}).get("isp_nombres", [])
-        valores_validos = {o["value"] for o in options}
-        value = [v for v in deseados if v in valores_validos]
-        return options, value
+        opciones_completas = get_full_provider_options()
+        valores_validos = {o["value"] for o in opciones_completas}
+        return [v for v in deseados if v in valores_validos]
 
     @callback(
         Output("shared-filters", "data", allow_duplicate=True),
         Input(f"{prefix}-opera-estado", "value"),
         Input(f"{prefix}-isp-nombre", "value"),
         prevent_initial_call=True,
-        # allow_duplicate=True: igual que en territory_filters.py, ambas
-        # páginas registran esta misma salida -- solo la página visible
-        # tiene sus Inputs "vivos", así que en la práctica nunca compiten.
+        # allow_duplicate=True: las 5 páginas registran esta misma salida
+        # -- solo la página visible tiene sus Inputs "vivos" en un momento
+        # dado, así que en la práctica nunca compiten entre sí.
     )
     def guardar_filtros(opera_estados: list[str] | None, isp_nombres: list[str] | None):
         return {"opera_estados": opera_estados or [], "isp_nombres": isp_nombres or []}
