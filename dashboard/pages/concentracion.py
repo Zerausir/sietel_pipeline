@@ -110,8 +110,7 @@ def layout():
                 className="chart-grid two",
                 children=[
                     chart_card("Evolución histórica del IHH", "con-ihh-chart",
-                               "Calculado solo sobre prestadores con reporte real cada mes.",
-                               note_id="con-ihh-dominante-nota"),
+                               "Calculado solo sobre prestadores con reporte real cada mes."),
                     chart_card("CR2 y CR4 en el tiempo", "con-cr-chart",
                                "Concentración acumulada de los 2 y 4 principales prestadores -- el IHH resume "
                                "todo el mercado en un número, CR2/CR4 responden una pregunta más concreta: "
@@ -250,7 +249,6 @@ def update_provider_options(territory_id: str, period_id: int, opera_estados: li
     Output("con-kpi-cr4", "children"),
     Output("con-kpi-cr4-note", "children"),
     Output("con-ihh-chart", "figure"),
-    Output("con-ihh-dominante-nota", "children"),
     Output("con-dependencia-geografica-chart", "figure"),
     Output("con-cr-chart", "figure"),
     Output("con-participation-chart", "figure"),
@@ -279,7 +277,7 @@ def update_concentration(
     empty_spark = empty_figure()
     empty_return = (
         "—", "", "—", "", empty_spark, "—", "", "—", "", empty_spark, "—", "", "—", "",
-        empty_figures[0], "", empty_figures[1], empty_figures[2], empty_figures[3], empty_figures[4],
+        empty_figures[0], empty_figures[1], empty_figures[2], empty_figures[3], empty_figures[4],
         [], "",
     )
     if not territory_id or None in (start_period, end_period, current_period):
@@ -411,6 +409,15 @@ def update_concentration(
     # fact_ihh_geografico.sql: la columna viene forzada a FALSE en
     # cualquier otro nivel geográfico (el concepto de "prestador dominante"
     # está definido y validado solo ahí).
+    #
+    # CORRECCIÓN (19-ago-2026, a pedido de Iván): se quitó el mensaje de
+    # texto bajo el gráfico -- con varios episodios de ausencia en el
+    # rango completo (2011-2025), la lista de fechas se volvía una pared
+    # de texto poco legible, y mezclaba nombres (CNT junto a COMM & NET
+    # S.A., que también cruza el umbral de 30% en algún momento de su
+    # historia) sin distinguir cuál pesa más. El sombreado rojo en el
+    # gráfico y el aviso en el hover de cada punto se mantienen -- son
+    # más discretos y no compiten por atención en una presentación.
     tiene_ausencias = ihh["prestador_dominante_ausente"].fillna(False).astype(bool).any()
     if territory_id == "NACIONAL|ECUADOR" and tiene_ausencias:
         ihh_ordenado = ihh.sort_values("periodo").reset_index(drop=True)
@@ -423,8 +430,7 @@ def update_concentration(
         rangos = (
             ihh_ordenado.assign(_ausente=ausente_serie, _grupo=grupo)
             .groupby("_grupo")
-            .agg(inicio=("periodo", "min"), fin=("periodo", "max"), ausente=("_ausente", "first"),
-                 nombres=("prestadores_dominantes_ausentes_nombres", "first"))
+            .agg(inicio=("periodo", "min"), fin=("periodo", "max"), ausente=("_ausente", "first"))
         )
         rangos = rangos[rangos["ausente"]]
 
@@ -433,18 +439,6 @@ def update_concentration(
                 x0=rango["inicio"], x1=rango["fin"] + pd.DateOffset(months=1),
                 fillcolor=PALETTE["red"], opacity=0.08, line_width=0,
             )
-
-        etiquetas_rango = [
-            f"{r['inicio'].strftime('%Y-%m')} a {r['fin'].strftime('%Y-%m')}" for _, r in rangos.iterrows()
-        ]
-        nombres_unicos = sorted({n for n in rangos["nombres"].dropna().unique() if n})
-        dominante_nota = (
-            f"⚠ IHH no comparable en {', '.join(etiquetas_rango)}: "
-            f"{' / '.join(nombres_unicos) if nombres_unicos else 'el prestador líder habitual'} "
-            "no reportó ese período -- la caída del índice refleja su ausencia, no más competencia real."
-        )
-    else:
-        dominante_nota = ""
 
     # Dependencia geográfica del prestador ausente (hallazgo 9.6 del EDA)
     # -- generaliza el caso CNT (el EDA hardcodeaba su nombre y un período
@@ -567,7 +561,7 @@ def update_concentration(
         leader_share_value, leader_share_note, leader_share_spark,
         cr2_value, cr2_note,
         cr4_value, cr4_note,
-        ihh_fig, dominante_nota, dependencia_fig, cr_fig, participation_fig, contribution_fig,
+        ihh_fig, dependencia_fig, cr_fig, participation_fig, contribution_fig,
         grid_rows, message,
     )
 

@@ -30,6 +30,7 @@ from services.queries import (
     get_churn_history,
     get_evolution_filtrado,
     get_participation,
+    get_participation_filtrado,
     get_periods,
     get_prestadores_nunca_reportaron_detalle,
     get_provider_count_in_range,
@@ -245,14 +246,31 @@ def update_evolution(
     # codifica como anio*100+mes -- se usa aritmética de fecha real
     # (no periodo_id - 1) para hallar el mes anterior correctamente en
     # cualquier enero.
+    #
+    # CORRECCIÓN (19-ago-2026, revisión de funcionalidad completa antes
+    # de una presentación): esta tarjeta llamaba a get_participation() sin
+    # Estado/Prestador, mientras las otras 3 tarjetas de la misma fila
+    # ("Cuentas reportadas", "Prestadores que reportaron", "Cambio
+    # mensual") sí respetan esos filtros -- al filtrar por un prestador
+    # específico, este número se quedaba mostrando la cifra nacional, sin
+    # relación visible con el filtro activo. Ahora usa
+    # get_participation_filtrado() cuando hay Estado/Prestador elegido,
+    # igual que el resto de la fila.
     churn_value, churn_note = "—", ""
     try:
         periodo_actual_id = int(latest["periodo_id"])
         fecha_mes_anterior = (latest["periodo"] - pd.DateOffset(months=1)).date().isoformat()
         periodo_anterior_id = resolve_period_id(fecha_mes_anterior)
-        actuales = get_participation(territory_id, periodo_actual_id)
-        anteriores = get_participation(territory_id,
-                                       periodo_anterior_id) if periodo_anterior_id is not None else pd.DataFrame()
+        if opera_estados or isp_nombres:
+            actuales = get_participation_filtrado(territory_id, periodo_actual_id, opera_estados, isp_nombres)
+            anteriores = (
+                get_participation_filtrado(territory_id, periodo_anterior_id, opera_estados, isp_nombres)
+                if periodo_anterior_id is not None else pd.DataFrame()
+            )
+        else:
+            actuales = get_participation(territory_id, periodo_actual_id)
+            anteriores = get_participation(territory_id,
+                                           periodo_anterior_id) if periodo_anterior_id is not None else pd.DataFrame()
         if not actuales.empty and not anteriores.empty:
             activos_anterior = set(
                 anteriores.loc[
