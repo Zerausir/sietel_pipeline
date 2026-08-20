@@ -145,11 +145,33 @@ def register_universal_opera_isp_sync(prefix: str, get_full_provider_options: Ca
     )
     def restaurar_isp_nombre(_ts, shared_data, valor_actual):
         if valor_actual:
+            print(f"[DEBUG {prefix}] restaurar_isp_nombre: ya hay valor propio ({valor_actual!r}), no pisa", flush=True)
             return no_update
         deseados = (shared_data or {}).get("isp_nombres", [])
-        opciones_completas = get_full_provider_options()
-        valores_validos = {o["value"] for o in opciones_completas}
-        return [v for v in deseados if v in valores_validos]
+        # DIAGNÓSTICO TEMPORAL (20-ago-2026) -- Iván reporta que Estado de
+        # operación sí persiste al cambiar de pestaña, pero Prestador no
+        # (vuelve a "Todos"). Diferencia estructural real entre ambos
+        # callbacks: restaurar_opera_estado es puramente sincrónico (solo
+        # lee un diccionario ya en memoria); este SÍ depende de una
+        # consulta real a PostgreSQL (get_full_provider_options) sin
+        # ningún manejo de excepción -- si esa consulta falla o el store
+        # llega vacío en este instante, el callback completo puede
+        # fallar/no actualizar nada, dejando el valor en el [] por
+        # defecto del layout ("Todos"). Este print + try/except aísla
+        # exactamente cuál de los dos es. QUITAR una vez diagnosticado.
+        try:
+            opciones_completas = get_full_provider_options()
+            valores_validos = {o["value"] for o in opciones_completas}
+            resultado = [v for v in deseados if v in valores_validos]
+            print(
+                f"[DEBUG {prefix}] restaurar_isp_nombre: deseados={deseados!r} "
+                f"opciones_completas_count={len(opciones_completas)} resultado={resultado!r}",
+                flush=True,
+            )
+            return resultado
+        except Exception as exc:
+            print(f"[DEBUG {prefix}] restaurar_isp_nombre: EXCEPCION -> {type(exc).__name__}: {exc}", flush=True)
+            raise
 
     @callback(
         Output("shared-filters", "data", allow_duplicate=True),
@@ -161,4 +183,12 @@ def register_universal_opera_isp_sync(prefix: str, get_full_provider_options: Ca
         # dado, así que en la práctica nunca compiten entre sí.
     )
     def guardar_filtros(opera_estados: list[str] | None, isp_nombres: list[str] | None):
+        # DIAGNÓSTICO TEMPORAL (20-ago-2026) -- ver restaurar_isp_nombre.
+        # Si esto se dispara con isp_nombres=[] justo después de navegar a
+        # una página nueva (ANTES de que restaurar_isp_nombre termine),
+        # estaría borrando el valor compartido con el [] recién montado
+        # de esta página -- exactamente el síntoma reportado. QUITAR una
+        # vez diagnosticado.
+        print(f"[DEBUG {prefix}] guardar_filtros: opera_estados={opera_estados!r} isp_nombres={isp_nombres!r}",
+              flush=True)
         return {"opera_estados": opera_estados or [], "isp_nombres": isp_nombres or []}
