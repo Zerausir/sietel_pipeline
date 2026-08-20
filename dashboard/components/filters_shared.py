@@ -51,38 +51,6 @@ from dash import Input, Output, State, callback, ctx, dcc, html, no_update
 from services.queries import get_operation_states, get_provider_options
 
 
-def sync_armado_store(prefix: str) -> dcc.Store:
-    """
-    Store de control de inicialización para cada página.
-
-    Mientras este Store sea False, el callback que guarda los filtros no
-    escribe en shared-filters.
-
-    Esto evita que el [] inicial de un Dropdown recién montado sea interpretado
-    como una selección real del usuario.
-
-    Approach:
-    Usar un Store booleano independiente por página como barrera entre la
-    restauración inicial y el guardado de cambios del usuario.
-
-    Reasoning:
-    En Dash Pages los componentes de una página aparecen y desaparecen al
-    navegar. Dash puede ejecutar callbacks cuando esos componentes aparecen
-    en el layout. Por eso prevent_initial_call por sí solo no debe utilizarse
-    como única barrera para este caso.
-
-    Test Cases:
-    - Store recién creado -> data=False.
-    - Restauración terminada -> data=True.
-    - Dropdown inicial [] mientras data=False -> shared-filters no cambia.
-    - Usuario cambia Prestador con data=True -> shared-filters se actualiza.
-    """
-    return dcc.Store(
-        id=f"{prefix}-sync-armado",
-        data=False,
-    )
-
-
 def shared_filters_layout(prefix: str) -> html.Div:
     """
     Construye los filtros compartidos de Evolución y Concentración.
@@ -98,7 +66,6 @@ def shared_filters_layout(prefix: str) -> html.Div:
     Test Cases:
     - layout("evo") -> IDs evo-opera-estado y evo-isp-nombre.
     - layout("con") -> IDs con-opera-estado y con-isp-nombre.
-    - Ambos contienen sync-armado.
     """
     return html.Div(
         className="territory-grid",
@@ -129,7 +96,6 @@ def shared_filters_layout(prefix: str) -> html.Div:
                     ),
                 ],
             ),
-            sync_armado_store(prefix),
         ],
     )
 
@@ -241,12 +207,23 @@ def register_shared_filters_callbacks(prefix: str) -> None:
         return opciones
 
 
-def register_universal_opera_isp_sync(
-        prefix: str,
-        get_full_provider_options=None,
-) -> None:
+def register_universal_opera_isp_sync(prefix: str) -> None:
     """
     Sincroniza Estado de operación y Prestador mediante shared-filters.
+
+    LIMPIEZA (21-ago-2026): esta función recibía un segundo parámetro
+    "get_full_provider_options" (una función sin argumentos que consultaba
+    la lista completa de prestadores) -- lo necesitaba una versión anterior
+    de restaurar_filtros() que validaba el valor restaurado contra esa
+    lista antes de aplicarlo. El rediseño de esa función (ver más abajo)
+    dejó de consultar la base de datos por completo -- la validación de
+    "¿este valor sigue siendo representable?" ahora vive en las funciones
+    de OPCIONES de cada página (actualizar_opciones_isp/update_isp_options),
+    que agregan el valor compartido a las opciones si el territorio actual
+    no lo trae. El parámetro quedó sin ningún uso dentro de esta función,
+    aunque las 5 páginas seguían pasándolo -- se quitó junto con
+    sync_armado_store() en la misma limpieza, mismo motivo: código muerto
+    de una versión anterior de este mecanismo.
 
     Los cinco módulos participantes son:
 
@@ -271,10 +248,16 @@ def register_universal_opera_isp_sync(
         Dropdown.value
             -> shared-filters.data
 
-    No usamos sync-armado para determinar si una modificación corresponde al
-    usuario. La navegación se detecta mediante dcc.Location(id="obtel-url"),
-    que vive fuera de dash.page_container y cambia en cada navegación de
-    Dash Pages.
+    No se usa ningún Store de "candado" para determinar si una modificación
+    corresponde al usuario -- versión anterior de este mecanismo (20-ago-2026)
+    sí lo tenía (sync_armado_store), pero quedó sin uso real una vez que la
+    restauración dejó de depender de una consulta SQL: al ser ahora puramente
+    sincrónica, y al escribir guardar_filtros() de forma quirúrgica (solo el
+    campo que realmente cambió, vía ctx.triggered_id, nunca reconstruyendo
+    ambos campos desde cero), ya no hace falta ese candado -- se quitó por
+    limpieza (código muerto) el 21-ago-2026. La navegación se detecta
+    mediante dcc.Location(id="obtel-url"), que vive fuera de
+    dash.page_container y cambia en cada navegación de Dash Pages.
 
     Reasoning:
     Un Store ubicado dentro de una página no es una señal fiable de

@@ -39,7 +39,6 @@ from services.queries import (
     get_periods,
     get_prestadores_nunca_reportaron_detalle,
     get_provider_count_in_range,
-    get_provider_options,
     get_reporting_summary,
     get_velocities,
     resolve_period_id,
@@ -156,7 +155,7 @@ def layout():
 
 register_territory_callbacks(PREFIX)
 register_shared_filters_callbacks(PREFIX)
-register_universal_opera_isp_sync(PREFIX, lambda: get_provider_options("NACIONAL|ECUADOR"))
+register_universal_opera_isp_sync(PREFIX)
 register_month_year_picker_callback("evo-start-period")
 register_month_year_picker_callback("evo-end-period")
 register_shared_period_sync("evo-start-period", "evo-end-period")

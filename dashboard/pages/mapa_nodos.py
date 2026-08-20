@@ -26,7 +26,7 @@ import plotly.graph_objects as go
 from dash import Input, Output, State, callback, dcc, html, register_page
 import dash_ag_grid as dag
 
-from components.filters_shared import register_universal_opera_isp_sync, sync_armado_store
+from components.filters_shared import register_universal_opera_isp_sync
 from components.node_territory_filters import node_territory_filter_layout, register_node_territory_callbacks
 from components.ui import (
     PALETTE, chart_card, clean_records, compute_mapbox_view, empty_figure, error_panel, excel_download_button,
@@ -60,7 +60,6 @@ def layout():
                 "Mapa de nodos",
                 "Ubicación geográfica de nodos de acceso ISP, sin discrepancia frente a lo reportado en SIETEL.",
             ),
-            sync_armado_store(PREFIX),
             html.Section(
                 className="filter-panel",
                 children=[
@@ -181,7 +180,7 @@ def layout():
 
 
 register_node_territory_callbacks(PREFIX)
-register_universal_opera_isp_sync(PREFIX, lambda: get_node_provider_options((), (), ()))
+register_universal_opera_isp_sync(PREFIX)
 register_excel_download_callback(f"{PREFIX}-grid", "detalle_de_nodos.xlsx")
 
 

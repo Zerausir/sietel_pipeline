@@ -33,8 +33,8 @@ lista visible del selector cruzado. Dos razones, no una sola:
      sea la lógica interna) y la aplicación no arrancaría. Por eso las
      opciones y el valor de cada selector viven en callbacks SEPARADOS:
      las opciones reaccionan a los hermanos (Input), el valor solo se
-     restaura desde el store compartido al montar la página (nunca desde
-     un hermano) -- ver register_node_territory_callbacks() más abajo.
+     restaura desde el store compartido -- ver
+     register_node_territory_callbacks() más abajo.
 
 NO comparte dcc.Store con territory_filters.py -- "shared-territory" es de
 Evolución/Concentración (geografía de líneas). Las páginas de nodos usan su
@@ -42,6 +42,33 @@ propio store local ("nodo-shared-territory"), sincronizado solo entre ellas
 (Mapa de Nodos y Discrepancias de Geografía). Su forma es
 {provincias, cantones, parroquias} (listas), reflejando la selección
 múltiple -- ver app.py para el valor inicial del Store.
+
+CORRECCIÓN (21-ago-2026, confirmado por el usuario en producción -- la
+sincronización entre Mapa de nodos y Discrepancias NO funcionaba): la
+restauración de valor dependía de "nodo-shared-territory.modified_timestamp"
++ una consulta real a PostgreSQL (get_node_territory_hierarchy) para validar
+el código restaurado, mientras que resolve_selection (el que escribe) solo
+se protegía con prevent_initial_call=True. Es EXACTAMENTE el mismo patrón
+que ya se confirmó roto para Estado/Prestador (ver
+components/filters_shared.py): prevent_initial_call=True NO evita de forma
+confiable el disparo "fantasma" del montaje de una página nueva en Dash
+Pages -- ese disparo podía escribir el [] recién montado de los tres
+dropdowns en nodo-shared-territory ANTES de que la consulta a la base
+terminara de restaurar el valor real, sobrescribiéndolo. No se detectó
+antes porque las pruebas anteriores solo verificaban la lógica de la
+función aislada, no la carrera real entre los dos callbacks -- el mismo
+punto ciego que tuvo el bug de Prestador hasta que se probó en un
+navegador real.
+
+Se corrige con el MISMO mecanismo ya probado en producción para Estado/
+Prestador: restauración disparada por navegación real
+(Input("obtel-url", "pathname")) + cambios del store, sin ninguna consulta
+a PostgreSQL (ya no hace falta -- los códigos que llegan a
+nodo-shared-territory siempre vinieron de una selección real hecha en
+alguna de las dos páginas, ambas ya validadas contra
+get_node_territory_hierarchy() en sus propios callbacks de opciones);
+escritura quirúrgica vía dash.ctx.triggered_id, que modifica solo el campo
+que realmente cambió -- nunca reconstruye los tres campos desde cero.
 """
 from __future__ import annotations
 
@@ -89,6 +116,7 @@ def node_territory_filter_layout(prefix: str) -> html.Div:
 
 def register_node_territory_callbacks(prefix: str) -> None:
     # --- Opciones: reaccionan a los DOS hermanos, filtrado cruzado real ---
+    # SIN CAMBIOS respecto a la versión anterior.
     @callback(
         Output(f"{prefix}-province", "options"),
         Input(f"{prefix}-canton", "value"),
@@ -125,39 +153,23 @@ def register_node_territory_callbacks(prefix: str) -> None:
             {"codigo_provincia": provincias or [], "codigo_canton": cantones or []},
         )
 
-    # --- Valor: SOLO se restaura desde el store compartido al montar la
-    # página (nunca desde un hermano) -- ver el docstring del módulo para
-    # por qué esto tiene que vivir separado de las opciones.
-    #
-    # Se valida contra la jerarquía COMPLETA (todos los códigos reales),
-    # no contra el "options" actual del propio selector vía State -- ese
-    # State podría leerse ANTES de que opciones_provincia()/opciones_canton()/
-    # opciones_parroquia() hayan corrido en la primera carga (Dash no
-    # garantiza el orden de ejecución entre un State y el callback que
-    # produce ese valor, solo entre Input/Output). Validar contra la
-    # jerarquía completa evita esa carrera por completo -- cualquier
-    # código real pasa, cualquier código inválido se descarta igual. ---
-    def _restaurar_valor(campo: str, columna_codigo: str):
-        @callback(
-            Output(f"{prefix}-{campo}", "value"),
-            Input("nodo-shared-territory", "modified_timestamp"),
-            State("nodo-shared-territory", "data"),
-            State(f"{prefix}-{campo}", "value"),
+    # --- Valor: restauración por navegación + persistencia quirúrgica ---
+    # (ver el docstring del módulo, sección "CORRECCIÓN 21-ago-2026", para
+    # el porqué completo).
+    @callback(
+        Output(f"{prefix}-province", "value"),
+        Output(f"{prefix}-canton", "value"),
+        Output(f"{prefix}-parish", "value"),
+        Input("obtel-url", "pathname"),
+        Input("nodo-shared-territory", "data"),
+    )
+    def restaurar_territorio(_pathname, shared_data):
+        shared_data = shared_data or {}
+        return (
+            shared_data.get("provincias", []) or [],
+            shared_data.get("cantones", []) or [],
+            shared_data.get("parroquias", []) or [],
         )
-        def restaurar(_ts, shared_data, current_value):
-            if current_value:
-                return dash.no_update
-            clave = {"province": "provincias", "canton": "cantones", "parish": "parroquias"}[campo]
-            deseado = (shared_data or {}).get(clave, [])
-            jerarquia = get_node_territory_hierarchy()
-            valores_validos = set(jerarquia[columna_codigo].dropna().astype(str).unique())
-            return [v for v in deseado if v in valores_validos]
-
-        return restaurar
-
-    _restaurar_valor("province", "codigo_provincia")
-    _restaurar_valor("canton", "codigo_canton")
-    _restaurar_valor("parish", "codigo_parroquia")
 
     @callback(
         Output(f"{prefix}-territory-selection", "data"),
@@ -165,12 +177,34 @@ def register_node_territory_callbacks(prefix: str) -> None:
         Input(f"{prefix}-province", "value"),
         Input(f"{prefix}-canton", "value"),
         Input(f"{prefix}-parish", "value"),
+        State("nodo-shared-territory", "data"),
         prevent_initial_call=True,
     )
-    def resolve_selection(provincias, cantones, parroquias):
-        seleccion = {
+    def resolve_selection(provincias, cantones, parroquias, shared_data):
+        # "{prefix}-territory-selection" (local, usado por las consultas
+        # propias de ESTA página) siempre refleja el estado COMPLETO
+        # actual de los tres dropdowns, sin importar cuál cambió.
+        seleccion_local = {
             "provincias": provincias or [],
             "cantones": cantones or [],
             "parroquias": parroquias or [],
         }
-        return seleccion, seleccion
+
+        # "nodo-shared-territory" (compartido con la página hermana) se
+        # actualiza de forma QUIRÚRGICA -- solo el campo que realmente
+        # cambió, fusionado sobre lo que ya había -- nunca reconstruido
+        # desde cero a partir de los tres dropdowns. Esto es lo que evita
+        # que el disparo fantasma del montaje sobrescriba con [] los
+        # otros dos campos que la página hermana ya había puesto ahí.
+        shared_data = dict(shared_data or {})
+        triggered_id = dash.ctx.triggered_id
+        if triggered_id == f"{prefix}-province":
+            shared_data["provincias"] = provincias or []
+        elif triggered_id == f"{prefix}-canton":
+            shared_data["cantones"] = cantones or []
+        elif triggered_id == f"{prefix}-parish":
+            shared_data["parroquias"] = parroquias or []
+        else:
+            return seleccion_local, dash.no_update
+
+        return seleccion_local, shared_data

@@ -40,7 +40,6 @@ from services.queries import (
     get_participation_filtrado,
     get_periods,
     get_provider_history,
-    get_provider_options,
 )
 
 register_page(__name__, path="/sai/concentracion", name="IHH y participación", order=2)
@@ -201,7 +200,7 @@ def layout():
 
 register_territory_callbacks(PREFIX)
 register_shared_filters_callbacks(PREFIX)
-register_universal_opera_isp_sync(PREFIX, lambda: get_provider_options("NACIONAL|ECUADOR"))
+register_universal_opera_isp_sync(PREFIX)
 register_month_year_picker_callback("con-start-period")
 register_month_year_picker_callback("con-end-period")
 register_month_year_picker_callback("con-current-period")
