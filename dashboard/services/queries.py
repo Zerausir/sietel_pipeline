@@ -1950,3 +1950,79 @@ def get_dependencia_geografica_dominante_ausente(periodo_id: int) -> pd.DataFram
         """,
         {"periodo_id": periodo_id},
     )
+
+
+# ============================================================
+# Filtrado cruzado inverso: Prestador -> Provincia/Cantón/Parroquia
+# (21-ago-2026, a pedido de Iván -- estilo Power BI: "cuando selecciono
+# Prestador, que Provincia/Cantón/Parroquia solo muestren dónde ese
+# prestador realmente tiene presencia"). Espejo de get_provider_options()/
+# get_node_provider_options(), que ya hacen la dirección contraria
+# (territorio -> lista de prestadores). Solo para Control/Mapa de
+# nodos/Discrepancias -- Evolución/Concentración no lo necesitan, tienen
+# Nivel geográfico primero.
+# ============================================================
+
+@cache.memoize(timeout=300)
+def get_territorios_con_prestador(isp_nombres: tuple[str, ...]) -> pd.DataFrame:
+    """
+    Provincia/Cantón/Parroquia (geografía de LÍNEAS) donde al menos uno de
+    los prestadores dados tiene reporte real -- para Control. Igual que
+    get_territory_hierarchy(), se ancla a nivel PARROQUIA de
+    bridge_geografia_territorio/dim_territorio para traer los tres códigos
+    en una sola fila por parroquia -- no a NACIONAL/PROVINCIA/CANTÓN, que
+    son otros niveles del mismo bridge (rollups), no filas con los tres
+    códigos juntos.
+    """
+    if not isp_nombres:
+        return pd.DataFrame(columns=["codigo_provincia", "codigo_canton", "codigo_parroquia"])
+    return _read(
+        """
+        SELECT DISTINCT t.codigo_provincia, t.codigo_canton, t.codigo_parroquia
+        FROM mart.fact_lineas_geografia_mes f
+        JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
+        JOIN mart.dim_territorio t ON t.territorio_id = b.territorio_id AND t.nivel_geografico = 'PARROQUIA'
+        JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
+        WHERE p.isp_nombre = ANY(:isp_nombres) AND f.tiene_reportado = TRUE
+        """,
+        {"isp_nombres": list(isp_nombres)},
+    )
+
+
+@cache.memoize(timeout=300)
+def get_node_territorios_con_prestador(isp_nombres: tuple[str, ...]) -> pd.DataFrame:
+    """
+    Igual que get_territorios_con_prestador() pero para geografía de NODOS
+    (mart.vw_nodos_isp_mapa) -- para Mapa de nodos/Discrepancias de
+    geografía. Espejo de get_node_provider_options().
+    """
+    if not isp_nombres:
+        return pd.DataFrame(columns=["codigo_provincia", "codigo_canton", "codigo_parroquia"])
+    return _read(
+        """
+        SELECT DISTINCT codigo_provincia, codigo_canton, codigo_parroquia
+        FROM mart.vw_nodos_isp_mapa
+        WHERE isp_nombre = ANY(:isp_nombres)
+        """,
+        {"isp_nombres": list(isp_nombres)},
+    )
+
+
+def acotar_opciones_por_prestador(
+        opciones: list[dict[str, str]],
+        columna_codigo: str,
+        territorios_con_prestador: pd.DataFrame,
+) -> list[dict[str, str]]:
+    """
+    Filtra 'opciones' (ya acotadas por los hermanos geográficos) a solo los
+    códigos donde el/los prestador(es) elegido(s) tienen presencia real --
+    intersección, no reemplazo: el filtrado cruzado entre Provincia/Cantón/
+    Parroquia sigue aplicando igual, esto solo agrega una restricción más.
+
+    Si `territorios_con_prestador` está vacío (sin Prestador elegido, o el
+    prestador elegido no tiene presencia en ningún lado), no filtra nada --
+    la llamada solo debe hacerse cuando SÍ hay un prestador elegido; ver
+    los call sites en lines_territory_filters.py/node_territory_filters.py.
+    """
+    codigos_validos = set(territorios_con_prestador[columna_codigo].dropna().astype(str).unique())
+    return [o for o in opciones if str(o["value"]) in codigos_validos]

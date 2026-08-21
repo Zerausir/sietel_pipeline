@@ -102,13 +102,23 @@ prevent_initial_call=True simple (sin "initial_duplicate") porque ya no
 necesita alcanzar a correr en el montaje -- su único trabajo ahora es
 avisarle a la página hermana cuando el usuario cambia algo, nunca alimentar
 una consulta de datos de esta misma página.
+CUARTA CORRECCIÓN -- en realidad, funcionalidad nueva (21-ago-2026, a
+pedido de Iván, estilo Power BI): elegir un Prestador TAMBIÉN acota
+Provincia/Cantón/Parroquia a solo donde ese prestador tiene presencia real
+-- ver services/queries.py:get_node_territorios_con_prestador()/
+acotar_opciones_por_prestador(). Restricción ADICIONAL sobre el filtrado
+cruzado ya existente entre los tres niveles y sobre la preservación de
+valores compartidos, no un reemplazo de ninguno de los dos.
 """
 from __future__ import annotations
 
 import dash
 from dash import Input, Output, State, callback, dcc, html
 
-from services.queries import get_node_territory_hierarchy, opciones_geograficas_facetadas
+from services.queries import (
+    acotar_opciones_por_prestador, get_node_territorios_con_prestador, get_node_territory_hierarchy,
+    opciones_geograficas_facetadas,
+)
 
 
 def node_territory_filter_layout(prefix: str) -> html.Div:
@@ -203,20 +213,26 @@ def register_node_territory_callbacks(prefix: str) -> None:
 
     # --- Opciones: reaccionan a los DOS hermanos, filtrado cruzado real --
     # -- AMPLIADO (21-ago-2026) para también conservar el valor propio Y el
-    # compartido, ver _preservar_valores() más arriba.
+    # compartido, ver _preservar_valores() más arriba -- Y para acotar por
+    # Prestador elegido, ver acotar_opciones_por_prestador() en
+    # services/queries.py.
     @callback(
         Output(f"{prefix}-province", "options"),
         Input(f"{prefix}-canton", "value"),
         Input(f"{prefix}-parish", "value"),
+        Input(f"{prefix}-isp-nombre", "value"),
         Input("nodo-shared-territory", "data"),
         State(f"{prefix}-province", "value"),
     )
-    def opciones_provincia(cantones, parroquias, shared_data, valores_actuales):
+    def opciones_provincia(cantones, parroquias, isp_nombres, shared_data, valores_actuales):
         jerarquia = get_node_territory_hierarchy()
         opciones = opciones_geograficas_facetadas(
             jerarquia, "codigo_provincia", "nombre_provincia",
             {"codigo_canton": cantones or [], "codigo_parroquia": parroquias or []},
         )
+        if isp_nombres:
+            territorios = get_node_territorios_con_prestador(tuple(isp_nombres))
+            opciones = acotar_opciones_por_prestador(opciones, "codigo_provincia", territorios)
         return _preservar_valores(
             opciones, jerarquia, "codigo_provincia", "nombre_provincia",
             valores_actuales, (shared_data or {}).get("provincias"),
@@ -226,15 +242,19 @@ def register_node_territory_callbacks(prefix: str) -> None:
         Output(f"{prefix}-canton", "options"),
         Input(f"{prefix}-province", "value"),
         Input(f"{prefix}-parish", "value"),
+        Input(f"{prefix}-isp-nombre", "value"),
         Input("nodo-shared-territory", "data"),
         State(f"{prefix}-canton", "value"),
     )
-    def opciones_canton(provincias, parroquias, shared_data, valores_actuales):
+    def opciones_canton(provincias, parroquias, isp_nombres, shared_data, valores_actuales):
         jerarquia = get_node_territory_hierarchy()
         opciones = opciones_geograficas_facetadas(
             jerarquia, "codigo_canton", "nombre_canton",
             {"codigo_provincia": provincias or [], "codigo_parroquia": parroquias or []},
         )
+        if isp_nombres:
+            territorios = get_node_territorios_con_prestador(tuple(isp_nombres))
+            opciones = acotar_opciones_por_prestador(opciones, "codigo_canton", territorios)
         return _preservar_valores(
             opciones, jerarquia, "codigo_canton", "nombre_canton",
             valores_actuales, (shared_data or {}).get("cantones"),
@@ -244,15 +264,19 @@ def register_node_territory_callbacks(prefix: str) -> None:
         Output(f"{prefix}-parish", "options"),
         Input(f"{prefix}-province", "value"),
         Input(f"{prefix}-canton", "value"),
+        Input(f"{prefix}-isp-nombre", "value"),
         Input("nodo-shared-territory", "data"),
         State(f"{prefix}-parish", "value"),
     )
-    def opciones_parroquia(provincias, cantones, shared_data, valores_actuales):
+    def opciones_parroquia(provincias, cantones, isp_nombres, shared_data, valores_actuales):
         jerarquia = get_node_territory_hierarchy()
         opciones = opciones_geograficas_facetadas(
             jerarquia, "codigo_parroquia", "nombre_parroquia",
             {"codigo_provincia": provincias or [], "codigo_canton": cantones or []},
         )
+        if isp_nombres:
+            territorios = get_node_territorios_con_prestador(tuple(isp_nombres))
+            opciones = acotar_opciones_por_prestador(opciones, "codigo_parroquia", territorios)
         return _preservar_valores(
             opciones, jerarquia, "codigo_parroquia", "nombre_parroquia",
             valores_actuales, (shared_data or {}).get("parroquias"),

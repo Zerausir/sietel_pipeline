@@ -19,6 +19,17 @@ ver el docstring de ese módulo para el porqué completo (evitar una
 dependencia circular real en el grafo de callbacks de Dash, y no borrar
 selecciones explícitas del usuario solo porque otro campo cambió).
 
+FILTRADO CRUZADO CON PRESTADOR (21-ago-2026, a pedido de Iván -- estilo
+Power BI): elegir un Prestador TAMBIÉN acota Provincia/Cantón/Parroquia a
+solo donde ese prestador tiene presencia real -- ver
+services/queries.py:get_territorios_con_prestador()/
+acotar_opciones_por_prestador(). Es una restricción ADICIONAL sobre el
+filtrado cruzado ya existente entre los tres niveles, no un reemplazo.
+Deliberadamente NO al revés (elegir territorio no acota las opciones de
+Prestador aquí) -- eso ya lo hace update_isp_options() en control.py
+reaccionando a "{prefix}-territory-selection", sin relación con este
+módulo.
+
 Store final: {"provincias": [...], "cantones": [...], "parroquias": [...]}
 -- NO comparte store con territory_filters.py (Nivel/single-select) ni con
 node_territory_filters.py (geografía de nodos). Vive local a la página que
@@ -29,7 +40,8 @@ from __future__ import annotations
 
 from dash import Input, Output, callback, dcc, html
 
-from services.queries import get_territory_hierarchy, opciones_geograficas_facetadas
+from services.queries import acotar_opciones_por_prestador, get_territorios_con_prestador, get_territory_hierarchy, \
+    opciones_geograficas_facetadas
 
 
 def lines_territory_filter_layout(prefix: str) -> html.Div:
@@ -69,42 +81,59 @@ def lines_territory_filter_layout(prefix: str) -> html.Div:
 
 
 def register_lines_territory_callbacks(prefix: str) -> None:
-    # --- Opciones: reaccionan a los DOS hermanos, filtrado cruzado real ---
+    # --- Opciones: reaccionan a los DOS hermanos, filtrado cruzado real --
+    # -- AMPLIADO (21-ago-2026) para también acotar por Prestador elegido,
+    # ver acotar_opciones_por_prestador() en services/queries.py.
     @callback(
         Output(f"{prefix}-province", "options"),
         Input(f"{prefix}-canton", "value"),
         Input(f"{prefix}-parish", "value"),
+        Input(f"{prefix}-isp-nombre", "value"),
     )
-    def opciones_provincia(cantones, parroquias):
+    def opciones_provincia(cantones, parroquias, isp_nombres):
         jerarquia = get_territory_hierarchy()
-        return opciones_geograficas_facetadas(
+        opciones = opciones_geograficas_facetadas(
             jerarquia, "codigo_provincia", "pro_nombre",
             {"codigo_canton": cantones or [], "codigo_parroquia": parroquias or []},
         )
+        if isp_nombres:
+            territorios = get_territorios_con_prestador(tuple(isp_nombres))
+            opciones = acotar_opciones_por_prestador(opciones, "codigo_provincia", territorios)
+        return opciones
 
     @callback(
         Output(f"{prefix}-canton", "options"),
         Input(f"{prefix}-province", "value"),
         Input(f"{prefix}-parish", "value"),
+        Input(f"{prefix}-isp-nombre", "value"),
     )
-    def opciones_canton(provincias, parroquias):
+    def opciones_canton(provincias, parroquias, isp_nombres):
         jerarquia = get_territory_hierarchy()
-        return opciones_geograficas_facetadas(
+        opciones = opciones_geograficas_facetadas(
             jerarquia, "codigo_canton", "ciu_nombre",
             {"codigo_provincia": provincias or [], "codigo_parroquia": parroquias or []},
         )
+        if isp_nombres:
+            territorios = get_territorios_con_prestador(tuple(isp_nombres))
+            opciones = acotar_opciones_por_prestador(opciones, "codigo_canton", territorios)
+        return opciones
 
     @callback(
         Output(f"{prefix}-parish", "options"),
         Input(f"{prefix}-province", "value"),
         Input(f"{prefix}-canton", "value"),
+        Input(f"{prefix}-isp-nombre", "value"),
     )
-    def opciones_parroquia(provincias, cantones):
+    def opciones_parroquia(provincias, cantones, isp_nombres):
         jerarquia = get_territory_hierarchy()
-        return opciones_geograficas_facetadas(
+        opciones = opciones_geograficas_facetadas(
             jerarquia, "codigo_parroquia", "par_nombre",
             {"codigo_provincia": provincias or [], "codigo_canton": cantones or []},
         )
+        if isp_nombres:
+            territorios = get_territorios_con_prestador(tuple(isp_nombres))
+            opciones = acotar_opciones_por_prestador(opciones, "codigo_parroquia", territorios)
+        return opciones
 
     # --- Valor: sin store compartido entre páginas para Control (a
     # diferencia de node_territory_filters.py) -- no hace falta un
