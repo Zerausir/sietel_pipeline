@@ -82,14 +82,26 @@ una por navegación/cambio del store compartido, las otras por cambios en
 los hermanos LOCALES. Dash no garantiza cuál de las dos llega primero al
 navegador.
 
-La solución de Prestador ya cubre esto con DOS fuentes de preservación en
-sus opciones, no una: el valor COMPARTIDO (nodo-shared-territory, para la
-sincronización entre páginas) Y el valor PROPIO actual del dropdown vía
-State (para el hueco de tiempo dentro de la MISMA página, entre un cambio
-recién hecho por el usuario y que ese cambio alcance a reflejarse donde
-haga falta). La primera versión de esta segunda corrección solo cubría la
-primera fuente -- se corrigió replicando el patrón completo, ver
-_preservar_valores() en register_node_territory_callbacks() más abajo.
+TERCERA CORRECCIÓN (21-ago-2026, misma sesión -- simplificación real, no
+otro parche): las dos correcciones anteriores agregaban mecanismos cada vez
+más finos de Dash (prevent_initial_call="initial_duplicate", preservación
+de opciones) para mantener sincronizado un store LOCAL intermedio
+("{prefix}-territory-selection") que ni Estado ni Prestador necesitan --
+esas consultas de datos ya leen el valor de sus dropdowns DIRECTAMENTE, sin
+ningún paso intermedio. Ese intermediario era la causa raíz de toda la
+complicación: cada vez que restaurar_territorio() fijaba el valor visible
+del dropdown, resolve_selection() tenía que ALCANZAR a correr también para
+traducir ese valor al store local que las consultas realmente leían -- un
+paso adicional, con su propia ventana de tiempo para fallar.
+
+Se elimina "{prefix}-territory-selection" por completo. mapa_nodos.py y
+discrepancias_geografia.py ahora leen Provincia/Cantón/Parroquia
+DIRECTAMENTE de "{prefix}-province"/"{prefix}-canton"/"{prefix}-parish"
+(value), igual que ya leen Estado/Prestador. resolve_selection() vuelve a
+prevent_initial_call=True simple (sin "initial_duplicate") porque ya no
+necesita alcanzar a correr en el montaje -- su único trabajo ahora es
+avisarle a la página hermana cuando el usuario cambia algo, nunca alimentar
+una consulta de datos de esta misma página.
 """
 from __future__ import annotations
 
@@ -130,7 +142,6 @@ def node_territory_filter_layout(prefix: str) -> html.Div:
                     ),
                 ],
             ),
-            dcc.Store(id=f"{prefix}-territory-selection", data={"provincias": [], "cantones": [], "parroquias": []}),
         ],
     )
 
@@ -266,30 +277,26 @@ def register_node_territory_callbacks(prefix: str) -> None:
         )
 
     @callback(
-        Output(f"{prefix}-territory-selection", "data"),
         Output("nodo-shared-territory", "data", allow_duplicate=True),
         Input(f"{prefix}-province", "value"),
         Input(f"{prefix}-canton", "value"),
         Input(f"{prefix}-parish", "value"),
         State("nodo-shared-territory", "data"),
-        prevent_initial_call="initial_duplicate",
+        prevent_initial_call=True,
     )
     def resolve_selection(provincias, cantones, parroquias, shared_data):
-        # "{prefix}-territory-selection" (local, usado por las consultas
-        # propias de ESTA página) siempre refleja el estado COMPLETO
-        # actual de los tres dropdowns, sin importar cuál cambió.
-        seleccion_local = {
-            "provincias": provincias or [],
-            "cantones": cantones or [],
-            "parroquias": parroquias or [],
-        }
-
-        # "nodo-shared-territory" (compartido con la página hermana) se
-        # actualiza de forma QUIRÚRGICA -- solo el campo que realmente
-        # cambió, fusionado sobre lo que ya había -- nunca reconstruido
-        # desde cero a partir de los tres dropdowns. Esto es lo que evita
-        # que el disparo fantasma del montaje sobrescriba con [] los
-        # otros dos campos que la página hermana ya había puesto ahí.
+        # Único trabajo de este callback: avisarle a la página hermana
+        # cuando el usuario cambia algo AQUÍ. Ya no alimenta ninguna
+        # consulta de datos de esta misma página (esas leen
+        # "{prefix}-province"/"{prefix}-canton"/"{prefix}-parish" value
+        # directamente) -- por eso no necesita correr en el montaje de la
+        # página, prevent_initial_call=True simple basta.
+        #
+        # Escritura QUIRÚRGICA -- solo el campo que realmente cambió,
+        # fusionado sobre lo que ya había -- nunca reconstruido desde cero
+        # a partir de los tres dropdowns. Esto es lo que evita que un
+        # disparo espurio sobrescriba con [] los otros dos campos que la
+        # página hermana ya había puesto ahí.
         shared_data = dict(shared_data or {})
         triggered_id = dash.ctx.triggered_id
         if triggered_id == f"{prefix}-province":
@@ -299,6 +306,6 @@ def register_node_territory_callbacks(prefix: str) -> None:
         elif triggered_id == f"{prefix}-parish":
             shared_data["parroquias"] = parroquias or []
         else:
-            return seleccion_local, dash.no_update
+            return dash.no_update
 
-        return seleccion_local, shared_data
+        return shared_data

@@ -186,12 +186,16 @@ register_excel_download_callback(f"{PREFIX}-grid", "detalle_de_nodos.xlsx")
 
 @callback(
     Output(f"{PREFIX}-isp-nombre", "options"),
-    Input(f"{PREFIX}-territory-selection", "data"),
+    Input(f"{PREFIX}-province", "value"),
+    Input(f"{PREFIX}-canton", "value"),
+    Input(f"{PREFIX}-parish", "value"),
     Input("shared-filters", "data"),
     State(f"{PREFIX}-isp-nombre", "value"),
 )
 def update_isp_options(
-        seleccion,
+        provincias_valor,
+        cantones_valor,
+        parroquias_valor,
         shared_data,
         valores_actuales,
 ):
@@ -215,17 +219,9 @@ def update_isp_options(
       seleccionada para no perder el estado universal.
     """
 
-    seleccion = seleccion or {}
-
-    provincias = tuple(
-        seleccion.get("provincias") or ()
-    )
-    cantones = tuple(
-        seleccion.get("cantones") or ()
-    )
-    parroquias = tuple(
-        seleccion.get("parroquias") or ()
-    )
+    provincias = tuple(provincias_valor or ())
+    cantones = tuple(cantones_valor or ())
+    parroquias = tuple(parroquias_valor or ())
 
     opciones = get_node_provider_options(
         provincias,
@@ -265,16 +261,17 @@ def update_isp_options(
     Output(f"{PREFIX}-provincia-bar", "figure"),
     Output(f"{PREFIX}-grid", "rowData"),
     Output(f"{PREFIX}-message", "children"),
-    Input(f"{PREFIX}-territory-selection", "data"),
+    Input(f"{PREFIX}-province", "value"),
+    Input(f"{PREFIX}-canton", "value"),
+    Input(f"{PREFIX}-parish", "value"),
     Input(f"{PREFIX}-tipo-nodo", "value"),
     Input(f"{PREFIX}-opera-estado", "value"),
     Input(f"{PREFIX}-isp-nombre", "value"),
 )
-def update_map(seleccion, tipo_nodos, opera_estados, isp_nombres):
-    seleccion = seleccion or {}
-    provincias = tuple(seleccion.get("provincias") or ())
-    cantones = tuple(seleccion.get("cantones") or ())
-    parroquias = tuple(seleccion.get("parroquias") or ())
+def update_map(provincias_valor, cantones_valor, parroquias_valor, tipo_nodos, opera_estados, isp_nombres):
+    provincias = tuple(provincias_valor or ())
+    cantones = tuple(cantones_valor or ())
+    parroquias = tuple(parroquias_valor or ())
 
     try:
         df = get_nodos_mapa(
