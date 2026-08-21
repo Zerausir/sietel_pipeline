@@ -272,7 +272,7 @@ def register_node_territory_callbacks(prefix: str) -> None:
         Input(f"{prefix}-canton", "value"),
         Input(f"{prefix}-parish", "value"),
         State("nodo-shared-territory", "data"),
-        prevent_initial_call=True,
+        prevent_initial_call="initial_duplicate",
     )
     def resolve_selection(provincias, cantones, parroquias, shared_data):
         # "{prefix}-territory-selection" (local, usado por las consultas
