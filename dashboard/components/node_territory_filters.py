@@ -69,6 +69,27 @@ alguna de las dos páginas, ambas ya validadas contra
 get_node_territory_hierarchy() en sus propios callbacks de opciones);
 escritura quirúrgica vía dash.ctx.triggered_id, que modifica solo el campo
 que realmente cambió -- nunca reconstruye los tres campos desde cero.
+
+SEGUNDA CORRECCIÓN (21-ago-2026, misma sesión -- la primera no bastó): el
+usuario confirmó que seguía sin funcionar después de la corrección
+anterior, y preguntó explícitamente si esto no debía replicar la misma
+lógica ya probada en producción para Prestador
+(components/filters_shared.py). Al comparar línea por línea se encontró
+una omisión real, no cosmética: restaurar_territorio() (fija el VALOR) y
+opciones_provincia()/opciones_canton()/opciones_parroquia() (fijan las
+OPCIONES) se disparan por razones completamente independientes entre sí --
+una por navegación/cambio del store compartido, las otras por cambios en
+los hermanos LOCALES. Dash no garantiza cuál de las dos llega primero al
+navegador.
+
+La solución de Prestador ya cubre esto con DOS fuentes de preservación en
+sus opciones, no una: el valor COMPARTIDO (nodo-shared-territory, para la
+sincronización entre páginas) Y el valor PROPIO actual del dropdown vía
+State (para el hueco de tiempo dentro de la MISMA página, entre un cambio
+recién hecho por el usuario y que ese cambio alcance a reflejarse donde
+haga falta). La primera versión de esta segunda corrección solo cubría la
+primera fuente -- se corrigió replicando el patrón completo, ver
+_preservar_valores() en register_node_territory_callbacks() más abajo.
 """
 from __future__ import annotations
 
@@ -115,42 +136,115 @@ def node_territory_filter_layout(prefix: str) -> html.Div:
 
 
 def register_node_territory_callbacks(prefix: str) -> None:
-    # --- Opciones: reaccionan a los DOS hermanos, filtrado cruzado real ---
-    # SIN CAMBIOS respecto a la versión anterior.
+    def _preservar_valores(
+            opciones: list[dict],
+            jerarquia,
+            columna_codigo: str,
+            columna_nombre: str,
+            valores_actuales: list[str] | None,
+            valores_compartidos: list[str] | None,
+    ) -> list[dict]:
+        """
+        Réplica EXACTA del patrón ya probado en producción para Prestador
+        (components/filters_shared.py:actualizar_opciones_isp /
+        pages/mapa_nodos.py:update_isp_options) -- unión de DOS conjuntos,
+        no solo uno:
+
+          1. valores_actuales (State sobre el propio valor del dropdown en
+             este instante) -- cubre el caso de un cambio recién hecho por
+             el usuario en ESTA MISMA página, que todavía no alcanzó a
+             persistirse en nodo-shared-territory cuando este callback de
+             opciones se ejecuta (hueco de tiempo real entre dos callbacks
+             independientes, no hipotético).
+          2. valores_compartidos (de nodo-shared-territory) -- cubre el
+             caso de un valor que llegó de la página HERMANA por
+             navegación, y que restaurar_territorio() puede aplicar antes,
+             después, o al mismo tiempo que este callback recalcula
+             opciones (los dos son independientes entre sí, Dash no
+             garantiza el orden).
+
+        CORRECCIÓN (21-ago-2026, misma sesión): la primera versión de este
+        arreglo solo cubría el punto 2 -- se detectó la omisión al comparar
+        línea por línea contra la solución de Prestador que el usuario ya
+        confirmó funcionando en producción, a pedido explícito del usuario
+        ("¿no es mejor implementar la lógica que yo ya creé?"). No es una
+        diferencia cosmética: sin el punto 1, un cambio del usuario en
+        Provincia mientras Cantón/Parroquia recalculan sus opciones podría,
+        en el mismo hueco de tiempo, perder la representación visual de lo
+        que el usuario acaba de elegir.
+        """
+        valores_a_conservar = set(valores_actuales or []) | set(valores_compartidos or [])
+        existentes = {str(o["value"]) for o in opciones}
+        faltantes = [str(v) for v in valores_a_conservar if str(v) not in existentes]
+        if not faltantes:
+            return opciones
+        nombres_por_codigo = (
+            jerarquia[[columna_codigo, columna_nombre]]
+            .dropna()
+            .drop_duplicates(subset=[columna_codigo])
+            .astype(str)
+            .set_index(columna_codigo)[columna_nombre]
+        )
+        for codigo in faltantes:
+            nombre = nombres_por_codigo.get(codigo, codigo)
+            opciones.append({"label": nombre, "value": codigo})
+        return opciones
+
+    # --- Opciones: reaccionan a los DOS hermanos, filtrado cruzado real --
+    # -- AMPLIADO (21-ago-2026) para también conservar el valor propio Y el
+    # compartido, ver _preservar_valores() más arriba.
     @callback(
         Output(f"{prefix}-province", "options"),
         Input(f"{prefix}-canton", "value"),
         Input(f"{prefix}-parish", "value"),
+        Input("nodo-shared-territory", "data"),
+        State(f"{prefix}-province", "value"),
     )
-    def opciones_provincia(cantones, parroquias):
+    def opciones_provincia(cantones, parroquias, shared_data, valores_actuales):
         jerarquia = get_node_territory_hierarchy()
-        return opciones_geograficas_facetadas(
+        opciones = opciones_geograficas_facetadas(
             jerarquia, "codigo_provincia", "nombre_provincia",
             {"codigo_canton": cantones or [], "codigo_parroquia": parroquias or []},
+        )
+        return _preservar_valores(
+            opciones, jerarquia, "codigo_provincia", "nombre_provincia",
+            valores_actuales, (shared_data or {}).get("provincias"),
         )
 
     @callback(
         Output(f"{prefix}-canton", "options"),
         Input(f"{prefix}-province", "value"),
         Input(f"{prefix}-parish", "value"),
+        Input("nodo-shared-territory", "data"),
+        State(f"{prefix}-canton", "value"),
     )
-    def opciones_canton(provincias, parroquias):
+    def opciones_canton(provincias, parroquias, shared_data, valores_actuales):
         jerarquia = get_node_territory_hierarchy()
-        return opciones_geograficas_facetadas(
+        opciones = opciones_geograficas_facetadas(
             jerarquia, "codigo_canton", "nombre_canton",
             {"codigo_provincia": provincias or [], "codigo_parroquia": parroquias or []},
+        )
+        return _preservar_valores(
+            opciones, jerarquia, "codigo_canton", "nombre_canton",
+            valores_actuales, (shared_data or {}).get("cantones"),
         )
 
     @callback(
         Output(f"{prefix}-parish", "options"),
         Input(f"{prefix}-province", "value"),
         Input(f"{prefix}-canton", "value"),
+        Input("nodo-shared-territory", "data"),
+        State(f"{prefix}-parish", "value"),
     )
-    def opciones_parroquia(provincias, cantones):
+    def opciones_parroquia(provincias, cantones, shared_data, valores_actuales):
         jerarquia = get_node_territory_hierarchy()
-        return opciones_geograficas_facetadas(
+        opciones = opciones_geograficas_facetadas(
             jerarquia, "codigo_parroquia", "nombre_parroquia",
             {"codigo_provincia": provincias or [], "codigo_canton": cantones or []},
+        )
+        return _preservar_valores(
+            opciones, jerarquia, "codigo_parroquia", "nombre_parroquia",
+            valores_actuales, (shared_data or {}).get("parroquias"),
         )
 
     # --- Valor: restauración por navegación + persistencia quirúrgica ---
