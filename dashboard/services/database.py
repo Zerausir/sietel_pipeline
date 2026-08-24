@@ -10,13 +10,26 @@ from config import settings
 
 @lru_cache(maxsize=1)
 def get_mart_engine() -> Engine:
-    """Engine de solo lectura -- rol dashboard_lector, esquema mart únicamente."""
+    """
+    Engine de solo lectura -- rol dashboard_lector, esquema mart únicamente.
+
+    AJUSTE (22-ago-2026, tras subir a 4 workers gthread en docker/Dockerfile):
+    pool_size=5 + max_overflow=10 por PROCESO significaba hasta 15 conexiones
+    solo de este engine por worker -- con 4 workers, hasta 60 en el peor
+    caso, sumado a las de get_auth_engine(). Confirmado en VM1
+    (22-ago-2026): max_connections=100, 24 en uso por el resto de sistemas
+    (Airflow, samm_pipeline, etc.) -- ANTES de que este dashboard abriera
+    una sola conexión. Reducido a un techo que deja margen real sin tocar
+    max_connections de PostgreSQL (eso afectaría a TODO lo que corre en esa
+    instancia, y exige reiniciar el servidor -- un cambio de infraestructura
+    compartida, no algo que decidir desde aquí).
+    """
     return create_engine(
         settings.mart_url(),
         pool_pre_ping=True,
         pool_recycle=1800,
-        pool_size=5,
-        max_overflow=10,
+        pool_size=3,
+        max_overflow=5,
         connect_args={"connect_timeout": 10},
     )
 
@@ -27,13 +40,18 @@ def get_auth_engine() -> Engine:
     Engine separado -- rol dashboard_auth, únicamente auth.usuarios_dashboard.
     Deliberadamente NO es el mismo engine que get_mart_engine(): son roles de
     PostgreSQL distintos con permisos distintos (ver sql/03_ddl_auth.sql).
+
+    AJUSTE (22-ago-2026): mismo motivo que get_mart_engine() -- ver ese
+    docstring. auth.usuarios_dashboard se consulta solo en login/logout, no
+    en cada callback de datos, así que el volumen real de conexiones
+    concurrentes aquí es mucho menor -- pool más chico todavía.
     """
     return create_engine(
         settings.auth_url(),
         pool_pre_ping=True,
         pool_recycle=1800,
-        pool_size=3,
-        max_overflow=5,
+        pool_size=2,
+        max_overflow=2,
         connect_args={"connect_timeout": 10},
     )
 

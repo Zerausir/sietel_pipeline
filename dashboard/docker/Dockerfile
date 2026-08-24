@@ -33,15 +33,14 @@ EXPOSE 8050
 # "--workers 4 --threads 4" hay hasta 16 peticiones atendidas en paralelo
 # (4 procesos × 4 hilos cada uno) en vez de 2.
 #
-# Nota para Iván: esto multiplica el techo de conexiones simultáneas a
-# PostgreSQL (cada proceso worker tiene su propio pool de SQLAlchemy --
-# pool_size=5 + max_overflow=10 para mart, 3+5 para auth, ver
-# services/database.py -- con 4 procesos, hasta ~92 conexiones en el peor
-# caso si los 4 workers saturan a la vez). Vale confirmar que
-# max_connections de PostgreSQL en VM1 lo tolera antes de desplegar esto en
-# producción -- no lo pude verificar desde aquí. Si hace falta, ajustar
-# --workers/--threads hacia abajo, o pool_size/max_overflow en
-# services/database.py hacia abajo, es más seguro que dejarlo sin revisar.
+# CONFIRMADO en VM1 (22-ago-2026): max_connections=100, 24 en uso por el
+# resto de sistemas (Airflow, samm_pipeline, etc.) ANTES de que este
+# dashboard abra una sola conexión. pool_size/max_overflow se redujeron en
+# services/database.py (de 5+10/3+5 a 3+5/2+2 por proceso) para que el
+# techo teórico de este dashboard quede en ~48 conexiones en el peor caso
+# (4 workers × 12 c/u) -- deja margen real sin tocar max_connections de
+# PostgreSQL, que afectaría a todos lo que corre en esa instancia y exige
+# reiniciar el servidor. Ver services/database.py para el detalle completo.
 CMD ["gunicorn", "app:server", "--bind", "0.0.0.0:8050", \
      "--workers", "4", "--worker-class", "gthread", "--threads", "4", \
      "--timeout", "120"]
