@@ -35,8 +35,13 @@ init_auth(server)
 cache.init_app(
     server,
     config={
-        "CACHE_TYPE": "SimpleCache",
+        "CACHE_TYPE": settings.cache_type,
+        "CACHE_DIR": settings.cache_dir,
         "CACHE_DEFAULT_TIMEOUT": settings.cache_timeout,
+        # Techo de entradas simultáneas antes de que FileSystemCache empiece
+        # a desalojar las más viejas -- generoso para el volumen real de
+        # combinaciones de filtros de este dashboard, sin dejarlo sin límite.
+        "CACHE_THRESHOLD": 5000,
     },
 )
 

@@ -56,6 +56,18 @@ class Settings:
     auth_pg_password: str = os.getenv("AUTH_PG_PASSWORD", "")
 
     cache_timeout: int = int(os.getenv("CACHE_TIMEOUT", "300"))
+    # CAMBIO (22-ago-2026, diagnóstico de latencia): "SimpleCache" (el
+    # default anterior) es un diccionario en memoria LOCAL A CADA PROCESO
+    # -- con varios workers de gunicorn (ver docker/Dockerfile), cada uno
+    # tenía su propia caché aislada, así que una consulta ya calculada por
+    # un worker no beneficiaba en nada a una petición atendida por otro.
+    # "FileSystemCache" usa un directorio en disco DENTRO del contenedor,
+    # compartido por todos los procesos worker -- sin agregar Redis ni
+    # ningún servicio nuevo. Es caché, no datos reales -- perderla en un
+    # reinicio del contenedor es aceptable y esperado, no hace falta
+    # persistirla en un volumen Docker.
+    cache_type: str = os.getenv("CACHE_TYPE", "FileSystemCache")
+    cache_dir: str = os.getenv("CACHE_DIR", "/tmp/obtel-dashboard-cache")
 
     def mart_url(self) -> URL:
         return URL.create(

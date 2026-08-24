@@ -146,10 +146,14 @@ def get_territory_options(
         "PARROQUIA": "codigo_parroquia",
     }.get(level, "territorio_id")
 
+    # CORRECCIÓN (22-ago-2026, diagnóstico de latencia): antes .iterrows()
+    # -- crea un objeto Series por fila, medible en listas de cientos de
+    # filas. zip() sobre las columnas ya filtradas da exactamente el mismo
+    # resultado (mismo orden, mismo filtro pd.notna) sin ese costo.
+    validas = df[df[value_column].notna()]
     return [
-        {"label": str(row["nombre_geografico"]), "value": str(row[value_column])}
-        for _, row in df.iterrows()
-        if pd.notna(row[value_column])
+        {"label": str(nombre), "value": str(valor)}
+        for nombre, valor in zip(validas["nombre_geografico"], validas[value_column])
     ]
 
 
@@ -387,7 +391,7 @@ def get_operation_states() -> list[dict[str, str]]:
         ORDER BY 1
         """
     )
-    return [{"label": row["estado"], "value": row["estado"]} for _, row in df.iterrows()]
+    return [{"label": estado, "value": estado} for estado in df["estado"]]
 
 
 @cache.memoize(timeout=900)
@@ -404,7 +408,7 @@ def get_provider_options(territory_id: str) -> list[dict[str, str]]:
         """,
         {"territory_id": territory_id},
     )
-    return [{"label": row["isp_nombre"], "value": row["isp_nombre"]} for _, row in df.iterrows()]
+    return [{"label": nombre, "value": nombre} for nombre in df["isp_nombre"]]
 
 
 @cache.memoize(timeout=300)
@@ -926,10 +930,10 @@ def get_node_territory_options(
         "PARROQUIA": "codigo_parroquia",
     }.get(level, "territorio_id")
 
+    validas = df[df[value_column].notna()]
     return [
-        {"label": str(row["nombre_geografico"]), "value": str(row[value_column])}
-        for _, row in df.iterrows()
-        if pd.notna(row[value_column])
+        {"label": str(nombre), "value": str(valor)}
+        for nombre, valor in zip(validas["nombre_geografico"], validas[value_column])
     ]
 
 
@@ -958,7 +962,7 @@ def get_node_types() -> list[dict[str, str]]:
         ORDER BY 1
         """
     )
-    return [{"label": row["tiponodo"], "value": row["tiponodo"]} for _, row in df.iterrows()]
+    return [{"label": tipo, "value": tipo} for tipo in df["tiponodo"]]
 
 
 def _node_territory_clauses(
@@ -1013,10 +1017,10 @@ def get_node_provider_options(
         """,
         params,
     )
-    return [{"label": row["isp_nombre"], "value": row["isp_nombre"]} for _, row in df.iterrows()]
+    return [{"label": nombre, "value": nombre} for nombre in df["isp_nombre"]]
 
 
-@cache.memoize(timeout=180)
+@cache.memoize(timeout=300)
 def get_nodos_mapa(
         provincias: tuple[str, ...] = (),
         cantones: tuple[str, ...] = (),
@@ -1043,6 +1047,16 @@ def get_nodos_mapa(
     get_operation_states) -- se filtra con ILIKE ANY sobre patrones
     '%estado%', suficiente para un filtro de UI, sin replicar el UNNEST
     exacto de las páginas de líneas.
+
+    CORRECCIÓN (22-ago-2026, diagnóstico de latencia): antes era
+    "SELECT * FROM mart.vw_nodos_isp_mapa" -- 22 columnas, de las cuales
+    solo 13 se leen realmente en pages/mapa_nodos.py/
+    discrepancias_geografia.py (confirmado grep-eando cada "field" de
+    AG-Grid y cada df[...] de ambos archivos, no supuesto). El filtro por
+    opera_actual/codigo_provincia/codigo_canton/codigo_parroquia sigue
+    funcionando igual aunque esas columnas ya no estén en el SELECT --
+    PostgreSQL evalúa WHERE contra las columnas de la vista de origen, no
+    contra la lista de SELECT.
     """
     clauses, params = _node_territory_clauses(list(provincias), list(cantones), list(parroquias))
 
@@ -1062,7 +1076,18 @@ def get_nodos_mapa(
         clauses.append("es_discrepancia = TRUE")
 
     where = " AND ".join(clauses) if clauses else "TRUE"
-    return _read(f"SELECT * FROM mart.vw_nodos_isp_mapa WHERE {where}", params)
+    return _read(
+        f"""
+        SELECT
+            noisp_codigo, isp_nombre, tiponodo, latitud_decimal, longitud_decimal,
+            nombre_provincia, nombre_canton, nombre_parroquia,
+            es_discrepancia, estado_revision,
+            provincia_reportada_nombre, canton_reportado_nombre, parroquia_reportada_nombre
+        FROM mart.vw_nodos_isp_mapa
+        WHERE {where}
+        """,
+        params,
+    )
 
 
 @cache.memoize(timeout=900)
@@ -1493,9 +1518,16 @@ def opciones_geograficas_facetadas(
         .drop_duplicates(subset=[columna_codigo])
         .sort_values(columna_nombre)
     )
+    # CORRECCIÓN (22-ago-2026, diagnóstico de latencia): antes .iterrows()
+    # -- esta función se dispara 3 veces por cada clic en Provincia/Cantón/
+    # Parroquia (una por cada uno de los tres niveles), en las 3 páginas
+    # con filtrado cruzado de territorio -- el punto más "caliente" del
+    # dashboard. zip() sobre las dos columnas ya deduplicadas/ordenadas da
+    # el mismo resultado exacto, mismo orden, sin crear un objeto Series
+    # por fila.
     return [
-        {"label": str(fila[columna_nombre]), "value": str(fila[columna_codigo])}
-        for _, fila in opciones.iterrows()
+        {"label": str(nombre), "value": str(codigo)}
+        for nombre, codigo in zip(opciones[columna_nombre], opciones[columna_codigo])
     ]
 
 
