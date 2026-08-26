@@ -70,6 +70,7 @@ Desarrollado por la **Dirección de Mercados — ARCOTEL**.
 - [Principio metodológico: nunca imputar para medir concentración de mercado](#principio-metodológico-nunca-imputar-para-medir-concentración-de-mercado)
 - [Geografía de nodos ISP](#geografía-de-nodos-isp)
 - [El dashboard, módulo por módulo](#el-dashboard-módulo-por-módulo)
+- [Rendimiento del dashboard](#rendimiento-del-dashboard)
 - [Requisitos previos](#requisitos-previos)
 - [Roles y permisos de PostgreSQL](#roles-y-permisos-de-postgresql)
 - [Configuración](#configuración)
@@ -508,13 +509,33 @@ filas).
 
 **Filtros sincronizados entre páginas** (`dcc.Store` fuera de `dash.page_container`, en `app.py`):
 
-- `shared-territory` / `shared-filters`: exclusivos de Evolución/Concentración — geografía de **líneas** reportadas.
+- `shared-territory`: exclusivo de Evolución/Concentración — geografía de **líneas** reportadas, selección única con
+  Nivel geográfico.
+- `shared-filters`: **universal** desde el 20-ago-2026 (antes exclusivo de Evolución/Concentración) — Estado de
+  operación y Prestador viajan entre las **cinco** páginas (Evolución, Concentración, Control, Mapa de nodos,
+  Discrepancias). Restauración disparada por navegación (`Input("obtel-url", "pathname")`), sin ninguna consulta a
+  PostgreSQL — el store compartido ya contiene el valor a mostrar. La validación de "¿sigue siendo representable?"
+  vive en el callback de OPCIONES de cada página, que agrega el valor compartido si su territorio actual no lo trae (ver
+  `components/filters_shared.py:register_universal_opera_isp_sync`).
+- `shared-period`: nuevo (20-ago-2026) — Desde/Hasta (o Historia Desde/Historia Hasta) compartido entre Evolución,
+  Concentración y Control, los tres módulos con selector de período. Los mapas no participan (no tienen selector).
+  "Período de participación" (exclusivo de Concentración) queda deliberadamente fuera — es un mes puntual, no un rango,
+  sin equivalente en las otras páginas (ver `components/ui.py:register_shared_period_sync`).
 - `nodo-shared-territory`: exclusivo de Mapa de nodos/Discrepancias — geografía de **nodos** (CONALI). Forma:
   `{"provincias": [...], "cantones": [...], "parroquias": [...]}` (listas, selección múltiple).
-- Control **no** comparte ningún store global de territorio con las demás páginas — su selector de Provincia/Cantón/
-  Parroquia es local a la página (`ctrl-territory-selection`); Estado de operación y Prestador tampoco están
-  sincronizados con `shared-filters` — Prestador en Control lista el universo **nacional** completo, sin acotar por el
-  territorio elegido (simplificación deliberada, no un descuido).
+- Control **no** comparte ningún store de territorio con las demás páginas — su selector de Provincia/Cantón/Parroquia
+  es local a la página (`ctrl-territory-selection`). Prestador en Control sigue listando el universo **nacional**
+  completo sin acotar por el territorio elegido (simplificación deliberada, sin cambios) — pero ver el punto siguiente
+  para la dirección contraria, que sí se implementó.
+
+**Filtrado cruzado Prestador → territorio** (estilo Power BI, 21-ago-2026, a pedido del usuario): en Control, Mapa de
+nodos y Discrepancias de geografía, elegir un Prestador acota las opciones de Provincia/Cantón/Parroquia a solo donde
+ese prestador tiene presencia real — restricción **adicional** sobre el filtrado cruzado ya existente entre los tres
+niveles geográficos, nunca un reemplazo (`services/queries.py:get_territorios_con_prestador` para geografía de líneas,
+`get_node_territorios_con_prestador` para geografía de nodos, `acotar_opciones_por_prestador` común a ambas).
+Deliberadamente **no** implementado en Evolución/Concentración, que ya tienen Nivel geográfico como primer filtro. La
+dirección contraria (territorio acotando las opciones de Prestador) sigue sin implementarse en Control — ver
+[Hoja de ruta](#hoja-de-ruta--pendientes).
 
 **Por qué los filtros de Control no aplican igual a sus tres secciones** — la vista/consulta fuente de cada una no es
 simétrica, esto no es una limitación del dashboard:
@@ -530,6 +551,43 @@ simétrica, esto no es una limitación del dashboard:
 **Autenticación** (`auth.py`): Flask-Login + bcrypt, guard en `@server.before_request`. Sin autorregistro — altas, bajas
 y reseteo de contraseña exclusivamente vía `dashboard/scripts/gestionar_usuarios.py`, corrido con credenciales
 administrativas propias (**nunca** con el rol de runtime `dashboard_auth`).
+
+## Rendimiento del dashboard
+
+Diagnóstico de latencia realizado en agosto de 2026 (síntoma reportado: buenos recursos de hardware en la VM, interfaz
+lenta de todas formas) confirmó que la causa no era una consulta lenta aislada, sino el **modelo de concurrencia** del
+propio servidor de aplicación — implementado, con evidencia medida en cada punto, no solo diagnosticado:
+
+- **`docker/Dockerfile`**: gunicorn pasó de `--workers 2` con la clase `sync` por defecto (cada worker atendía **una
+  sola** petición HTTP a la vez, bloqueado mientras esperaba PostgreSQL) a `--workers 4 --worker-class gthread
+  --threads 4` — hasta 16 peticiones en paralelo en vez de 2. `gthread` se eligió sobre `gevent`/`eventlet` porque estos
+  últimos exigen "monkey-patching" del proceso, con riesgo real de incompatibilidad silenciosa con `psycopg`.
+- **`services/database.py`**: con 4 workers, el pool de conexiones anterior (`pool_size=5, max_overflow=10` para
+  `mart`; `3+5` para `auth`, por *proceso*) llevaba el techo teórico a ~92 conexiones simultáneas. Confirmado en VM1:
+  `max_connections=100`, con 24 ya en uso por el resto de sistemas (Airflow, `samm_pipeline`) antes de que el dashboard
+  abriera una sola conexión. Reducido a `3+5`/`2+2` — techo teórico ~48, dejando margen real. Se prefirió este ajuste
+  sobre subir `max_connections` de PostgreSQL porque ese cambio afecta a **todo** lo que corre en esa instancia
+  compartida y exige reiniciar el servidor.
+- **`config.py`/`app.py`**: `CACHE_TYPE` pasó de `SimpleCache` (diccionario en memoria **local a cada proceso** — con
+  varios workers, cada uno tenía su propia caché aislada) a `FileSystemCache` (directorio en disco dentro del
+  contenedor, **compartido** por todos los workers, sin agregar Redis ni ningún servicio nuevo). Confirmado con una
+  prueba cruzada entre dos procesos Python completamente independientes que la caché sí se comparte.
+- **`services/queries.py:get_nodos_mapa`**: `SELECT *` (22 columnas de `mart.vw_nodos_isp_mapa`) recortado a las 13
+  columnas realmente consumidas por `pages/mapa_nodos.py`/`pages/discrepancias_geografia.py` — verificado
+  exhaustivamente contra cada `field` de `AgGrid` y cada acceso a columna en ambos archivos, no supuesto. Es la consulta
+  de mayor volumen de todo el dashboard: hasta 6.640 nodos en la vista "Nacional" sin filtrar.
+- Seis funciones de `services/queries.py` (`get_territory_options`, `get_node_territory_options`,
+  `get_operation_states`, `get_provider_options`, `get_node_types`, `get_node_provider_options`,
+  `opciones_geograficas_facetadas`) reemplazaron `.iterrows()` por conversión vectorizada (`zip()` sobre columnas ya
+  filtradas) — mismo resultado exacto, confirmado con prueba antes/después. Medido con el volumen real de producción
+  (1.369 prestadores): **130 veces más rápido** en esa conversión puntual.
+
+**Deliberadamente no tocado en esta ronda** — mayor riesgo de regresión, pendiente de una sesión dedicada: consolidar
+las hasta 9 consultas SQL secuenciales dentro de un mismo *callback* de Evolución (5 en Concentración), o los cinco
+*callbacks* independientes de Control que reaccionan a los mismos filtros. Tampoco se agregó un límite de filas a Mapa
+de nodos — decisión de completitud de datos que se prefirió no asumir unilateralmente, dado el principio de
+[nunca imputar/alterar datos](#principio-metodológico-nunca-imputar-para-medir-concentración-de-mercado) que rige el
+resto del sistema.
 
 ## Requisitos previos
 
@@ -621,13 +679,15 @@ el índice compuesto no exista en producción.
 
 ### Dashboard (`dashboard/.env`, ver `dashboard/.env.example`)
 
-| Variable                                                                                   | Descripción                                                                                          |
-|--------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
-| `MART_PG_HOST` / `MART_PG_PORT` / `MART_PG_DATABASE` / `MART_PG_USER` / `MART_PG_PASSWORD` | Conexión de solo lectura, rol `dashboard_lector`                                                     |
-| `AUTH_PG_HOST` / `AUTH_PG_PORT` / `AUTH_PG_DATABASE` / `AUTH_PG_USER` / `AUTH_PG_PASSWORD` | Conexión de autenticación, rol `dashboard_auth`                                                      |
-| `SECRET_KEY`                                                                               | Firma las cookies de sesión — generar con `python -c "import secrets; print(secrets.token_hex(32))"` |
-| `APP_HOST` / `APP_PORT` / `APP_DEBUG`                                                      | Default `0.0.0.0` / `8050` / `false` — **`APP_DEBUG` debe quedar en `false` en producción**          |
-| `CACHE_TIMEOUT`                                                                            | Segundos de cache de Flask-Caching, default `300`                                                    |
+| Variable                                                                                   | Descripción                                                                                                                                                                                            |
+|--------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `MART_PG_HOST` / `MART_PG_PORT` / `MART_PG_DATABASE` / `MART_PG_USER` / `MART_PG_PASSWORD` | Conexión de solo lectura, rol `dashboard_lector`                                                                                                                                                       |
+| `AUTH_PG_HOST` / `AUTH_PG_PORT` / `AUTH_PG_DATABASE` / `AUTH_PG_USER` / `AUTH_PG_PASSWORD` | Conexión de autenticación, rol `dashboard_auth`                                                                                                                                                        |
+| `SECRET_KEY`                                                                               | Firma las cookies de sesión — generar con `python -c "import secrets; print(secrets.token_hex(32))"`                                                                                                   |
+| `APP_HOST` / `APP_PORT` / `APP_DEBUG`                                                      | Default `0.0.0.0` / `8050` / `false` — **`APP_DEBUG` debe quedar en `false` en producción**                                                                                                            |
+| `CACHE_TIMEOUT`                                                                            | Segundos de cache de Flask-Caching, default `300`                                                                                                                                                      |
+| `CACHE_TYPE`                                                                               | Backend de Flask-Caching, default `FileSystemCache` — compartido entre los workers de gunicorn (antes `SimpleCache`, aislada por proceso, ver [Rendimiento del dashboard](#rendimiento-del-dashboard)) |
+| `CACHE_DIR`                                                                                | Directorio del cache en disco, default `/tmp/obtel-dashboard-cache` — dentro del contenedor, no requiere volumen Docker                                                                                |
 
 `dashboard/config.py` falla explícito si falta cualquiera de estas variables.
 
@@ -825,6 +885,26 @@ no son detalles cosméticos, cambiaron resultados numéricos**:
 - **Selector "Nivel geográfico" en Mapa de nodos/Discrepancias** rediseñado a Provincia/Cantón/Parroquia siempre
   visibles, multi-select independiente (11-ago-2026) — mismo patrón replicado luego para Control
   (`lines_territory_filters.py`, 12-ago-2026), sobre la geografía de líneas en vez de la de nodos.
+- **Sincronización de Provincia/Cantón/Parroquia entre Mapa de nodos y Discrepancias, rota en producción a pesar de
+  pruebas previas aparentemente correctas (21-ago-2026)** — tres causas reales distintas, encontradas una tras otra, no
+  una sola:
+    1. La restauración de valor dependía de `nodo-shared-territory.modified_timestamp` + una consulta SQL para validar,
+       protegida solo con `prevent_initial_call=True` en el callback de escritura — ese flag **no** evita de forma
+       confiable el disparo "fantasma" del montaje de una página nueva en Dash Pages, que podía sobrescribir el store
+       compartido con `[]` antes de que la consulta terminara. Mismo patrón ya confirmado roto para Estado/Prestador
+       (ver el punto anterior de esta lista). Corregido con restauración disparada por `Input("obtel-url", "pathname")`,
+       sin ninguna consulta SQL.
+    2. Aun corregido lo anterior, el callback que fija el VALOR y los tres callbacks que fijan las OPCIONES de
+       Provincia/Cantón/Parroquia se disparan por razones independientes entre sí — Dash no garantiza cuál llega primero
+       al navegador. Corregido agregando preservación de valor (propio y compartido) a las tres funciones de opciones,
+       mismo mecanismo ya usado para Prestador.
+    3. `{prefix}-territory-selection` (un store local intermedio entre los dropdowns y las consultas de datos de cada
+       página) resultó ser la causa raíz real de las dos correcciones anteriores: cada vez que se restauraba un valor,
+       otro callback debía *alcanzar a correr* para traducirlo a ese store — un paso adicional innecesario, con su
+       propia ventana de tiempo para fallar. Eliminado por completo; `pages/mapa_nodos.py`/
+       `pages/discrepancias_geografia.py` ahora leen Provincia/Cantón/Parroquia directamente de los tres dropdowns,
+       igual que ya leían Estado/Prestador — mismo patrón, sin intermediario. Ninguna de las tres correcciones se
+       detectó con pruebas aisladas de la lógica; las tres solo se hicieron visibles con uso real en el navegador.
 
 ## Rendimiento e índice de SQL Server
 
@@ -890,7 +970,8 @@ correlación SQL incorrecto pasó una prueba superficial (ver
 **Control:**
 
 - **"Prestador" no está acotado por el territorio elegido** — lista el universo nacional completo, a diferencia de
-  Evolución/Concentración, donde sí se acota. Simplificación deliberada, no un descuido — ver
+  Evolución/Concentración, donde sí se acota. Simplificación deliberada, no un descuido. La dirección **contraria** sí
+  se implementó (21-ago-2026, estilo Power BI): elegir un Prestador acota Provincia/Cantón/Parroquia — ver
   [El dashboard, módulo por módulo](#el-dashboard-módulo-por-módulo).
 - **Umbral de variación mensual (30% por defecto) no está validado estadísticamente** — es un punto de partida razonable
   para señalar algo revisable, ajustable en la página, no un límite estadístico riguroso.
