@@ -10,3 +10,26 @@ Flask-Caching==2.4.1
 Flask-Login==0.6.3
 bcrypt==5.0.0
 gunicorn==26.0.0
+
+# Fijado explícitamente el 31-ago-2026: dash no pinea plotly como
+# dependencia transitiva, así que un rebuild sin caché puede resolver una
+# version distinta segun cuando corra pip. Esto causo una divergencia
+# real entre VM2 (produccion, quedo en 6.9.0) y un build local (resolvio
+# 7.0.0). Decision deliberada de Ivan: adoptar 7.0.0 (la mas reciente al
+# momento del pin, no la de produccion) en vez de fijar 6.9.0 para
+# igualar produccion. Esa version retiro formalmente go.Scattermapbox/
+# Choroplethmapbox/Densitymapbox y el subplot mapbox (ver nota de
+# version de plotly.js #7860) -- por eso pages/mapa_nodos.py,
+# pages/discrepancias_geografia.py y pages/sma_datos.py migraron a
+# go.Scattermap/layout.map en el mismo cambio. Tambien trae otros
+# cambios de ruptura en 7.0.0 sin relacion con mapas (cambio de libreria
+# de color TinyColor->culori, retiro de atributos de Chart Studio,
+# soporte de MathJax v2 descontinuado) -- revisados contra este repo el
+# 31-ago-2026, ninguno aplica al codigo actual, pero cualquier grafico
+# nuevo que use rgb()/rgba() con los tres canales como fraccion 0-1 (no
+# como enteros 0-255) se comporta distinto en esta version.
+# CUANDO SE DESPLIEGUE A VM2: reconstruir la imagen SIN cache alli
+# tambien (docker compose build --no-cache) para que quede en 7.0.0,
+# igual que local -- si no, VM2 se queda en 6.9.0 con codigo que ya
+# asume Scattermap, y el mapa se rompe en produccion, no en local.
+plotly==7.0.0

@@ -670,11 +670,13 @@ def compute_mapbox_view(
         default_zoom: float = 5.2,
 ) -> tuple[dict[str, float], float]:
     """
-    Centro y zoom aproximados de un mapbox a partir de un rango de
-    coordenadas -- Scattermapbox no tiene un "fit bounds" automático como
-    Leaflet, así que se estima el zoom por el tamaño del rango (heurística
-    simple, no exacta, pero suficiente para que el mapa quede centrado y a
-    una escala razonable al elegir un territorio).
+    Centro y zoom aproximados de un mapa a partir de un rango de
+    coordenadas -- go.Scattermap (MapLibre, reemplazo de go.Scattermapbox
+    desde que esta versión de plotly retiró la API basada en Mapbox GL)
+    no tiene un "fit bounds" automático como Leaflet, así que se estima
+    el zoom por el tamaño del rango (heurística simple, no exacta, pero
+    suficiente para que el mapa quede centrado y a una escala razonable
+    al elegir un territorio).
     """
     if not all(map(lambda v: v is not None and not pd.isna(v), (lat_min, lat_max, lon_min, lon_max))):
         return {"lat": -1.5, "lon": -78.5}, default_zoom
@@ -704,8 +706,10 @@ def compute_mapbox_view(
 
 def mapbox_polygon_layers(geojson: dict, color: str) -> list[dict[str, Any]]:
     """Relleno semi-transparente + borde del territorio seleccionado, para
-    layout.mapbox.layers. Dos capas separadas (fill + line) porque un solo
-    layer de tipo 'fill' en Plotly no dibuja borde propio."""
+    layout.map.layers (antes layout.mapbox.layers -- mismo esquema de
+    diccionario en go.Scattermap, solo cambió el nombre del atributo de
+    layout). Dos capas separadas (fill + line) porque un solo layer de
+    tipo 'fill' en Plotly no dibuja borde propio."""
     return [
         {"source": geojson, "type": "fill", "color": color, "opacity": 0.16, "below": "traces"},
         {"source": geojson, "type": "line", "color": color, "line": {"width": 1.5}, "below": "traces"},

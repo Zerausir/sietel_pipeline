@@ -267,11 +267,35 @@ def update_isp_options(
     Input(f"{PREFIX}-tipo-nodo", "value"),
     Input(f"{PREFIX}-opera-estado", "value"),
     Input(f"{PREFIX}-isp-nombre", "value"),
+    Input("nodo-shared-territory", "data"),
+    Input("shared-filters", "data"),
 )
-def update_map(provincias_valor, cantones_valor, parroquias_valor, tipo_nodos, opera_estados, isp_nombres):
-    provincias = tuple(provincias_valor or ())
-    cantones = tuple(cantones_valor or ())
-    parroquias = tuple(parroquias_valor or ())
+def update_map(provincias_valor, cantones_valor, parroquias_valor, tipo_nodos, opera_estados, isp_nombres,
+               territorio_compartido, filtros_compartidos):
+    """
+    CORRECCIÓN (31-ago-2026): antes este callback solo escuchaba los
+    dropdowns -- correcto en el caso normal, pero Dash Pages tiene una
+    condición de carrera documentada (ver "Callback Gotchas" en la
+    documentación oficial: "if a component registered with a callback is
+    missing from the layout, the callback will fail to fire"). Al navegar,
+    hay una ventana breve donde el pathname ya cambió pero los dropdowns
+    de la página nueva aún no terminan de montarse; si el callback que
+    restaura su valor evalúa su elegibilidad justo en esa ventana, no se
+    dispara -- no llega tarde, simplemente no corre, y no se reintenta.
+    El chip del dropdown puede verse bien (esa restauración sí ganó la
+    carrera) mientras este callback queda mirando el valor por defecto.
+
+    "nodo-shared-territory" y "shared-filters" viven FUERA de
+    page_container -- nunca sufren esa carrera, siempre están presentes.
+    Se usan como respaldo: si el dropdown ya trae un valor (caso normal,
+    click del usuario dentro de la página), se usa ese; si está vacío
+    (posible carrera de montaje), se cae al store compartido.
+    """
+    provincias = tuple(provincias_valor or (territorio_compartido or {}).get("provincias", []) or ())
+    cantones = tuple(cantones_valor or (territorio_compartido or {}).get("cantones", []) or ())
+    parroquias = tuple(parroquias_valor or (territorio_compartido or {}).get("parroquias", []) or ())
+    opera_estados_efectivo = tuple(opera_estados or (filtros_compartidos or {}).get("opera_estados", []) or ())
+    isp_nombres_efectivo = tuple(isp_nombres or (filtros_compartidos or {}).get("isp_nombres", []) or ())
 
     try:
         df = get_nodos_mapa(
@@ -279,8 +303,8 @@ def update_map(provincias_valor, cantones_valor, parroquias_valor, tipo_nodos, o
             cantones=cantones,
             parroquias=parroquias,
             tipo_nodos=tuple(tipo_nodos or ()),
-            opera_estados=tuple(opera_estados or ()),
-            isp_nombres=tuple(isp_nombres or ()),
+            opera_estados=opera_estados_efectivo,
+            isp_nombres=isp_nombres_efectivo,
             solo_discrepancias=False,
         )
     except Exception as exc:
@@ -300,7 +324,7 @@ def update_map(provincias_valor, cantones_valor, parroquias_valor, tipo_nodos, o
         subset = df[df["tiponodo"].str.strip().str.upper() == tipo]
         if subset.empty:
             continue
-        fig.add_trace(go.Scattermapbox(
+        fig.add_trace(go.Scattermap(
             lat=subset["latitud_decimal"],
             lon=subset["longitud_decimal"],
             mode="markers",
@@ -313,7 +337,7 @@ def update_map(provincias_valor, cantones_valor, parroquias_valor, tipo_nodos, o
 
     otros = df[~df["tiponodo"].str.strip().str.upper().isin(COLOR_TIPO_NODO.keys())]
     if not otros.empty:
-        fig.add_trace(go.Scattermapbox(
+        fig.add_trace(go.Scattermap(
             lat=otros["latitud_decimal"],
             lon=otros["longitud_decimal"],
             mode="markers",
@@ -351,7 +375,7 @@ def update_map(provincias_valor, cantones_valor, parroquias_valor, tipo_nodos, o
     mapbox_layout["zoom"] = zoom
 
     fig.update_layout(
-        mapbox=mapbox_layout,
+        map=mapbox_layout,
         margin={"l": 0, "r": 0, "t": 0, "b": 0},
         height=560,
         legend={"orientation": "h", "y": 1.02, "x": 0},

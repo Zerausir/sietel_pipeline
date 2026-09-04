@@ -56,6 +56,73 @@ def get_auth_engine() -> Engine:
     )
 
 
+@lru_cache(maxsize=1)
+def get_sma_engine() -> Engine:
+    """
+    Engine hacia samm_db (samm_pipeline), VM1, para el módulo SMA -- lee
+    public.grafana_mobile_geo_view / public.grafana_voice_geo_view.
+
+    RIESGO ACEPTADO EXPLÍCITAMENTE POR IVÁN (26-ago-2026): a diferencia de
+    get_mart_engine()/get_auth_engine(), que usan roles acotados por
+    diseño (dashboard_lector solo SELECT sobre mart.*, dashboard_auth solo
+    sobre auth.usuarios_dashboard), este engine usa samm_user -- que, por
+    el mismo patrón de nombres de este repo (sietel_user = dueño completo
+    de su esquema), es probablemente el rol PROPIETARIO de samm_pipeline,
+    no uno de solo lectura. Se decidió proceder así sin crear un rol
+    equivalente a dashboard_lector para samm_db. Si en el futuro se
+    detecta una escritura accidental desde este dashboard hacia samm_db,
+    este es el primer lugar a revisar.
+
+    PRESUPUESTO DE CONEXIONES COMPARTIDO: el mismo servidor PostgreSQL de
+    VM1 ya tiene max_connections=100 con margen ajustado (ver docstring de
+    get_mart_engine() -- 24 conexiones de otros sistemas, incluido el
+    propio samm_pipeline, ya consumidas antes de que este dashboard abra
+    ninguna). Este tercer engine compite por ese mismo techo -- pool
+    deliberadamente pequeño (no el default de SQLAlchemy) para no revivir
+    el problema que ya se corrigió para mart/auth. Ajustar hacia arriba
+    solo con evidencia real de agotamiento de pool (ver mensajes de
+    QueuePool en logs de gunicorn), no de forma preventiva.
+    """
+    return create_engine(
+        settings.sma_url(),
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        pool_size=2,
+        max_overflow=3,
+        connect_args={"connect_timeout": 10},
+    )
+
+
+def validate_sma() -> dict[str, bool]:
+    """
+    Confirma que las dos vistas de samm_pipeline existen y son alcanzables
+    con samm_user -- mismo propósito que validate_mart()/validate_auth(),
+    pero SIN validar columnas: los nombres de columna asumidos en
+    services/queries_sma.py se tomaron del panel de campos de Power BI
+    (capturas del 21-ago-2026), nunca del DDL real de estas vistas (no
+    disponible en este repositorio ni en samm_pipeline al momento de
+    escribir esto). Antes del primer despliegue, correr manualmente:
+        psql -h 192.168.129.50 -U samm_user -d samm_db \\
+             -c '\\d+ public.grafana_mobile_geo_view'
+        psql -h 192.168.129.50 -U samm_user -d samm_db \\
+             -c '\\d+ public.grafana_voice_geo_view'
+    y corregir services/queries_sma.py si algún nombre/tipo no coincide.
+    """
+    required = ["public.grafana_mobile_geo_view", "public.grafana_voice_geo_view"]
+    sql = text(
+        """
+        SELECT :object_name AS object_name,
+               TO_REGCLASS(:object_name) IS NOT NULL AS exists
+        """
+    )
+    result: dict[str, bool] = {}
+    with get_sma_engine().connect() as connection:
+        for object_name in required:
+            row = connection.execute(sql, {"object_name": object_name}).mappings().one()
+            result[object_name] = bool(row["exists"])
+    return result
+
+
 def validate_mart() -> dict[str, bool]:
     required = [
         "mart.vw_dashboard_evolucion",

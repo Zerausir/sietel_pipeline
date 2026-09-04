@@ -55,6 +55,18 @@ class Settings:
     auth_pg_user: str = os.getenv("AUTH_PG_USER", "dashboard_auth")
     auth_pg_password: str = os.getenv("AUTH_PG_PASSWORD", "")
 
+    # ── Conexión SMA (Servicio Móvil Avanzado): samm_pipeline, VM1, base
+    # samm_db -- NO es sietel_analitico. Rol usado: el que Iván decidió
+    # (samm_user, dueño completo de samm_pipeline -- ver nota de riesgo en
+    # database.py:get_sma_engine()). Deliberadamente en su propio bloque de
+    # variables, nunca reutiliza MART_PG_*/AUTH_PG_*: son instancias/roles
+    # distintos aunque compartan host físico.
+    sma_pg_host: str = os.getenv("SMA_PG_HOST", "")
+    sma_pg_port: int = int(os.getenv("SMA_PG_PORT", "5432"))
+    sma_pg_database: str = os.getenv("SMA_PG_DATABASE", "samm_db")
+    sma_pg_user: str = os.getenv("SMA_PG_USER", "samm_user")
+    sma_pg_password: str = os.getenv("SMA_PG_PASSWORD", "")
+
     cache_timeout: int = int(os.getenv("CACHE_TIMEOUT", "300"))
     # CAMBIO (22-ago-2026, diagnóstico de latencia): "SimpleCache" (el
     # default anterior) es un diccionario en memoria LOCAL A CADA PROCESO
@@ -87,6 +99,16 @@ class Settings:
             host=_require_env("AUTH_PG_HOST"),
             port=self.auth_pg_port,
             database=self.auth_pg_database,
+        )
+
+    def sma_url(self) -> URL:
+        return URL.create(
+            drivername="postgresql+psycopg",
+            username=_require_env("SMA_PG_USER"),
+            password=_require_env("SMA_PG_PASSWORD"),
+            host=_require_env("SMA_PG_HOST"),
+            port=self.sma_pg_port,
+            database=self.sma_pg_database,
         )
 
 

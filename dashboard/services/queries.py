@@ -2056,5 +2056,15 @@ def acotar_opciones_por_prestador(
     la llamada solo debe hacerse cuando SÍ hay un prestador elegido; ver
     los call sites en lines_territory_filters.py/node_territory_filters.py.
     """
+    # CORRECCIÓN (31-ago-2026): el docstring de arriba ya prometía este
+    # comportamiento, pero la función nunca lo implementó -- sin esta
+    # guarda, un prestador elegido con CERO presencia en cualquier
+    # territorio (ej. un permiso revocado, o un ISP sin nodos activos)
+    # dejaba codigos_validos vacío y esta función vaciaba por completo
+    # Provincia/Cantón/Parroquia, en vez de dejarlos sin restringir como
+    # el propio comentario decía que debía pasar.
+    if territorios_con_prestador.empty:
+        return opciones
+
     codigos_validos = set(territorios_con_prestador[columna_codigo].dropna().astype(str).unique())
     return [o for o in opciones if str(o["value"]) in codigos_validos]

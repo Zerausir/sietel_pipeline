@@ -322,6 +322,23 @@ def register_node_territory_callbacks(prefix: str) -> None:
         # disparo espurio sobrescriba con [] los otros dos campos que la
         # página hermana ya había puesto ahí.
         shared_data = dict(shared_data or {})
+
+        # GUARDIA (31-ago-2026, causa raíz real -- ver documentación oficial
+        # de Dash, "Advanced Callbacks": prevent_initial_call=True NO evita
+        # el disparo cuando el OUTPUT de un callback ya existía en el layout
+        # (nodo-shared-territory, fuera de page_container) y su INPUT recién
+        # se inserta por otra vía (aquí: Dash Pages montando esta página al
+        # navegar). Ese disparo "fantasma" llega con los tres dropdowns
+        # recién montados en [] y, sin este guardia, sobrescribía el store
+        # compartido con vacío en cada navegación -- por eso Provincia/
+        # Cantón/Parroquia no se sincronizaban entre Mapa de nodos y
+        # Discrepancias. Un clic real del usuario en UN solo dropdown
+        # produce exactamente una entrada en dash.ctx.triggered; el montaje
+        # simultáneo de los tres al navegar produce varias -- ese es el
+        # criterio que Dash documenta para distinguir ambos casos.
+        if len(dash.ctx.triggered) != 1:
+            return dash.no_update
+
         triggered_id = dash.ctx.triggered_id
         if triggered_id == f"{prefix}-province":
             shared_data["provincias"] = provincias or []

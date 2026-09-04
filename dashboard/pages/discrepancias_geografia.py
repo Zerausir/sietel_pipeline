@@ -270,11 +270,24 @@ def update_isp_options(
     Input(f"{PREFIX}-tipo-nodo", "value"),
     Input(f"{PREFIX}-opera-estado", "value"),
     Input(f"{PREFIX}-isp-nombre", "value"),
+    Input("nodo-shared-territory", "data"),
+    Input("shared-filters", "data"),
 )
-def update_discrepancias(provincias_valor, cantones_valor, parroquias_valor, tipo_nodos, opera_estados, isp_nombres):
-    provincias = tuple(provincias_valor or ())
-    cantones = tuple(cantones_valor or ())
-    parroquias = tuple(parroquias_valor or ())
+def update_discrepancias(provincias_valor, cantones_valor, parroquias_valor, tipo_nodos, opera_estados,
+                         isp_nombres, territorio_compartido, filtros_compartidos):
+    """
+    CORRECCIÓN (31-ago-2026) -- mismo defecto y misma razón que
+    pages/mapa_nodos.py:update_map(): condición de carrera documentada en
+    "Callback Gotchas" de Dash (componentes de la página nueva aún no
+    montados cuando el callback de restauración evalúa su elegibilidad al
+    navegar). "nodo-shared-territory"/"shared-filters" viven fuera de
+    page_container y no sufren esa carrera -- se usan como respaldo.
+    """
+    provincias = tuple(provincias_valor or (territorio_compartido or {}).get("provincias", []) or ())
+    cantones = tuple(cantones_valor or (territorio_compartido or {}).get("cantones", []) or ())
+    parroquias = tuple(parroquias_valor or (territorio_compartido or {}).get("parroquias", []) or ())
+    opera_estados_efectivo = tuple(opera_estados or (filtros_compartidos or {}).get("opera_estados", []) or ())
+    isp_nombres_efectivo = tuple(isp_nombres or (filtros_compartidos or {}).get("isp_nombres", []) or ())
 
     try:
         df = get_nodos_mapa(
@@ -282,8 +295,8 @@ def update_discrepancias(provincias_valor, cantones_valor, parroquias_valor, tip
             cantones=cantones,
             parroquias=parroquias,
             tipo_nodos=tuple(tipo_nodos or ()),
-            opera_estados=tuple(opera_estados or ()),
-            isp_nombres=tuple(isp_nombres or ()),
+            opera_estados=opera_estados_efectivo,
+            isp_nombres=isp_nombres_efectivo,
             solo_discrepancias=True,
         )
     except Exception as exc:
@@ -294,7 +307,7 @@ def update_discrepancias(provincias_valor, cantones_valor, parroquias_valor, tip
         vacio = empty_figure("No hay discrepancias para los filtros seleccionados")
         return vacio, vacio, vacio, [], "0 discrepancias"
 
-    fig = go.Figure(go.Scattermapbox(
+    fig = go.Figure(go.Scattermap(
         lat=df["latitud_decimal"],
         lon=df["longitud_decimal"],
         mode="markers",
@@ -325,7 +338,7 @@ def update_discrepancias(provincias_valor, cantones_valor, parroquias_valor, tip
     mapbox_layout["zoom"] = zoom
 
     fig.update_layout(
-        mapbox=mapbox_layout,
+        map=mapbox_layout,
         margin={"l": 0, "r": 0, "t": 0, "b": 0},
         height=480,
     )

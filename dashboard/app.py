@@ -102,7 +102,7 @@ def navigation() -> html.Header:
 # "Control e Infraestructura" contiene una página que también se llama
 # "Control" -- renombrado el grupo a propósito para evitar el "Control >
 # Control" confuso que resultaba de usar el mismo nombre en ambos niveles.
-GRUPOS_NAV: list[tuple[str, list[tuple[str, str]]]] = [
+GRUPOS_NAV_SAI: list[tuple[str, list[tuple[str, str]]]] = [
     ("Estadísticas", [
         ("Evolución", "/sai/evolucion"),
         ("IHH y participación", "/sai/concentracion"),
@@ -112,6 +112,26 @@ GRUPOS_NAV: list[tuple[str, list[tuple[str, str]]]] = [
         ("Mapa de nodos", "/sai/mapa-nodos"),
         ("Discrepancias de geografía", "/sai/discrepancias-geografia"),
     ]),
+]
+
+# NUEVO (26-ago-2026): módulo SMA (Servicio Móvil Avanzado), sobre
+# samm_pipeline/samm_db -- universo de datos y prefijo de ruta propios
+# (/sma/), nunca mezclado con GRUPOS_NAV_SAI. Ver
+# services/queries_sma.py para la fuente y sus advertencias.
+GRUPOS_NAV_SMA: list[tuple[str, list[tuple[str, str]]]] = [
+    ("Calidad de Servicio Móvil", [
+        ("Calidad de Datos móviles", "/sma/datos"),
+        ("Calidad de Voz", "/sma/voz"),
+    ]),
+]
+
+# Mapa prefijo de ruta -> (grupos de navegación, subtítulo de la barra) --
+# generaliza lo que antes era un solo "if dentro_de_sai" para admitir más
+# de un módulo. Agregar un módulo nuevo en el futuro es una entrada más
+# aquí, no reescribir actualizar_navegacion().
+MODULOS: list[tuple[str, list[tuple[str, list[tuple[str, str]]]], str]] = [
+    ("/sai/", GRUPOS_NAV_SAI, "Servicio de Acceso a Internet — SAI"),
+    ("/sma/", GRUPOS_NAV_SMA, "Servicio Móvil Avanzado — SMA"),
 ]
 
 
@@ -167,16 +187,17 @@ def actualizar_navegacion(pathname: str | None):
     (/sai/*); si se agregan más módulos en el futuro, esta es la función
     a extender.
     """
-    dentro_de_sai = (pathname or "").startswith("/sai/")
-    if not dentro_de_sai:
-        return [], "Observatorio de Telecomunicaciones"
+    pathname = pathname or ""
+    for prefijo, grupos, subtitulo in MODULOS:
+        if pathname.startswith(prefijo):
+            nav = [
+                dcc.Link("← Panel", href="/", className="nav-link nav-back"),
+                html.Div(className="topbar-sep"),
+                *[_grupo_menu(nombre, items, pathname) for nombre, items in grupos],
+            ]
+            return nav, subtitulo
 
-    nav = [
-        dcc.Link("← Panel", href="/", className="nav-link nav-back"),
-        html.Div(className="topbar-sep"),
-        *[_grupo_menu(nombre, items, pathname) for nombre, items in GRUPOS_NAV],
-    ]
-    return nav, "Servicio de Acceso a Internet — SAI"
+    return [], "Observatorio de Telecomunicaciones"
 
 
 def serve_layout() -> html.Div:
@@ -247,6 +268,19 @@ def serve_layout() -> html.Div:
                 id="nodo-shared-territory",
                 storage_type="memory",
                 data={"provincias": [], "cantones": [], "parroquias": []},
+            ),
+            # Store del módulo SMA (26-ago-2026) -- sincroniza Operadora/
+            # CZO/territorio/Tecnología/Número/fechas SOLO entre
+            # sma_datos.py y sma_voz.py (mismo criterio que
+            # nodo-shared-territory: universo de datos propio, nunca
+            # mezclado con SAI). Ver components/sma_filters.py.
+            dcc.Store(
+                id="sma-shared-filters",
+                storage_type="memory",
+                data={
+                    "operadoras": [], "czos": [], "provincias": [], "cantones": [], "parroquias": [],
+                    "tecnologias": [], "numero": None, "fecha_inicial": None, "fecha_final": None,
+                },
             ),
             html.Main(dash.page_container, className="page-container"),
             html.Footer(

@@ -407,6 +407,18 @@ def register_universal_opera_isp_sync(prefix: str) -> None:
 
         shared_data = dict(shared_data or {})
 
+        # GUARDIA (31-ago-2026) -- mismo defecto latente que se encontró y
+        # corrigió en components/node_territory_filters.py (ver ese archivo
+        # para la explicación completa, citando la documentación oficial de
+        # Dash): prevent_initial_call=True no evita el disparo cuando
+        # shared-filters (el Output) ya existía y opera-estado/isp-nombre
+        # (los Inputs) recién se insertan por navegación. No se había
+        # reportado como roto para Estado/Prestador, pero la forma del
+        # problema es idéntica -- se corrige aquí también en vez de esperar
+        # a que aparezca.
+        if len(ctx.triggered) != 1:
+            return no_update
+
         triggered_id = ctx.triggered_id
 
         if triggered_id == f"{prefix}-isp-nombre":

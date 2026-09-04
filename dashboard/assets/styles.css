@@ -325,6 +325,29 @@ body {
     box-shadow: 0 0 0 2px rgba(20, 100, 244, 0.15);
 }
 
+/* Módulo SMA (components/sma_filters.py) -- input de texto para "Número"
+   con el mismo look que el resto de filter-field; NO se reutiliza
+   dmc.MonthPickerInput aquí porque los datos de SMA son por sesión (con
+   hora real), no mensuales -- dcc.DatePickerSingle sí es el nivel de
+   granularidad correcto para este módulo, a diferencia de SAI. */
+.filter-text-input {
+    width: 100%;
+    font-size: 14px;
+    min-height: 38px;
+    padding: 8px 11px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    background: var(--white);
+    box-sizing: border-box;
+}
+
+.filter-text-input:focus {
+    border-color: var(--blue);
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(20, 100, 244, 0.15);
+}
+
 .data-message {
     min-height: 24px;
     margin: 2px 2px 12px;
@@ -571,6 +594,19 @@ h3[id^="ctrl-resumen-titulo-"] {
     margin-top: 0;
 }
 
+/* Módulo SMA (26-ago-2026) -- estado "pausado a propósito" (falta el DAX
+   real de Voz), distinto semánticamente de un error de conexión: mismo
+   panel que .error-panel pero borde naranja (PALETTE["orange"]), no rojo
+   -- rojo en esta paleta significa falla, no "pendiente de datos". */
+.pending-panel {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-left: 5px solid #f28c28;
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    padding: 22px;
+}
+
 .footer {
     padding: 22px;
     text-align: center;
@@ -725,6 +761,14 @@ h3[id^="ctrl-resumen-titulo-"] {
     color: var(--navy);
 }
 
+/* Variante para el módulo SMA (26-ago-2026) -- mismo patrón que .blue,
+   con el teal ya usado en components/ui.py:PALETTE para no introducir un
+   color nuevo fuera de la paleta existente. */
+.mod-card-icon.teal {
+    background: #e2f5f0;
+    color: #00745f;
+}
+
 .mod-card-tag {
     display: inline-block;
     font-size: 10px;
@@ -740,6 +784,11 @@ h3[id^="ctrl-resumen-titulo-"] {
 .mod-card-tag.blue {
     background: #e6edf5;
     color: var(--navy);
+}
+
+.mod-card-tag.teal {
+    background: #e2f5f0;
+    color: #00745f;
 }
 
 .mod-card-name {

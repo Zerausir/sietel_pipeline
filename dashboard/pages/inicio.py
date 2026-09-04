@@ -1,10 +1,12 @@
 """dashboard/pages/inicio.py — Panel de opciones: selector de módulos.
 
-Primera pantalla tras el login (path="/"). Por ahora existe un solo
-módulo -- "Servicio de Acceso a Internet (SAI)" -- que lleva a las páginas
-de Evolución y Concentración, ahora bajo el prefijo /sai/. El diseño sigue
-el mismo patrón visual (tarjetas de módulo, franja de estadísticas, píldora
-de acceso) que Zerausir/tablero, adaptado a la paleta de OBTEL.
+Primera pantalla tras el login (path="/"). Dos módulos disponibles:
+"Servicio de Acceso a Internet (SAI)" (prefijo /sai/, sietel_analitico) y,
+desde el 26-ago-2026, "Servicio Móvil Avanzado (SMA)" (prefijo /sma/,
+samm_pipeline/samm_db -- fuente de datos completamente distinta, ver
+services/queries_sma.py). El diseño sigue el mismo patrón visual (tarjetas
+de módulo, franja de estadísticas, píldora de acceso) que Zerausir/tablero,
+adaptado a la paleta de OBTEL.
 """
 from __future__ import annotations
 
@@ -55,6 +57,21 @@ def layout():
                             html.Div(["Abrir módulo →"], className="mod-card-arrow"),
                         ],
                     ),
+                    dcc.Link(
+                        href="/sma/datos",
+                        className="mod-card",
+                        children=[
+                            html.Div("SMA", className="mod-card-icon teal"),
+                            html.Span("Móvil", className="mod-card-tag teal"),
+                            html.Div("Servicio Móvil Avanzado — SMA", className="mod-card-name"),
+                            html.P(
+                                "Calidad de datos móviles y de voz por operadora, con throughput y calidad de "
+                                "llamada geolocalizados. Fuente: samm_pipeline.",
+                                className="mod-card-desc",
+                            ),
+                            html.Div(["Abrir módulo →"], className="mod-card-arrow"),
+                        ],
+                    ),
                 ],
             ),
             html.Div("Información del sistema", className="section-label"),
@@ -65,7 +82,7 @@ def layout():
                         className="stat-card",
                         children=[
                             html.Div("Módulos disponibles", className="stat-label"),
-                            html.Div("1", className="stat-val"),
+                            html.Div("2", className="stat-val"),
                             html.Div("Habilitado para tu perfil", className="stat-sub"),
                         ],
                     ),
