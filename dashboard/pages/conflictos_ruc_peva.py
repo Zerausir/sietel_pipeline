@@ -18,8 +18,15 @@ sql/04_ddl_calidad.sql y mart/detectar_conflictos_peva.py:
     6 casos reales confirmados 28-jul-2026) -- normalmente NO queda
     pendiente por mucho tiempo, si aparece aquí como PENDIENTE es señal de
     que el pipeline de mart no ha vuelto a correr desde la detección.
-  - B_SECUENCIA_MISMO_TITULAR / C_NOMBRES_DISTINTOS_MISMO_RUC: SIEMPRE
-    requieren revisión manual -- son la cola de trabajo humano real de esta
+  - B_SECUENCIA_MISMO_TITULAR: requiere revisión manual SOLO si
+    coexisten_en_periodo es true -- si es false, el sistema la cierra sola
+    (accion_recomendada=SIN_CONFLICTO_NO_COEXISTEN, revisado_por='sistema').
+    CORREGIDO 18-sep-2026: la primera versión de este comentario decía
+    "SIEMPRE requiere revisión manual", impreciso -- confirmado en
+    producción con 2 casos reales de esta categoría, ambos auto-resueltos
+    así, ninguno con revisor humano.
+  - C_NOMBRES_DISTINTOS_MISMO_RUC: SIEMPRE requiere revisión manual -- es
+    la única categoría de cola de trabajo humano real garantizada en esta
     página.
 
 SIN TERRITORIO: un conflicto RUC/PEVA no tiene columna de geografía propia
@@ -158,9 +165,9 @@ def layout():
                             {"field": "ruc_limpio", "headerName": "RUC", "minWidth": 140},
                             {"field": "categoria", "headerName": "Categoría", "minWidth": 220},
                             {"field": "isp_nombre_a", "headerName": "Prestador (PEVA A)", "minWidth": 200, "flex": 2},
-                            {"field": "peva_a", "headerName": "PEVA A", "width": 110},
+                            {"field": "peva_a", "headerName": "PEVA A", "minWidth": 130},
                             {"field": "isp_nombre_b", "headerName": "Prestador (PEVA B)", "minWidth": 200, "flex": 2},
-                            {"field": "peva_b", "headerName": "PEVA B", "width": 110},
+                            {"field": "peva_b", "headerName": "PEVA B", "minWidth": 130},
                             {"field": "coexisten_en_periodo", "headerName": "Coexisten", "width": 110},
                             {"field": "accion_recomendada", "headerName": "Acción recomendada", "minWidth": 190},
                             {"field": "estado_revision", "headerName": "Estado", "minWidth": 160},
