@@ -97,21 +97,35 @@ def navigation() -> html.Header:
     )
 
 
-# Estructura de navegación: dos grupos desplegables en vez de cinco
-# pestañas planas (12-ago-2026, a pedido del usuario). El grupo superior
-# "Control e Infraestructura" contiene una página que también se llama
-# "Control" -- renombrado el grupo a propósito para evitar el "Control >
-# Control" confuso que resultaba de usar el mismo nombre en ambos niveles.
+# Estructura de navegación: grupos desplegables, más enlaces sueltos para
+# grupos de un solo ítem (12-ago-2026 la versión de grupos; 18-sep-2026
+# separación de "Calidad de datos"). CORREGIDO el mismo día: la primera
+# versión de este cambio metía a Control dentro de "Calidad de datos" --
+# error de categoría, no de detalle. Control es un dashboard de SÍNTOMAS
+# (anomalías de reporte que afectan la medición del mercado), igual que
+# Estadísticas -- no es una cola de causas a resolver. "Calidad de datos"
+# es, en palabras del usuario, "para decirle qué debe resolver en los
+# datos con prioridad para mejorar lo que se observa en Control y en
+# Estadísticas" -- por eso solo contiene causas raíz accionables:
+# Discrepancias de geografía (identidad de nodo) y Conflictos RUC/PEVA
+# (identidad de titular). Mapa de nodos sigue afuera por la razón de
+# siempre (exploración, no cola con algo que resolver). Control, ahora sin
+# grupo propio, usa el mismo mecanismo que ya resolvió a Mapa de nodos:
+# un solo ítem -> enlace directo, no un desplegable de una opción.
 GRUPOS_NAV_SAI: list[tuple[str, list[tuple[str, str]]]] = [
     ("Estadísticas", [
         ("Evolución", "/sai/evolucion"),
         ("IHH y participación", "/sai/concentracion"),
     ]),
-    ("Control e Infraestructura", [
+    ("Control", [
         ("Control", "/sai/control"),
-        ("Mapa de nodos", "/sai/mapa-nodos"),
+    ]),
+    ("Calidad de datos", [
         ("Discrepancias de geografía", "/sai/discrepancias-geografia"),
         ("Conflictos RUC/PEVA", "/sai/conflictos-ruc-peva"),
+    ]),
+    ("Mapa de nodos", [
+        ("Mapa de nodos", "/sai/mapa-nodos"),
     ]),
 ]
 
@@ -134,6 +148,23 @@ MODULOS: list[tuple[str, list[tuple[str, list[tuple[str, str]]]], str]] = [
     ("/sai/", GRUPOS_NAV_SAI, "Servicio de Acceso a Internet — SAI"),
     ("/sma/", GRUPOS_NAV_SMA, "Servicio Móvil Avanzado — SMA"),
 ]
+
+
+def _flat_link(label: str, href: str, pathname: str) -> dcc.Link:
+    """
+    Enlace directo, sin desplegable -- mismo estilo visual que
+    _grupo_menu() (clase "nav-link", mismo criterio de "active") para que
+    no se note la diferencia estructural, pero sin el clic extra de abrir
+    un menú de una sola opción. actualizar_navegacion() la usa
+    automáticamente para cualquier grupo de GRUPOS_NAV_SAI/GRUPOS_NAV_SMA
+    que quede con un único ítem -- no hace falta tocar esta función al
+    agregar o quitar páginas de un grupo, ver el comentario sobre Mapa de
+    nodos en GRUPOS_NAV_SAI (18-sep-2026).
+    """
+    return dcc.Link(
+        label, href=href,
+        className="nav-link" + (" active" if pathname == href else ""),
+    )
 
 
 def _grupo_menu(nombre_grupo: str, items: list[tuple[str, str]], pathname: str) -> dmc.Menu:
@@ -194,7 +225,11 @@ def actualizar_navegacion(pathname: str | None):
             nav = [
                 dcc.Link("← Panel", href="/", className="nav-link nav-back"),
                 html.Div(className="topbar-sep"),
-                *[_grupo_menu(nombre, items, pathname) for nombre, items in grupos],
+                *[
+                    _grupo_menu(nombre, items, pathname) if len(items) > 1
+                    else _flat_link(items[0][0], items[0][1], pathname)
+                    for nombre, items in grupos
+                ],
             ]
             return nav, subtitulo
 
