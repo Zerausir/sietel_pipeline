@@ -2068,3 +2068,76 @@ def acotar_opciones_por_prestador(
 
     codigos_validos = set(territorios_con_prestador[columna_codigo].dropna().astype(str).unique())
     return [o for o in opciones if str(o["value"]) in codigos_validos]
+
+
+# ============================================================================
+# Conflictos RUC/PEVA (calidad.conflictos_ruc_peva vía mart.vw_conflictos_ruc_peva)
+# -- agregado para dashboard/pages/conflictos_ruc_peva.py, ver
+# sql/10_patch_vw_conflictos_ruc_peva.sql.
+# ============================================================================
+
+@cache.memoize(timeout=300)
+def get_conflictos_ruc_peva(
+        categorias: tuple[str, ...] = (),
+        estados: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    """
+    Cola de revisión de calidad.conflictos_ruc_peva, vía el puente de solo
+    lectura mart.vw_conflictos_ruc_peva (sql/10_patch_vw_conflictos_ruc_peva.sql).
+
+    Cache de 5 minutos -- mismo criterio que get_nodos_mapa: la cola cambia
+    con cada revisión humana (calidad_revisor, fuera de este dashboard) y con
+    cada corrida de mart/detectar_conflictos_peva.py, así que un cache largo
+    (como los 15 min de get_periods, un catálogo casi estático) mostraría un
+    conflicto ya resuelto como si siguiera pendiente por más tiempo del
+    razonable.
+
+    Sin territorio: un conflicto RUC/PEVA no tiene columna de geografía
+    propia (ver comentario de la vista fuente) -- por eso esta función solo
+    admite categoria/estado_revision como filtros, a diferencia de las
+    consultas _multiselect que sí reciben provincias/cantones/parroquias.
+    """
+    condiciones = ["1=1"]
+    params: dict[str, Any] = {}
+    if categorias:
+        condiciones.append("categoria = ANY(:categorias)")
+        params["categorias"] = list(categorias)
+    if estados:
+        condiciones.append("estado_revision = ANY(:estados)")
+        params["estados"] = list(estados)
+    where = " AND ".join(condiciones)
+
+    return _read(
+        f"""
+        SELECT
+            ruc_limpio, peva_a, peva_b, isp_nombre_a, isp_nombre_b,
+            opera_a, opera_b, fecha_permiso_a, fecha_permiso_b,
+            categoria, peva_legado_descartado, coexisten_en_periodo,
+            accion_recomendada, estado_revision, revisado_por,
+            notas_revision, fecha_revision, fecha_deteccion, fecha_ultima_deteccion
+        FROM mart.vw_conflictos_ruc_peva
+        WHERE {where}
+        ORDER BY fecha_deteccion DESC
+        """,
+        params,
+    )
+
+
+def get_conflictos_ruc_peva_categorias() -> list[dict[str, str]]:
+    """Valores distintos de categoria, para el filtro de la página -- catálogo casi
+    estático (solo cambia si se agrega una categoría nueva al CHECK de la tabla)."""
+    return [
+        {"label": "A · Duplicado por migración de codificación", "value": "A_DUPLICADO_MIGRACION_CODIFICACION"},
+        {"label": "B · Secuencia del mismo titular", "value": "B_SECUENCIA_MISMO_TITULAR"},
+        {"label": "C · Nombres distintos, mismo RUC", "value": "C_NOMBRES_DISTINTOS_MISMO_RUC"},
+    ]
+
+
+def get_conflictos_ruc_peva_estados() -> list[dict[str, str]]:
+    """Valores distintos de estado_revision -- fijos por el CHECK de calidad.conflictos_ruc_peva."""
+    return [
+        {"label": "Pendiente", "value": "PENDIENTE"},
+        {"label": "Confirmado automático", "value": "CONFIRMADO_AUTOMATICO"},
+        {"label": "Confirmado manual", "value": "CONFIRMADO_MANUAL"},
+        {"label": "Descartado manual", "value": "DESCARTADO_MANUAL"},
+    ]

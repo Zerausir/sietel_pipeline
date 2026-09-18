@@ -2349,6 +2349,52 @@ SELECT
 FROM mart.fact_lineas_geografia_mes
 GROUP BY estado_resolucion_peva;
 
+-- Puente de solo lectura hacia calidad.conflictos_ruc_peva (categorías A/B/C
+-- de conflicto RUC/PEVA, ver mart/detectar_conflictos_peva.py) -- segundo
+-- puente calidad->mart, mismo patrón que mart.vw_nodos_isp_mapa usa para
+-- calidad.discrepancias_geografia_nodo (06-ago-2026). Sin CREATE OR REPLACE
+-- aquí: el esquema mart se acaba de reconstruir desde cero en este archivo
+-- (sección 1, DROP SCHEMA ... CASCADE), así que la vista nunca existe
+-- todavía en este punto de la ejecución -- a diferencia de
+-- sql/10_patch_vw_conflictos_ruc_peva.sql, que sí necesita CREATE OR REPLACE
+-- porque se aplica contra un mart ya existente en producción.
+--
+-- estado_revision/revisado_por/notas_revision/fecha_revision reflejan el
+-- workflow humano tal cual está en calidad -- esta vista NO permite
+-- editarlos, la edición real ocurre fuera de OBTEL con el rol
+-- calidad_revisor. Sin columnas de geografía ni territorio: un conflicto
+-- RUC/PEVA no tiene ubicación física propia (no es un nodo).
+--
+-- El GRANT a dashboard_lector no va aquí -- ya lo cubre, sin cambios, la
+-- sección 18 de este mismo archivo (GRANT SELECT ON ALL TABLES IN SCHEMA
+-- mart TO dashboard_lector, que alcanza vistas también).
+CREATE VIEW mart.vw_conflictos_ruc_peva AS
+SELECT
+    id,
+    ruc_limpio,
+    peva_a,
+    peva_b,
+    isp_nombre_a,
+    isp_nombre_b,
+    opera_a,
+    opera_b,
+    fecha_permiso_a,
+    fecha_permiso_b,
+    categoria,
+    peva_legado_descartado,
+    coexisten_en_periodo,
+    accion_recomendada,
+    estado_revision,
+    revisado_por,
+    notas_revision,
+    fecha_revision,
+    fecha_deteccion,
+    fecha_ultima_deteccion
+FROM calidad.conflictos_ruc_peva;
+
+COMMENT ON VIEW mart.vw_conflictos_ruc_peva IS
+'Puente de solo lectura hacia calidad.conflictos_ruc_peva (categorías A/B/C de conflicto RUC/PEVA, ver mart/detectar_conflictos_peva.py). estado_revision/revisado_por/notas_revision/fecha_revision reflejan el workflow humano tal cual está en calidad -- esta vista NO permite editarlos, la edición real ocurre fuera de OBTEL con el rol calidad_revisor. Sin columnas de geografía ni territorio: un conflicto RUC/PEVA no tiene ubicación física propia.';
+
 -- ============================================================
 -- 16. ESTADISTICAS
 -- ============================================================

@@ -111,6 +111,7 @@ GRUPOS_NAV_SAI: list[tuple[str, list[tuple[str, str]]]] = [
         ("Control", "/sai/control"),
         ("Mapa de nodos", "/sai/mapa-nodos"),
         ("Discrepancias de geografía", "/sai/discrepancias-geografia"),
+        ("Conflictos RUC/PEVA", "/sai/conflictos-ruc-peva"),
     ]),
 ]
 
