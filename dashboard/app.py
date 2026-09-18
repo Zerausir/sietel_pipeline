@@ -99,33 +99,35 @@ def navigation() -> html.Header:
 
 # Estructura de navegación: grupos desplegables, más enlaces sueltos para
 # grupos de un solo ítem (12-ago-2026 la versión de grupos; 18-sep-2026
-# separación de "Calidad de datos"). CORREGIDO el mismo día: la primera
-# versión de este cambio metía a Control dentro de "Calidad de datos" --
-# error de categoría, no de detalle. Control es un dashboard de SÍNTOMAS
-# (anomalías de reporte que afectan la medición del mercado), igual que
-# Estadísticas -- no es una cola de causas a resolver. "Calidad de datos"
-# es, en palabras del usuario, "para decirle qué debe resolver en los
-# datos con prioridad para mejorar lo que se observa en Control y en
-# Estadísticas" -- por eso solo contiene causas raíz accionables:
-# Discrepancias de geografía (identidad de nodo) y Conflictos RUC/PEVA
-# (identidad de titular). Mapa de nodos sigue afuera por la razón de
-# siempre (exploración, no cola con algo que resolver). Control, ahora sin
-# grupo propio, usa el mismo mecanismo que ya resolvió a Mapa de nodos:
-# un solo ítem -> enlace directo, no un desplegable de una opción.
+# separación de "Calidad de datos"). CORREGIDO dos veces el mismo día:
+# primero metía a Control dentro de "Calidad de datos" (error de
+# categoría, ver abajo); la segunda corrección, al arreglar eso, dejó a
+# Control y a Mapa de nodos como dos enlaces sueltos SEPARADOS en vez de
+# agruparlos juntos bajo "Control e Infraestructura" como se pidió --
+# confirmado con captura de pantalla en producción (18-sep-2026, cuatro
+# ítems al mismo nivel en vez de tres). Queda así, definitivo:
+# - Estadísticas: Evolución, IHH y participación -- SÍNTOMAS de mercado.
+# - Control e Infraestructura: Control (síntomas de reporte) + Mapa de
+#   nodos (exploración de infraestructura física) -- vuelven a ir
+#   juntos, como estaban antes de esta sesión.
+# - Calidad de datos: Discrepancias de geografía + Conflictos RUC/PEVA --
+#   SOLO causas raíz accionables (colas con estado_revision), en palabras
+#   del usuario: "para decirle qué debe resolver en los datos con
+#   prioridad para mejorar lo que se observa en Control y en
+#   Estadísticas". Mapa de nodos NO entra aquí -- es exploración, no una
+#   cola con algo que resolver.
 GRUPOS_NAV_SAI: list[tuple[str, list[tuple[str, str]]]] = [
     ("Estadísticas", [
         ("Evolución", "/sai/evolucion"),
         ("IHH y participación", "/sai/concentracion"),
     ]),
-    ("Control", [
+    ("Control e Infraestructura", [
         ("Control", "/sai/control"),
+        ("Mapa de nodos", "/sai/mapa-nodos"),
     ]),
     ("Calidad de datos", [
         ("Discrepancias de geografía", "/sai/discrepancias-geografia"),
         ("Conflictos RUC/PEVA", "/sai/conflictos-ruc-peva"),
-    ]),
-    ("Mapa de nodos", [
-        ("Mapa de nodos", "/sai/mapa-nodos"),
     ]),
 ]
 
