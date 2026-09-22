@@ -196,7 +196,7 @@ SQL_UPSERT_HECHOS = """
         %s, %s, %s,
         %s, %s, %s,
         %s, %s, %s, %s, %s, %s, %s, %s, %s,
-        %s, %s, %s, %s, %s, %s, %s
+        %s, %s, %s, %s, %s, %s, %s, %s
     )
     ON CONFLICT (peva_codigo, par_codigo, periodoNumero, anio,
                  tipoEnlace, tipoCliente, nivelComparticion, portador)
