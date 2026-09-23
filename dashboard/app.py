@@ -128,6 +128,7 @@ GRUPOS_NAV_SAI: list[tuple[str, list[tuple[str, str]]]] = [
     ("Calidad de datos", [
         ("Discrepancias de geografía", "/sai/discrepancias-geografia"),
         ("Conflictos RUC/PEVA", "/sai/conflictos-ruc-peva"),
+        ("Prioridad de carga", "/sai/prioridad-carga"),
     ]),
 ]
 

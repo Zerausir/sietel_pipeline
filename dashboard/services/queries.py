@@ -2141,3 +2141,101 @@ def get_conflictos_ruc_peva_estados() -> list[dict[str, str]]:
         {"label": "Confirmado manual", "value": "CONFIRMADO_MANUAL"},
         {"label": "Descartado manual", "value": "DESCARTADO_MANUAL"},
     ]
+
+
+# ============================================================================
+# Prioridad de carga (23-sep-2026) -- Calidad de datos, priorización de
+# "a quién perseguir primero" por PESO en Estadísticas/Control, no por
+# antigüedad ni por correlación con causas de calidad (esa hipótesis se
+# probó y se descartó -- ver commit del 18-sep-2026). Reutiliza
+# mart.vw_prestadores_reporte_detenido/vw_prestadores_sin_reportar
+# (ya existentes) y el mismo umbral de dominancia nacional (>=30%) ya
+# verificado con el caso CNT en mart.fact_ihh_geografico.
+# ============================================================================
+
+@cache.memoize(timeout=900)
+def get_prestadores_dominantes_historicos() -> set[str]:
+    """
+    prestador_id que alguna vez alcanzaron >=30% de participación nacional
+    -- mismo umbral que mart.fact_ihh_geografico.prestador_dominante_ausente
+    y get_dependencia_geografica_dominante_ausente (caso CNT, verificado
+    con datos reales). Cache de 15 min -- esta lista cambia solo cuando un
+    prestador entra o sale de ese nivel histórico de participación, no
+    mes a mes.
+    """
+    df = _read(
+        """
+        SELECT DISTINCT prestador_id
+        FROM mart.fact_participacion_mercado
+        WHERE participacion_porcentaje >= 30 AND territorio_id = 'NACIONAL|ECUADOR'
+        """
+    )
+    return set(df["prestador_id"])
+
+
+@cache.memoize(timeout=300)
+def get_calendario_reportes(prestador_ids: tuple[str, ...]) -> pd.DataFrame:
+    """
+    tiene_reportado por (prestador_id, periodo_id), para el heatmap
+    calendario de dashboard/pages/prioridad_carga.py -- mismo patrón
+    BOOL_OR(tiene_reportado) GROUP BY ya usado en
+    get_churn_history_multiselect/get_variacion_mensual_anomala, aquí SIN
+    agregar a nivel de mercado (una fila por prestador y mes, no una serie
+    única). Acotado a prestador_ids explícitos (el top del heatmap, no
+    todo el universo) -- sin esa lista, cruzaría TODOS los prestadores x
+    TODOS los períodos, muy por encima de lo que esta página necesita.
+
+    Solo trae meses donde el prestador YA tiene fila en
+    fact_lineas_geografia_mes (reales o imputados por LOCF interior) --
+    los meses posteriores a ultimo_periodo_reportado (la cola de "reporte
+    detenido") simplemente NO aparecen aquí, porque capa2 nunca extrapola
+    hacia adelante. El llamador debe completar esa cola como "no
+    reportado" al armar la grilla completa -- ver prioridad_carga.py.
+    """
+    if not prestador_ids:
+        return pd.DataFrame(columns=["prestador_id", "periodo_id", "anio_mes", "tiene_reportado"])
+    return _read(
+        """
+        SELECT f.prestador_id, f.periodo_id, d.anio_mes,
+               BOOL_OR(f.tiene_reportado) AS tiene_reportado
+        FROM mart.fact_lineas_geografia_mes f
+        JOIN mart.dim_periodo d ON d.periodo_id = f.periodo_id
+        WHERE f.prestador_id = ANY(:prestador_ids)
+        GROUP BY f.prestador_id, f.periodo_id, d.anio_mes
+        ORDER BY f.prestador_id, f.periodo_id
+        """,
+        {"prestador_ids": list(prestador_ids)},
+    )
+
+
+# ============================================================================
+# Priorización de revisión -- Discrepancias de geografía (23-sep-2026)
+# ============================================================================
+
+@cache.memoize(timeout=300)
+def get_peso_historico_prestadores(peva_codigos: tuple[str, ...]) -> pd.DataFrame:
+    """
+    Cuentas históricas totales del prestador DUEÑO de cada PEVA dado -- vía
+    la llave exacta mart.bridge_prestador_peva (prestador_id, peva_codigo),
+    no una aproximación de texto (a diferencia del LIKE usado y descartado
+    en el intento de priorización de conflictos RUC/PEVA, 18-sep-2026).
+
+    Es el peso del PRESTADOR completo (todas sus líneas, todos sus PEVA),
+    NO de un nodo puntual -- no existe una forma honesta de saber cuántas
+    líneas pasan por un nodo específico (nodos y líneas son universos sin
+    relación 1:1 en este proyecto, confirmado con Iván 06-ago-2026). Ver
+    dashboard/pages/discrepancias_geografia.py para dónde se usa esto.
+    """
+    if not peva_codigos:
+        return pd.DataFrame(columns=["peva_codigo", "prestador_id", "total_lineas_historico"])
+    return _read(
+        """
+        SELECT bp.peva_codigo, bp.prestador_id,
+               SUM(f.lineas_reportadas) AS total_lineas_historico
+        FROM mart.bridge_prestador_peva bp
+        JOIN mart.fact_lineas_geografia_mes f ON f.prestador_id = bp.prestador_id
+        WHERE bp.peva_codigo = ANY(:peva_codigos)
+        GROUP BY bp.peva_codigo, bp.prestador_id
+        """,
+        {"peva_codigos": list(peva_codigos)},
+    )

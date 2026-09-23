@@ -18,6 +18,7 @@ cambio que pages/mapa_nodos.py, ver components/node_territory_filters.py.
 """
 from __future__ import annotations
 
+import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, callback, dcc, html, register_page
 import dash_ag_grid as dag
@@ -29,7 +30,8 @@ from components.ui import (
     mapbox_polygon_layers, page_header, register_excel_download_callback, style_figure,
 )
 from services.queries import (
-    get_node_provider_options, get_node_types, get_nodos_mapa, get_operation_states, get_territory_geojson_multi,
+    get_node_provider_options, get_node_types, get_nodos_mapa, get_operation_states,
+    get_peso_historico_prestadores, get_territory_geojson_multi,
 )
 
 register_page(__name__, path="/sai/discrepancias-geografia", name="Discrepancias de geografía", order=3)
@@ -139,6 +141,43 @@ def layout():
                 ],
             ),
             html.Section(
+                className="table-card",
+                style={"marginTop": "20px"},
+                children=[
+                    html.H3("Priorización de revisión — por peso del prestador"),
+                    html.P(
+                        "No existe un dato de cuántas líneas pasan por un nodo específico -- nodos y líneas "
+                        "son universos sin relación 1:1 en este proyecto. El peso es del PRESTADOR dueño del "
+                        "nodo (sus cuentas históricas totales, todas sus líneas y PEVA), no del nodo puntual. "
+                        "El % de nodos discrepantes señala un problema sistemático de georreferenciación de "
+                        "ese prestador -- no es lo mismo un prestador con 1 de 40 nodos discrepantes que uno "
+                        "con 8 de 10.",
+                        className="chart-subtitle",
+                    ),
+                    dag.AgGrid(
+                        id=f"{PREFIX}-priorizacion-grid",
+                        columnDefs=[
+                            {"field": "isp_nombre", "headerName": "Prestador", "minWidth": 240, "flex": 2},
+                            {"field": "nodos_discrepantes", "headerName": "Nodos discrepantes",
+                             "type": "numericColumn", "minWidth": 160},
+                            {"field": "nodos_totales", "headerName": "Nodos totales (mismo filtro)",
+                             "type": "numericColumn", "minWidth": 190},
+                            {"field": "pct_discrepante", "headerName": "% discrepante",
+                             "type": "numericColumn", "minWidth": 130},
+                            {"field": "total_lineas_historico", "headerName": "Cuentas históricas (peso)",
+                             "type": "numericColumn", "minWidth": 190},
+                        ],
+                        rowData=[],
+                        defaultColDef={"sortable": True, "filter": True, "resizable": True},
+                        dashGridOptions={"theme": "themeBalham", "pagination": True, "paginationPageSize": 10,
+                                         "animateRows": True},
+                        columnSize="responsiveSizeToFit",
+                        style={"height": "420px", "width": "100%"},
+                    ),
+                    excel_download_button(f"{PREFIX}-priorizacion-grid"),
+                ],
+            ),
+            html.Section(
                 className="chart-card",
                 style={"marginTop": "20px"},
                 children=[
@@ -186,6 +225,7 @@ def layout():
 register_node_territory_callbacks(PREFIX)
 register_universal_opera_isp_sync(PREFIX)
 register_excel_download_callback(f"{PREFIX}-grid", "detalle_de_discrepancias.xlsx")
+register_excel_download_callback(f"{PREFIX}-priorizacion-grid", "priorizacion_discrepancias.xlsx")
 
 
 @callback(
@@ -374,3 +414,77 @@ def update_discrepancias(provincias_valor, cantones_valor, parroquias_valor, tip
     estado_fig.update_yaxes(title="")
 
     return fig, provincia_fig, estado_fig, clean_records(df), message
+
+
+@callback(
+    Output(f"{PREFIX}-priorizacion-grid", "rowData"),
+    Input(f"{PREFIX}-province", "value"),
+    Input(f"{PREFIX}-canton", "value"),
+    Input(f"{PREFIX}-parish", "value"),
+    Input(f"{PREFIX}-tipo-nodo", "value"),
+    Input(f"{PREFIX}-opera-estado", "value"),
+    Input(f"{PREFIX}-isp-nombre", "value"),
+    Input("nodo-shared-territory", "data"),
+    Input("shared-filters", "data"),
+)
+def update_priorizacion(provincias_valor, cantones_valor, parroquias_valor, tipo_nodos, opera_estados,
+                        isp_nombres, territorio_compartido, filtros_compartidos):
+    """
+    Mismos filtros e Inputs que update_discrepancias() -- misma condición
+    de carrera al navegar, mismo respaldo (nodo-shared-territory/
+    shared-filters), ver el docstring de esa función.
+
+    Agrega por PEVA (no por nodo individual): nodos_discrepantes (del
+    universo ya filtrado a es_discrepancia=true), nodos_totales (MISMO
+    filtro pero sin esa restricción -- el denominador del %), y el peso
+    del prestador dueño (get_peso_historico_prestadores(), llave exacta
+    bridge_prestador_peva, no aproximación).
+    """
+    provincias = tuple(provincias_valor or (territorio_compartido or {}).get("provincias", []) or ())
+    cantones = tuple(cantones_valor or (territorio_compartido or {}).get("cantones", []) or ())
+    parroquias = tuple(parroquias_valor or (territorio_compartido or {}).get("parroquias", []) or ())
+    opera_estados_efectivo = tuple(opera_estados or (filtros_compartidos or {}).get("opera_estados", []) or ())
+    isp_nombres_efectivo = tuple(isp_nombres or (filtros_compartidos or {}).get("isp_nombres", []) or ())
+    tipo_nodos_t = tuple(tipo_nodos or ())
+
+    try:
+        discrepantes = get_nodos_mapa(
+            provincias=provincias, cantones=cantones, parroquias=parroquias,
+            tipo_nodos=tipo_nodos_t, opera_estados=opera_estados_efectivo, isp_nombres=isp_nombres_efectivo,
+            solo_discrepancias=True,
+        )
+        todos = get_nodos_mapa(
+            provincias=provincias, cantones=cantones, parroquias=parroquias,
+            tipo_nodos=tipo_nodos_t, opera_estados=opera_estados_efectivo, isp_nombres=isp_nombres_efectivo,
+            solo_discrepancias=False,
+        )
+    except Exception:
+        return []
+
+    if discrepantes.empty or "peva_codigo" not in discrepantes.columns:
+        return []
+
+    nodos_discrepantes = discrepantes.groupby("peva_codigo").size().rename("nodos_discrepantes")
+    nodos_totales = todos.groupby("peva_codigo").size().rename("nodos_totales")
+    nombres = discrepantes.groupby("peva_codigo")["isp_nombre"].first()
+
+    resumen = pd.concat([nodos_discrepantes, nodos_totales, nombres], axis=1).reset_index()
+    resumen = resumen.rename(columns={"index": "peva_codigo"})
+    # nodos_totales no debería faltar (todo discrepante es, por definición,
+    # parte de "todos"), pero se completa con nodos_discrepantes como piso
+    # defensivo en vez de dejar un NaN si algo queda fuera por timing entre
+    # las dos consultas.
+    resumen["nodos_totales"] = resumen["nodos_totales"].fillna(resumen["nodos_discrepantes"])
+    resumen["pct_discrepante"] = (100.0 * resumen["nodos_discrepantes"] / resumen["nodos_totales"]).round(1)
+
+    try:
+        peso = get_peso_historico_prestadores(tuple(resumen["peva_codigo"]))
+        peso_por_peva = peso.groupby("peva_codigo")["total_lineas_historico"].sum()
+    except Exception:
+        peso_por_peva = pd.Series(dtype=float)
+
+    resumen["total_lineas_historico"] = resumen["peva_codigo"].map(peso_por_peva).fillna(0)
+    resumen = resumen.sort_values("total_lineas_historico", ascending=False)
+
+    columnas = ["isp_nombre", "nodos_discrepantes", "nodos_totales", "pct_discrepante", "total_lineas_historico"]
+    return clean_records(resumen[columnas])
