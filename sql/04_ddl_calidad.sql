@@ -13,10 +13,12 @@
 -- SOSTENIBILIDAD: cada vez que se re-detectan conflictos, el UPSERT solo
 -- toca las columnas derivadas de los datos de origen (categoria, fechas,
 -- nombres, coexistencia). Las columnas de workflow (estado_revision,
--- revisado_por, notas_revision, fecha_revision) SOLO se fijan la primera
--- vez que aparece un par -- nunca se sobreescriben en corridas posteriores.
--- Así, una decisión humana no se pierde ni se resetea cuando vuelve a correr
--- el detector.
+-- revisado_por, notas_revision, fecha_revision) nunca se sobreescriben si
+-- reflejan una decisión HUMANA -- una decisión humana no se pierde ni se
+-- resetea cuando vuelve a correr el detector. Desde 28-sep-2026, un estado
+-- puesto por el SISTEMA (CONFIRMADO_AUTOMATICO, o PENDIENTE sin revisor,
+-- notas ni fecha) sí se recalcula si cambia la clasificación del par (ver
+-- _RECALCULAR_ESTADO en mart/detectar_conflictos_peva.py).
 --
 -- ESTE ARCHIVO YA NO CREA ROLES. La creación de calidad_lector y
 -- calidad_revisor (CREATE ROLE + contraseña) se hace por línea de comandos,
