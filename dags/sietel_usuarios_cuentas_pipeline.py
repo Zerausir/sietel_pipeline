@@ -11,6 +11,9 @@ Orquesta la carga del módulo analítico "Usuarios y Cuentas — Internet Fijo":
   5. cargar_hechos_de_anio  — extracción agregada de dbo.VALineasDedicadas,
                               un año a la vez (dynamic task mapping).
   6. validar_carga      — certificación cruzada SQL Server vs PostgreSQL.
+  7. disparar_mart_pipeline — dispara sietel_mart_pipeline si todo lo
+                              anterior pasó (reconstruye las vistas de mart
+                              que el paso 1 borra por CASCADE).
 
 VARIABLE DE AIRFLOW "sietel_anios_a_cargar":
   "historico"  → carga todo el rango ANIO_INICIO_HISTORICO..ANIO_FIN_HISTORICO
@@ -31,6 +34,7 @@ import logging
 import os
 import sys
 
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import dag, task, Variable
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
@@ -121,6 +125,24 @@ def sietel_usuarios_cuentas_pipeline():
         from validar_carga import validar_anios
         validar_anios(anios)
 
+    # 7. disparar_mart_pipeline (28-sep-2026) -- aplicar_esquema hace
+    # DROP VIEW analitico.v_ultimo_periodo_reportado_detalle CASCADE, que se
+    # lleva mart.vw_prestadores_sin_reportar y mart.vw_nodos_isp_mapa: sin
+    # este paso el dashboard (KPI "sin reportar" y Mapa de nodos) quedaba
+    # roto hasta que alguien disparara sietel_mart_pipeline a mano (opción
+    # b de sql/01_ddl_postgres.sql, sección 6). Solo se dispara si la
+    # validación cruzada pasó (trigger_rule por defecto, all_success) -- no
+    # se publica en el dashboard un dato que no quedó certificado. No espera
+    # a que mart termine: son dos DAGs independientes, con sus propios logs.
+    # REQUIERE que sietel_mart_pipeline esté DESPAUSADO en la UI (schedule
+    # =None, así que despausarlo no agenda nada por sí solo); si está
+    # pausado, la corrida queda en cola sin ejecutarse.
+    disparar_mart = TriggerDagRunOperator(
+        task_id="disparar_mart_pipeline",
+        trigger_dag_id="sietel_mart_pipeline",
+        wait_for_completion=False,
+    )
+
     esquema = aplicar_esquema()
     dimensiones = cargar_dimensiones()
     nodos = cargar_nodos_isp()
@@ -128,7 +150,7 @@ def sietel_usuarios_cuentas_pipeline():
     hechos = cargar_hechos_de_anio.expand(anio=anios)
     validacion = validar_carga(anios)
 
-    esquema >> dimensiones >> nodos >> hechos >> validacion
+    esquema >> dimensiones >> nodos >> hechos >> validacion >> disparar_mart
 
 
 sietel_usuarios_cuentas_pipeline()
