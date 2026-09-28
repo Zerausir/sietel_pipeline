@@ -2486,8 +2486,20 @@ SELECT
         WHEN opera IN ('Cancelación', 'NO', 'Opera Irregularmente') THEN 'no_operativo'
         ELSE 'zona_gris'
     END AS clasificacion_incumplimiento
-FROM analitico.v_ultimo_periodo_reportado_detalle
-WHERE tiene_reportes = FALSE;
+FROM analitico.v_ultimo_periodo_reportado_detalle v
+WHERE tiene_reportes = FALSE
+  -- CORRECCIÓN 28-sep-2026: excluye los PEVA legados del Grupo A
+  -- (duplicado de migración de codificación, calidad.vw_pevas_excluidos) --
+  -- ya se excluyen de capa2 por ser el MISMO prestador que otro PEVA que sí
+  -- reporta, pero aquí se seguían contando como "nunca reportó". Verificado
+  -- en producción 28-sep-2026: 5 PEVA legados dejan de contarse (419 -> 414
+  -- filas); 3 tenían opera='SI' y fuera de gracia, así que el KPI
+  -- activo_sin_reportar baja de 56 a 53. calidad.vw_pevas_excluidos ya
+  -- existe en este punto: la tarea aplicar_ddl_calidad corre primero en el
+  -- DAG.
+  AND NOT EXISTS (
+      SELECT 1 FROM calidad.vw_pevas_excluidos e WHERE e.peva_codigo = v.peva_codigo
+  );
 
 -- vw_prestadores_reporte_detenido (agregado 05-ago-2026, promovido desde el
 -- EDA de líneas dedicadas -- secciones 9.11/9.12/9.13 del notebook, ver
