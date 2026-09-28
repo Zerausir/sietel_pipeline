@@ -432,6 +432,125 @@ CREATE TRIGGER trg_registrar_correccion_resumen
     FOR EACH ROW
     EXECUTE FUNCTION staging.fn_registrar_correccion_resumen();
 
+-- 7b. peva_codigo en MAYÚSCULAS (28-sep-2026) -- corrección de datos ya
+-- cargados, idempotente (no hace nada si no quedan minúsculas).
+-- cargar_hechos_anio.py ahora extrae UPPER(peva_codigo), pero las filas
+-- cargadas antes conservan la grafía de SIETEL: caso real CNT EP,
+-- 'peva(usu-8)122' en todo jul-2015, que el INNER JOIN de
+-- analitico.v_lineas_dedicadas_resumen descartaba (2.630 filas, 811.516
+-- líneas fuera de capa2/mart/dashboard). Se corrige aquí en vez de exigir
+-- recargar 2015 a mano. hash_contenido se recalcula con la MISMA fórmula
+-- que cargar_hechos_anio.calcular_hash_fila (columnas de COLUMNAS_HASH
+-- unidas por '|', NULL como 'NULL') -- verificado 28-sep-2026: idéntica
+-- en las 1.959.691 filas. El trigger de la sección 7 registra cada fila
+-- corregida en historial_correcciones. Si ya existiera la misma
+-- combinación en mayúsculas no se toca (la certificación de
+-- validar_carga lo reportaría).
+DO $$
+DECLARE
+    n bigint;
+BEGIN
+    UPDATE staging.va_lineas_dedicadas_resumen h
+    SET peva_codigo    = upper(h.peva_codigo),
+        fecha_carga    = now(),
+        hash_contenido = md5(concat_ws('|',
+            upper(h.peva_codigo), COALESCE(h.par_codigo::text, 'NULL'),
+            COALESCE(h.periodoNumero::text, 'NULL'), COALESCE(h.anio::text, 'NULL'),
+            COALESCE(h.tipoEnlace::text, 'NULL'), COALESCE(h.tipoCliente::text, 'NULL'),
+            COALESCE(h.nivelComparticion::text, 'NULL'), COALESCE(h.portador::text, 'NULL'),
+            COALESCE(h.total_lineas::text, 'NULL'), COALESCE(h.total_usuarios::text, 'NULL'),
+            COALESCE(h.lineas_dl_sin_datos::text, 'NULL'), COALESCE(h.lineas_dl_menos_1mbps::text, 'NULL'),
+            COALESCE(h.lineas_dl_1_10mbps::text, 'NULL'), COALESCE(h.lineas_dl_10_30mbps::text, 'NULL'),
+            COALESCE(h.lineas_dl_30_100mbps::text, 'NULL'), COALESCE(h.lineas_dl_100mbps_1gbps::text, 'NULL'),
+            COALESCE(h.lineas_dl_1gbps_o_mas::text, 'NULL'),
+            COALESCE(h.lineas_ul_sin_datos::text, 'NULL'), COALESCE(h.lineas_ul_menos_1mbps::text, 'NULL'),
+            COALESCE(h.lineas_ul_1_10mbps::text, 'NULL'), COALESCE(h.lineas_ul_10_30mbps::text, 'NULL'),
+            COALESCE(h.lineas_ul_30_100mbps::text, 'NULL'), COALESCE(h.lineas_ul_100mbps_1gbps::text, 'NULL'),
+            COALESCE(h.lineas_ul_1gbps_o_mas::text, 'NULL')))
+    WHERE h.peva_codigo <> upper(h.peva_codigo)
+      AND NOT EXISTS (
+          SELECT 1 FROM staging.va_lineas_dedicadas_resumen u
+          WHERE u.peva_codigo = upper(h.peva_codigo)
+            AND u.par_codigo = h.par_codigo
+            AND u.periodoNumero = h.periodoNumero
+            AND u.anio = h.anio
+            AND u.tipoEnlace IS NOT DISTINCT FROM h.tipoEnlace
+            AND u.tipoCliente IS NOT DISTINCT FROM h.tipoCliente
+            AND u.nivelComparticion IS NOT DISTINCT FROM h.nivelComparticion
+            AND u.portador IS NOT DISTINCT FROM h.portador
+      );
+    GET DIAGNOSTICS n = ROW_COUNT;
+    IF n > 0 THEN
+        RAISE NOTICE 'peva_codigo normalizado a mayúsculas en % filas de hechos', n;
+    END IF;
+END $$;
+
+-- 7c. FORMULARIOS DE LÍNEAS DEDICADAS (28-sep-2026) -- dbo.VAFormularioLineasDedicadas
+-- Cabecera de cada entrega trimestral: incluye las declaraciones "sin
+-- servicio" (tieneServicio='No', 0 registros), que NO dejan ninguna fila en
+-- dbo.VALineasDedicadas. Sin esta tabla, un prestador que entrega a tiempo
+-- declarando que aún no tiene servicio (típico en su primer año de
+-- permiso) era indistinguible de uno que nunca entregó nada -- caso real
+-- que lo reveló: DIGITEC S.A. Decisión de Mercados (28-sep-2026): se
+-- clasifican como "sin servicio", no como incumplimiento.
+-- periodoNumero aquí es el TRIMESTRE (1-4, 'Enero-Marzo'...), no el mes
+-- como en va_lineas_dedicadas_resumen. Snapshot completo en cada corrida
+-- (scripts/cargar_formularios_lineas.py) -- ~38K filas.
+CREATE TABLE IF NOT EXISTS staging.va_formulario_lineas_dedicadas (
+    fld_codigo          VARCHAR(50)  PRIMARY KEY,
+    peva_codigo         VARCHAR(50)  NOT NULL,
+    anio                INTEGER      NOT NULL,
+    periodoNumero       INTEGER      NOT NULL,
+    periodoNombre       VARCHAR(20)  NOT NULL,
+    tieneServicio       VARCHAR(20)  NOT NULL,
+    numeroRegistros     INTEGER      NOT NULL,
+    fechaCarga          TIMESTAMP    NOT NULL,
+    fechaModificacion   TIMESTAMP,
+    regional            VARCHAR(50),
+    fecha_carga         TIMESTAMP    NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_formulario_lineas_peva ON staging.va_formulario_lineas_dedicadas (peva_codigo);
+
+COMMENT ON TABLE staging.va_formulario_lineas_dedicadas IS
+'Cabeceras de entrega del formulario de líneas dedicadas (dbo.VAFormularioLineasDedicadas), una por PEVA y trimestre. tieneServicio=No con numeroRegistros=0 es una declaración formal de "sin servicio" -- no deja filas en va_lineas_dedicadas_resumen. peva_codigo en MAYÚSCULAS. periodoNumero = trimestre (1-4), no mes.';
+
+-- Vista de consumo: resumen de entregas del formulario por PEVA, para
+-- mart.vw_prestadores_sin_reportar (clasificación "sin servicio"). CREATE
+-- OR REPLACE (no DROP + CREATE como las demás vistas de analitico): mart
+-- depende de ella y un DROP obligaría a CASCADE sobre mart en cada corrida
+-- -- si en el futuro cambian sus columnas en medio de la lista, pasar a
+-- DROP ... CASCADE (el DAG ya reconstruye mart al final).
+CREATE OR REPLACE VIEW analitico.v_formularios_lineas_por_peva AS
+WITH ultimo AS (
+    SELECT DISTINCT ON (peva_codigo)
+        peva_codigo, anio, periodoNumero, periodoNombre, tieneServicio
+    FROM staging.va_formulario_lineas_dedicadas
+    ORDER BY peva_codigo, anio DESC, periodoNumero DESC, fechaCarga DESC
+)
+SELECT
+    f.peva_codigo,
+    COUNT(*)                                          AS formularios_entregados,
+    COUNT(*) FILTER (WHERE f.tieneServicio = 'No')    AS formularios_sin_servicio,
+    COUNT(*) FILTER (WHERE f.tieneServicio <> 'No')   AS formularios_con_servicio,
+    MIN(f.fechaCarga)                                 AS primera_entrega,
+    MAX(f.fechaCarga)                                 AS ultima_entrega,
+    u.anio                                            AS ultimo_formulario_anio,
+    u.periodoNombre                                   AS ultimo_formulario_trimestre,
+    u.tieneServicio                                   AS ultimo_formulario_tiene_servicio
+FROM staging.va_formulario_lineas_dedicadas f
+JOIN ultimo u ON u.peva_codigo = f.peva_codigo
+GROUP BY f.peva_codigo, u.anio, u.periodoNombre, u.tieneServicio;
+
+COMMENT ON VIEW analitico.v_formularios_lineas_por_peva IS
+'Resumen por PEVA de las entregas del formulario de líneas dedicadas (staging.va_formulario_lineas_dedicadas): cuántas, cuántas declarando "sin servicio", y la última. Fuente de la clasificación "sin servicio" de mart.vw_prestadores_sin_reportar (decisión de Mercados, 28-sep-2026).';
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mart_user') THEN
+        GRANT SELECT ON analitico.v_formularios_lineas_por_peva TO mart_user;
+    END IF;
+END $$;
+
 -- ============================================================================
 -- 8. DIMENSION NodoISP (SCD Tipo 2) -- 06-ago-2026
 -- ============================================================================

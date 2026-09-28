@@ -97,9 +97,18 @@ def calcular_hash_fila(fila: dict) -> str:
     return hashlib.md5("|".join(valores).encode("utf-8")).hexdigest()
 
 
+# UPPER(peva_codigo) (28-sep-2026): SIETEL tiene el mismo PEVA escrito con
+# distinto uso de mayúsculas (caso real: CNT EP, 'peva(usu-8)122' en todo
+# jul-2015 vs 'PEVA(USU-8)122' en el resto y en dbo.PermisoVAgregado).
+# SQL Server (Modern_Spanish_CI_AS) los trata como iguales; PostgreSQL no,
+# y el INNER JOIN de analitico.v_lineas_dedicadas_resumen con
+# dim_permiso_va_agregado descartaba esas filas (2.630 filas, 811.516
+# líneas). Todos los códigos de dbo.PermisoVAgregado están en mayúsculas
+# (verificado), así que normalizar aquí no mezcla PEVA distintos. El GROUP
+# BY usa la misma expresión (en SQL Server agrupa igual, por ser CI).
 SQL_EXTRAER_HECHOS_ANIO = """
     SELECT
-        ld.peva_codigo,
+        UPPER(ld.peva_codigo) AS peva_codigo,
         ld.par_codigo,
         ld.periodoNumero,
         ld.periodoNombre,
@@ -168,7 +177,7 @@ SQL_EXTRAER_HECHOS_ANIO = """
     WHERE ld.anio = ?
     AND ld.periodoNumero = ?
     GROUP BY
-        ld.peva_codigo, ld.par_codigo, ld.periodoNumero,
+        UPPER(ld.peva_codigo), ld.par_codigo, ld.periodoNumero,
         ld.periodoNombre, ld.anio, ld.tipoEnlace,
         ld.tipoCliente, ld.nivelComparticion, ld.portador,
         ld.regional, prov.pro_nombre, ciu.ciu_nombre, par.par_nombre,

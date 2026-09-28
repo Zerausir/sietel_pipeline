@@ -187,6 +187,77 @@ def _certificar_contenido_por_anio(anio: int) -> dict:
     }
 
 
+def _certificar_completitud() -> list[str]:
+    """
+    AGREGADO 28-sep-2026: certifica que TODOS los prestadores de SIETEL
+    están en PostgreSQL y que ningún hecho cargado se pierde antes de llegar
+    a capa2/mart/dashboard. Antes solo se certificaban los hechos contra
+    staging, así que una pérdida entre staging y la vista de consumo pasaba
+    sin detectarse (caso real: CNT EP, jul-2015, 2.630 filas descartadas por
+    el JOIN al tener el PEVA en minúsculas).
+
+    Comprueba, en ambas direcciones cuando aplica:
+      1. dbo.ISP vs staging.dim_isp (versiones vigentes).
+      2. dbo.PermisoVAgregado vs staging.dim_permiso_va_agregado (vigentes).
+      3. dbo.VAFormularioLineasDedicadas vs staging.va_formulario_lineas_dedicadas.
+      4. Para TODOS los años (no solo los recién cargados): filas de
+         staging.va_lineas_dedicadas_resumen == filas de
+         analitico.v_lineas_dedicadas_resumen. Barato (~1 s): la vista es
+         un INNER JOIN que no duplica (_verificar_vista_sin_duplicados),
+         así que cualquier diferencia son filas descartadas.
+
+    Los códigos se comparan en MAYÚSCULAS en ambos lados: SQL Server no
+    distingue mayúsculas (Modern_Spanish_CI_AS) y el pipeline normaliza
+    peva_codigo a mayúsculas.
+    """
+    problemas = []
+    with sqlserver_cursor() as ms:
+        ms.execute("SELECT UPPER(isp_codigo) AS k FROM dbo.ISP")
+        isp_src = {r["k"] for r in ms.fetchall()}
+        ms.execute("SELECT UPPER(peva_codigo) AS k FROM dbo.PermisoVAgregado")
+        peva_src = {r["k"] for r in ms.fetchall()}
+        ms.execute("SELECT fld_codigo AS k FROM dbo.VAFormularioLineasDedicadas")
+        form_src = {r["k"] for r in ms.fetchall()}
+
+    with postgres_cursor(commit=False) as cur:
+        cur.execute("SELECT upper(isp_codigo) AS k FROM staging.dim_isp WHERE es_vigente")
+        isp_pg = {r["k"] for r in cur.fetchall()}
+        cur.execute("SELECT upper(peva_codigo) AS k FROM staging.dim_permiso_va_agregado WHERE es_vigente")
+        peva_pg = {r["k"] for r in cur.fetchall()}
+        cur.execute("SELECT fld_codigo AS k FROM staging.va_formulario_lineas_dedicadas")
+        form_pg = {r["k"] for r in cur.fetchall()}
+        cur.execute(
+            """
+            SELECT s.anio, s.n AS staging, COALESCE(v.n, 0) AS vista
+            FROM (SELECT anio, COUNT(*) AS n FROM staging.va_lineas_dedicadas_resumen GROUP BY anio) s
+            LEFT JOIN (SELECT anio, COUNT(*) AS n FROM analitico.v_lineas_dedicadas_resumen GROUP BY anio) v
+                   USING (anio)
+            WHERE s.n <> COALESCE(v.n, 0)
+            ORDER BY s.anio
+            """
+        )
+        perdidas_vista = cur.fetchall()
+
+    for nombre, src, pg in (
+        ("ISP (dbo.ISP / staging.dim_isp)", isp_src, isp_pg),
+        ("PEVA (dbo.PermisoVAgregado / staging.dim_permiso_va_agregado)", peva_src, peva_pg),
+        ("Formularios (dbo.VAFormularioLineasDedicadas / staging.va_formulario_lineas_dedicadas)",
+         form_src, form_pg),
+    ):
+        faltan, sobran = sorted(src - pg), sorted(pg - src)
+        if faltan:
+            problemas.append(f"{nombre}: {len(faltan)} en SIETEL que faltan en PostgreSQL (ej. {faltan[:5]})")
+        if sobran:
+            problemas.append(f"{nombre}: {len(sobran)} vigentes en PostgreSQL que ya no existen en SIETEL "
+                             f"(ej. {sobran[:5]})")
+    for r in perdidas_vista:
+        problemas.append(
+            f"Año {r['anio']}: {r['staging'] - r['vista']} fila(s) de hechos en staging que NO llegan a "
+            f"analitico.v_lineas_dedicadas_resumen (se pierden antes de capa2/mart/dashboard)"
+        )
+    return problemas
+
+
 def _verificar_unicidad_vigencia():
     """
     Verifica que las dimensiones SCD Tipo 2 no tengan más de una versión
@@ -272,7 +343,8 @@ def _registrar_resultado(anio, estado, mensaje_error, fecha_inicio):
         )
 
 
-def _imprimir_reporte(resultados_por_anio: dict, problemas_vigencia: list):
+def _imprimir_reporte(resultados_por_anio: dict, problemas_vigencia: list,
+                      problemas_completitud: list | None = None):
     """
     Reporte consolidado al estilo pipeline_validation de samm_pipeline:
     conteos + ✅/❌ por chequeo, en vez de solo una excepción con texto
@@ -289,6 +361,13 @@ def _imprimir_reporte(resultados_por_anio: dict, problemas_vigencia: list):
             print(f"    ⚠️  {p}")
     else:
         print("  Dimensiones SCD (vigencia única)                                 ✅")
+
+    if problemas_completitud:
+        print("  Completitud SIETEL -> PostgreSQL -> vista de consumo            ❌")
+        for p in problemas_completitud:
+            print(f"    ⚠️  {p}")
+    else:
+        print("  Completitud SIETEL -> PostgreSQL -> vista de consumo            ✅")
 
     for anio, r in resultados_por_anio.items():
         conteo_ok = r["filas_origen"] == r["filas_destino"]
@@ -325,6 +404,7 @@ def _imprimir_reporte(resultados_por_anio: dict, problemas_vigencia: list):
     print(f"{'=' * 70}")
     todo_ok = (
             not problemas_vigencia
+            and not problemas_completitud
             and all(
         r["filas_origen"] == r["filas_destino"]
         and not r["distintas"]
@@ -365,6 +445,10 @@ def validar_anios(anios: list[int]):
     problemas_vigencia = _verificar_unicidad_vigencia()
     if problemas_vigencia:
         errores.extend(problemas_vigencia)
+
+    print("\nCertificando completitud SIETEL -> PostgreSQL -> vista de consumo...")
+    problemas_completitud = _certificar_completitud()
+    errores.extend(problemas_completitud)
 
     for anio in anios:
         print(f"\nValidando año {anio}...")
@@ -435,7 +519,7 @@ def validar_anios(anios: list[int]):
             "duplicados_vista": duplicados_vista,
         }
 
-    _imprimir_reporte(resultados_por_anio, problemas_vigencia)
+    _imprimir_reporte(resultados_por_anio, problemas_vigencia, problemas_completitud)
 
     if errores:
         mensaje = "; ".join(errores)
