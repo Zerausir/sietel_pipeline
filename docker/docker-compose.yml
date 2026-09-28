@@ -22,8 +22,15 @@ x-airflow-common:
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-webserver:8080/execution/'
     AIRFLOW__API_AUTH__JWT_SECRET: '${AIRFLOW__API_AUTH__JWT_SECRET}'
     # Timeouts para tareas largas (extraccion agregada de VALineasDedicadas
-    # puede tardar varios minutos por mes/anio historico)
-    AIRFLOW__CORE__TASK_TIMEOUT: 900
+    # puede tardar varios minutos por mes/anio historico).
+    # QUITADO 28-sep-2026: AIRFLOW__CORE__TASK_TIMEOUT no es una opcion de
+    # Airflow (verificado en la referencia oficial de configuracion) -- se
+    # ignoraba en silencio, asi que NUNCA hubo timeout por tarea. No se
+    # reemplaza por la opcion real (core.default_task_execution_timeout)
+    # con 900s: validar_carga tarda ~9 min POR ANIO (medido: 540s para
+    # 2025) y en modo historico valida 16 anios en una sola tarea -- 900s la
+    # romperia. Si se quiere un limite, fijarlo por tarea (execution_timeout)
+    # con margen sobre la duracion real medida.
     AIRFLOW__CORE__KILLED_TASK_CLEANUP_TIME: 300
     AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: 300
     # Pool de conexiones a la BD de metadata de Airflow (VM1) -- valor
