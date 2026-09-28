@@ -268,10 +268,10 @@ def get_reporting_summary(
         clauses_nunca.append("v.isp_nombre = ANY(:isp_nombres)")
         params["isp_nombres"] = list(isp_nombres)
 
-    sql_nunca_reportaron = "SELECT peva_codigo AS prestador_id, fechapermiso FROM mart.vw_prestadores_sin_reportar v WHERE 1 = 0"
+    sql_nunca_reportaron = "SELECT peva_codigo AS prestador_id, fechapermiso, clasificacion_incumplimiento FROM mart.vw_prestadores_sin_reportar v WHERE 1 = 0"
     if incluir_nunca_reportaron:
         sql_nunca_reportaron = (
-            f"SELECT v.peva_codigo AS prestador_id, v.fechapermiso "
+            f"SELECT v.peva_codigo AS prestador_id, v.fechapermiso, v.clasificacion_incumplimiento "
             f"FROM mart.vw_prestadores_sin_reportar v WHERE {' AND '.join(clauses_nunca)}"
         )
 
@@ -317,6 +317,12 @@ def get_reporting_summary(
                     )
                 END AS periodo_inicio_obligacion
             FROM nunca_reportaron n
+            -- "sin_servicio" (28-sep-2026, decisión de Mercados): declaró
+            -- formalmente en el formulario que no tiene servicio -- no tiene
+            -- líneas que reportar, así que NO genera meses esperados (no
+            -- baja la tasa de entrega). Sí sigue sumando en
+            -- total_prestadores: tiene título habilitante.
+            WHERE n.clasificacion_incumplimiento <> 'sin_servicio'
         ),
         -- El cruce completo: TODO prestador (con o sin reportes previos)
         -- x TODO mes del rango en el que ya tenía obligación -- sin
@@ -396,7 +402,18 @@ def get_operation_states() -> list[dict[str, str]]:
 
 @cache.memoize(timeout=900)
 def get_provider_options(territory_id: str) -> list[dict[str, str]]:
-    """Nombres de prestadores con presencia en el territorio, para el filtro 'Prestador'."""
+    """
+    Nombres de prestadores con presencia en el territorio, para el filtro 'Prestador'.
+
+    AMPLIADO 28-sep-2026 ("ver absolutamente todo"): a nivel NACIONAL
+    también incluye a los prestadores SIN ninguna línea reportada
+    (mart.vw_prestadores_sin_reportar: sin servicio, nunca entregaron,
+    etc.). Antes solo salían prestadores con líneas, así que uno como
+    DIGITEC S.A. (solo declaraciones "sin servicio") era imposible de
+    seleccionar en ninguna página. Se marcan en la etiqueta para que se
+    entienda por qué sus gráficos de líneas salen vacíos. Solo a nivel
+    Nacional: SIETEL no conoce su ubicación (sin reportes no hay parroquia).
+    """
     df = _read(
         """
         SELECT DISTINCT p.isp_nombre
@@ -408,7 +425,24 @@ def get_provider_options(territory_id: str) -> list[dict[str, str]]:
         """,
         {"territory_id": territory_id},
     )
-    return [{"label": nombre, "value": nombre} for nombre in df["isp_nombre"]]
+    opciones = [{"label": nombre, "value": nombre} for nombre in df["isp_nombre"]]
+    if territory_id != "NACIONAL|ECUADOR":
+        return opciones
+
+    con_lineas = set(df["isp_nombre"])
+    sin_lineas = _read(
+        """
+        SELECT DISTINCT isp_nombre
+        FROM mart.vw_prestadores_sin_reportar
+        WHERE isp_nombre IS NOT NULL
+        ORDER BY isp_nombre
+        """
+    )
+    opciones += [
+        {"label": f"{nombre} (sin líneas reportadas)", "value": nombre}
+        for nombre in sin_lineas["isp_nombre"] if nombre not in con_lineas
+    ]
+    return sorted(opciones, key=lambda o: o["label"])
 
 
 @cache.memoize(timeout=300)
@@ -1189,7 +1223,9 @@ def get_prestadores_nunca_reportaron_detalle(
     return _read(
         f"""
         SELECT peva_codigo, isp_nombre, isp_ruc, isp_tipopersona, opera,
-               resolucion, fechapermiso, fuera_de_gracia, clasificacion_incumplimiento
+               resolucion, fechapermiso, fuera_de_gracia, clasificacion_incumplimiento,
+               formularios_entregados, formularios_sin_servicio, formularios_con_servicio,
+               ultima_entrega_formulario, ultimo_formulario_anio, ultimo_formulario_trimestre
         FROM mart.vw_prestadores_sin_reportar
         WHERE {' AND '.join(clauses)}
         ORDER BY fuera_de_gracia DESC NULLS LAST, fechapermiso NULLS LAST
@@ -1691,11 +1727,11 @@ def get_reporting_summary_multiselect(
         params["isp_nombres"] = list(isp_nombres)
 
     sql_nunca_reportaron = (
-        "SELECT peva_codigo AS prestador_id, fechapermiso FROM mart.vw_prestadores_sin_reportar v WHERE 1 = 0"
+        "SELECT peva_codigo AS prestador_id, fechapermiso, clasificacion_incumplimiento FROM mart.vw_prestadores_sin_reportar v WHERE 1 = 0"
     )
     if incluir_nunca_reportaron:
         sql_nunca_reportaron = (
-            f"SELECT v.peva_codigo AS prestador_id, v.fechapermiso "
+            f"SELECT v.peva_codigo AS prestador_id, v.fechapermiso, v.clasificacion_incumplimiento "
             f"FROM mart.vw_prestadores_sin_reportar v WHERE {' AND '.join(clauses_nunca)}"
         )
 
@@ -1741,6 +1777,12 @@ def get_reporting_summary_multiselect(
                     )
                 END AS periodo_inicio_obligacion
             FROM nunca_reportaron n
+            -- "sin_servicio" (28-sep-2026, decisión de Mercados): declaró
+            -- formalmente en el formulario que no tiene servicio -- no tiene
+            -- líneas que reportar, así que NO genera meses esperados (no
+            -- baja la tasa de entrega). Sí sigue sumando en
+            -- total_prestadores: tiene título habilitante.
+            WHERE n.clasificacion_incumplimiento <> 'sin_servicio'
         ),
         celdas_esperadas_calc AS (
             SELECT pco.prestador_id, pr.periodo_id

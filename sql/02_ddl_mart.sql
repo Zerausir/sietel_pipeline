@@ -2468,26 +2468,54 @@ ANALYZE mart.fact_ihh_geografico;
 -- cada consumidor decida el corte (ej. WHERE fuera_de_gracia AND
 -- clasificacion_incumplimiento = 'activo_sin_reportar' para el número de
 -- 104 verificado en el EDA).
+--
+-- "SIN SERVICIO" (28-sep-2026, decisión de Mercados): un PEVA sin ninguna
+-- línea reportada que SÍ entregó el formulario de líneas dedicadas
+-- declarando tieneServicio='No' NO está en incumplimiento -- declaró
+-- formalmente que aún no tiene servicio (típico en el año que tiene para
+-- iniciar operaciones desde su permiso). Antes el pipeline no leía el
+-- formulario y lo mezclaba con quien nunca entregó nada. Caso que lo
+-- reveló: DIGITEC S.A. La declaración tiene prioridad sobre `opera` al
+-- clasificar (es evidencia del propio prestador); `opera` sigue visible.
+-- Categorías resultantes:
+--   sin_servicio          -- entregó formularios, TODOS "sin servicio".
+--   servicio_sin_detalle  -- declaró "con servicio" en algún formulario
+--                            pero SIETEL no tiene NINGUNA línea de detalle:
+--                            inconsistencia de la fuente, para revisar.
+--   activo_sin_reportar / no_operativo / zona_gris -- como antes, solo
+--                            para quien NUNCA entregó el formulario.
+-- Verificado en producción 28-sep-2026 (antes de la exclusión Grupo A de
+-- abajo): de 419, 173 "sin servicio", 5 "servicio sin detalle", 241 nunca
+-- entregaron nada.
 CREATE VIEW mart.vw_prestadores_sin_reportar AS
 SELECT
-    peva_codigo,
-    isp_nombre,
-    isp_ruc,
-    isp_tipopersona,
-    opera,
-    resolucion,
-    fechapermiso,
+    v.peva_codigo,
+    v.isp_nombre,
+    v.isp_ruc,
+    v.isp_tipopersona,
+    v.opera,
+    v.resolucion,
+    v.fechapermiso,
     CASE
-        WHEN fechapermiso IS NULL THEN NULL
-        ELSE CURRENT_DATE >= (fechapermiso + INTERVAL '1 year')
+        WHEN v.fechapermiso IS NULL THEN NULL
+        ELSE CURRENT_DATE >= (v.fechapermiso + INTERVAL '1 year')
     END AS fuera_de_gracia,
     CASE
-        WHEN opera IN ('Nuevo', 'Opera Normalmente', 'SI') THEN 'activo_sin_reportar'
-        WHEN opera IN ('Cancelación', 'NO', 'Opera Irregularmente') THEN 'no_operativo'
+        WHEN f.formularios_entregados > 0 AND f.formularios_con_servicio = 0 THEN 'sin_servicio'
+        WHEN f.formularios_con_servicio > 0 THEN 'servicio_sin_detalle'
+        WHEN v.opera IN ('Nuevo', 'Opera Normalmente', 'SI') THEN 'activo_sin_reportar'
+        WHEN v.opera IN ('Cancelación', 'NO', 'Opera Irregularmente') THEN 'no_operativo'
         ELSE 'zona_gris'
-    END AS clasificacion_incumplimiento
+    END AS clasificacion_incumplimiento,
+    COALESCE(f.formularios_entregados, 0)   AS formularios_entregados,
+    COALESCE(f.formularios_sin_servicio, 0) AS formularios_sin_servicio,
+    COALESCE(f.formularios_con_servicio, 0) AS formularios_con_servicio,
+    f.ultima_entrega                        AS ultima_entrega_formulario,
+    f.ultimo_formulario_anio,
+    f.ultimo_formulario_trimestre
 FROM analitico.v_ultimo_periodo_reportado_detalle v
-WHERE tiene_reportes = FALSE
+LEFT JOIN analitico.v_formularios_lineas_por_peva f ON f.peva_codigo = upper(v.peva_codigo)
+WHERE v.tiene_reportes = FALSE
   -- CORRECCIÓN 28-sep-2026: excluye los PEVA legados del Grupo A
   -- (duplicado de migración de codificación, calidad.vw_pevas_excluidos) --
   -- ya se excluyen de capa2 por ser el MISMO prestador que otro PEVA que sí
