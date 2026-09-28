@@ -68,6 +68,9 @@ def _engine():
 
 
 _PATRON_NUMEROS = re.compile(r"\d+(?:[.,]\d+)?")
+# Letra/palabra de hemisferio sur/oeste NO rodeada de otras letras: calza
+# "0°12'S", "S 0 12", "78°30'O", "OESTE", "SUR"; no calza "NORTE" ni "ESTE".
+_PATRON_HEMISFERIO_NEGATIVO = re.compile(r"(?<![A-ZÁÉÍÓÚÑ])(?:SUR|OESTE|WEST|S|O|W)(?![A-ZÁÉÍÓÚÑ])")
 
 
 def convertir_dms_a_decimal(valor: str | None) -> tuple[float | None, str | None]:
@@ -88,11 +91,17 @@ def convertir_dms_a_decimal(valor: str | None) -> tuple[float | None, str | None
     if not texto or texto.lower() in ("nan", "null", "none", "0", "-"):
         return None, "valor_vacio_o_cero"
 
-    texto_upper = texto.upper()
-    # S (sur) u O/W (oeste) -> negativo. N/E son positivos por defecto, no
-    # requieren acción -- si no hay ninguna letra de hemisferio, se asume
-    # positivo tal cual viene (no hay forma de saber la intención sin ella).
-    negativo = "S" in texto_upper or "O" in texto_upper or "W" in texto_upper
+    # S (sur) u O/W (oeste), o un signo "-" inicial -> negativo. N/E son
+    # positivos por defecto -- si no hay ninguna señal, se asume positivo
+    # tal cual viene (no hay forma de saber la intención sin ella).
+    # CORRECCIÓN (28-sep-2026): antes se usaba `"S" in texto` / `"O" in
+    # texto`, que (a) ignoraba el "-" de coordenadas ya decimales -- la
+    # regex de números lo descarta, así que "-0.2150" salía +0.215, dentro
+    # del bounding box y en el hemisferio equivocado, sin marcarse inválida
+    # -- y (b) daba falso positivo con palabras como "NORTE" (contiene O) o
+    # "ESTE" (contiene S). Ahora la letra solo cuenta si está aislada (no
+    # rodeada de otras letras).
+    negativo = texto.startswith("-") or bool(_PATRON_HEMISFERIO_NEGATIVO.search(texto.upper()))
 
     numeros = _PATRON_NUMEROS.findall(texto.replace(",", "."))
     if not numeros:
