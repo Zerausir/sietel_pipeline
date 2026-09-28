@@ -1220,18 +1220,27 @@ def get_prestadores_nunca_reportaron_detalle(
         clauses.append("isp_nombre = ANY(:isp_nombres)")
         params["isp_nombres"] = list(isp_nombres)
 
-    return _read(
+    # SELECT * + reindex (28-sep-2026): las columnas de formularios
+    # (formularios_entregados, ...) solo existen desde que sietel_mart_pipeline
+    # reconstruye la vista con la clasificación "sin servicio". Así la página
+    # funciona igual si el dashboard se despliega ANTES de ese refresco (las
+    # columnas nuevas salen vacías hasta entonces), sin depender del orden
+    # de despliegue.
+    df = _read(
         f"""
-        SELECT peva_codigo, isp_nombre, isp_ruc, isp_tipopersona, opera,
-               resolucion, fechapermiso, fuera_de_gracia, clasificacion_incumplimiento,
-               formularios_entregados, formularios_sin_servicio, formularios_con_servicio,
-               ultima_entrega_formulario, ultimo_formulario_anio, ultimo_formulario_trimestre
+        SELECT *
         FROM mart.vw_prestadores_sin_reportar
         WHERE {' AND '.join(clauses)}
         ORDER BY fuera_de_gracia DESC NULLS LAST, fechapermiso NULLS LAST
         """,
         params,
     )
+    return df.reindex(columns=[
+        "peva_codigo", "isp_nombre", "isp_ruc", "isp_tipopersona", "opera",
+        "resolucion", "fechapermiso", "fuera_de_gracia", "clasificacion_incumplimiento",
+        "formularios_entregados", "formularios_sin_servicio", "formularios_con_servicio",
+        "ultima_entrega_formulario", "ultimo_formulario_anio", "ultimo_formulario_trimestre",
+    ])
 
 
 @cache.memoize(timeout=300)
