@@ -124,6 +124,11 @@ LLAVE_NATURAL = ["peva_codigo", "par_codigo", "tipoenlace", "tipocliente", "nive
 def _sentencias_construccion() -> list[str]:
     bloque_snapshot = "\n".join(f"    FIRST_VALUE({c}) OVER w AS {c}," for c in COLUMNAS_SNAPSHOT)
     llave_sql = ", ".join(LLAVE_NATURAL)
+    bloque_atributos_agregados = "\n".join(
+        f"            BOOL_OR({c}) AS {c}," if c == "es_cancelado_actual" else f"            MAX({c}) AS {c},"
+        for c in COLUMNAS_ATRIBUTOS
+    )
+    bloque_metricas_sumadas = ",\n".join(f"            SUM({c}) AS {c}" for c in COLUMNAS_METRICAS)
 
     crear_tabla_next = f"""
     CREATE TABLE capa2._lineas_dedicadas_consolidado_next AS
@@ -141,7 +146,7 @@ def _sentencias_construccion() -> list[str]:
         WHERE u.peva_codigo IS NOT NULL
         ORDER BY u.peva_codigo, u.ultimo_anio DESC NULLS LAST, u.ultimo_periodo_numero DESC NULLS LAST
     ),
-    reportado AS (
+    reportado_crudo AS (
         SELECT
             v.peva_codigo,
             v.par_codigo,
@@ -174,6 +179,26 @@ def _sentencias_construccion() -> list[str]:
         FROM analitico.v_lineas_dedicadas_resumen v
         LEFT JOIN opera_actual_por_peva oa ON oa.peva_codigo = v.peva_codigo
         WHERE v.peva_codigo NOT IN (SELECT peva_codigo FROM calidad.vw_pevas_excluidos)
+    ),
+    -- CORRECCIÓN (28-sep-2026): SIETEL reporta algunos valores de la llave
+    -- con espacios al inicio (ej. ' NEDETEL S.A.' y 'NEDETEL S.A.' en el
+    -- mismo PEVA/parroquia/mes -- SQL Server los trata como distintos). El
+    -- BTRIM de arriba los unifica en la MISMA llave y el MISMO período, y
+    -- antes de esta corrección ambas filas llegaban separadas a la ventana
+    -- FIRST_VALUE de abajo: como son "pares" en ORDER BY periodo, las dos
+    -- recibían las métricas de UNA sola de ellas -- una variante se contaba
+    -- doble y la otra se perdía. Confirmado en producción: 102 pares, 96
+    -- llaves descuadradas contra la fuente, -19.346 líneas netas
+    -- (2024-2026). Aquí se consolidan sumando las métricas, de modo que
+    -- quede exactamente una fila por (llave, periodo). Los atributos son
+    -- de PEVA/ISP/parroquia, constantes dentro del grupo -- MAX es seguro.
+    reportado AS (
+        SELECT
+            {llave_sql}, periodo,
+{bloque_atributos_agregados}
+{bloque_metricas_sumadas}
+        FROM reportado_crudo
+        GROUP BY {llave_sql}, periodo
     ),
     series AS (
         SELECT {llave_sql}, MIN(periodo) AS periodo_min, MAX(periodo) AS periodo_max
@@ -291,7 +316,7 @@ def _sql_conteo_dry_run() -> str:
     ),
     series AS (
         SELECT {llave_sql}, MIN(periodo) AS periodo_min, MAX(periodo) AS periodo_max,
-               COUNT(*) AS filas_reales
+               COUNT(DISTINCT periodo) AS filas_reales
         FROM reportado
         GROUP BY {llave_sql}
     )
