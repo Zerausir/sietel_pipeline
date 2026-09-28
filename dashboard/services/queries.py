@@ -2115,7 +2115,16 @@ def get_conflictos_ruc_peva(
             categoria, peva_legado_descartado, coexisten_en_periodo,
             accion_recomendada, estado_revision, revisado_por,
             notas_revision, fecha_revision, fecha_deteccion, fecha_ultima_deteccion,
-            sigue_detectado
+            -- sigue_detectado (28-sep-2026): FALSE si la última corrida de
+            -- mart/detectar_conflictos_peva.py ya no encontró el par (SIETEL
+            -- corrigió el RUC). El detector escribe todos los pares de una
+            -- corrida en una sola transacción -> comparten el mismo now().
+            -- MAX sobre la vista COMPLETA (subconsulta), no sobre las filas ya
+            -- filtradas por categoría/estado. Calculado aquí y no como
+            -- columna de la vista para no depender del orden de despliegue.
+            fecha_ultima_deteccion = (
+                SELECT MAX(fecha_ultima_deteccion) FROM mart.vw_conflictos_ruc_peva
+            ) AS sigue_detectado
         FROM mart.vw_conflictos_ruc_peva
         WHERE {where}
         ORDER BY fecha_deteccion DESC

@@ -47,6 +47,7 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime
 logger = logging.getLogger(__name__)
 
 RUTA_SQL = Path(__file__).resolve().parent.parent / "sql" / "02_ddl_mart.sql"
+RUTA_SQL_CALIDAD = Path(__file__).resolve().parent.parent / "sql" / "04_ddl_calidad.sql"
 
 
 def _require_env(name: str) -> str:
@@ -66,19 +67,38 @@ def _conninfo() -> str:
     )
 
 
-def aplicar() -> None:
-    if not RUTA_SQL.exists():
-        raise FileNotFoundError(f"No se encontró {RUTA_SQL} -- ¿el repo está completo en esta ruta?")
+def _aplicar_archivo(ruta: Path) -> None:
+    if not ruta.exists():
+        raise FileNotFoundError(f"No se encontró {ruta} -- ¿el repo está completo en esta ruta?")
 
-    sql_completo = RUTA_SQL.read_text(encoding="utf-8")
+    sql_completo = ruta.read_text(encoding="utf-8")
     logger.info("Aplicando %s (%d líneas) contra sietel_analitico como mart_user...",
-                RUTA_SQL.name, sql_completo.count("\n"))
+                ruta.name, sql_completo.count("\n"))
 
     with psycopg.connect(_conninfo(), autocommit=True, connect_timeout=10) as conn:
         with conn.cursor() as cur:
             cur.execute(sql_completo)
 
-    logger.info("%s aplicado correctamente.", RUTA_SQL.name)
+    logger.info("%s aplicado correctamente.", ruta.name)
+
+
+def aplicar() -> None:
+    """Aplica sql/02_ddl_mart.sql (Capa 3 completa)."""
+    _aplicar_archivo(RUTA_SQL)
+
+
+def aplicar_calidad() -> None:
+    """
+    Aplica sql/04_ddl_calidad.sql (esquema calidad: tablas de workflow
+    humano, calidad.vw_pevas_excluidos y permisos) -- AGREGADO 28-sep-2026
+    para que ningún cambio a ese archivo dependa de un `psql -f` manual.
+    Seguro en cada corrida: el archivo es idempotente (CREATE ... IF NOT
+    EXISTS, CREATE OR REPLACE VIEW, GRANT) y NUNCA borra ni recrea las
+    tablas con revisiones humanas. Todos los objetos de calidad pertenecen
+    a mart_user (verificado en producción 28-sep-2026), así que este mismo
+    rol puede aplicarlo.
+    """
+    _aplicar_archivo(RUTA_SQL_CALIDAD)
 
 
 def main(argv: list[str] | None = None) -> int:

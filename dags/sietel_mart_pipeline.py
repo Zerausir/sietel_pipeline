@@ -2,6 +2,11 @@
 DAG: sietel_mart_pipeline
 
 Orquesta el refresco del mart analítico consumido por el dashboard:
+  0. aplicar_ddl_calidad          — aplica sql/04_ddl_calidad.sql (idempotente;
+                                      esquema calidad, vw_pevas_excluidos y
+                                      permisos) -- desde 28-sep-2026, para que
+                                      ningún cambio ahí dependa de un psql
+                                      manual.
   1. detectar_conflictos_peva      — detecta y clasifica RUC con múltiples
                                       PEVA, resuelve automáticamente el Grupo A.
   2. construir_capa2               — reconstruye capa2.lineas_dedicadas_consolidado
@@ -67,6 +72,12 @@ default_args = {
 )
 def sietel_mart_pipeline():
     @task
+    def aplicar_ddl_calidad():
+        """Aplica sql/04_ddl_calidad.sql (idempotente) antes de usar el esquema calidad."""
+        from aplicar_capa3 import aplicar_calidad as _run
+        _run()
+
+    @task
     def detectar_conflictos_peva():
         """Detecta y clasifica RUC con múltiples PEVA; resuelve el Grupo A automáticamente."""
         from detectar_conflictos_peva import detectar_conflictos_peva as _run
@@ -102,6 +113,7 @@ def sietel_mart_pipeline():
         from aplicar_capa3 import aplicar as _run
         _run()
 
+    ddl_calidad = aplicar_ddl_calidad()
     deteccion = detectar_conflictos_peva()
     construccion = construir_capa2()
     geocodificacion = limpiar_coordenadas_nodo_isp()
@@ -109,7 +121,7 @@ def sietel_mart_pipeline():
     discrepancias_geo = detectar_discrepancias_geografia_nodo()
     aplicacion = aplicar_capa3()
 
-    deteccion >> construccion >> geocodificacion >> parroquias >> discrepancias_geo >> aplicacion
+    ddl_calidad >> deteccion >> construccion >> geocodificacion >> parroquias >> discrepancias_geo >> aplicacion
 
 
 sietel_mart_pipeline()

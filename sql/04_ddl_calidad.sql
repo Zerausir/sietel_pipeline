@@ -138,8 +138,8 @@ CREATE INDEX IF NOT EXISTS ix_conflictos_ruc_peva_categoria
 -- el RUC y el par dejaba de existir, su PEVA se seguía excluyendo para
 -- siempre (caso real: PEVA(USU-17)4, sin efecto en cifras porque nunca
 -- reportó). Una confirmación MANUAL excluye siempre -- es decisión humana.
--- Aplicar conectado como mart_user (dueño de la vista):
---   psql -h <host> -U mart_user -d sietel_analitico -f sql/04_ddl_calidad.sql
+-- Se aplica sola: la tarea aplicar_ddl_calidad de dags/sietel_mart_pipeline.py
+-- corre este archivo completo (como mart_user) al inicio de cada refresco.
 CREATE OR REPLACE VIEW calidad.vw_pevas_excluidos AS
 SELECT
     peva_legado_descartado AS peva_codigo,
