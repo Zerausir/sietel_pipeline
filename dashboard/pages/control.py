@@ -184,11 +184,18 @@ def layout():
                 ],
             ),
 
-            html.H3("Prestadores que nunca han reportado", style={"marginTop": "20px"}),
+            # "Sin servicio" / "Servicio sin detalle" (28-sep-2026, decisión
+            # de Mercados): prestadores sin ninguna línea reportada que SÍ
+            # entregaron el formulario de líneas dedicadas -- ya no se
+            # mezclan con quien nunca entregó nada. Ver
+            # mart.vw_prestadores_sin_reportar.
+            html.H3("Prestadores sin líneas reportadas", style={"marginTop": "20px"}),
             html.Section(
-                className="kpi-grid four",
+                className="kpi-grid six",
                 children=[
                     kpi_card("Activo sin reportar", "ctrl-kpi-activo", "ctrl-kpi-activo-note"),
+                    kpi_card("Sin servicio (declarado)", "ctrl-kpi-sin-servicio", "ctrl-kpi-sin-servicio-note"),
+                    kpi_card("Servicio sin detalle", "ctrl-kpi-sin-detalle", "ctrl-kpi-sin-detalle-note"),
                     kpi_card("No operativo", "ctrl-kpi-no-operativo", "ctrl-kpi-no-operativo-note"),
                     kpi_card("Zona gris", "ctrl-kpi-zona-gris", "ctrl-kpi-zona-gris-note"),
                     kpi_card("Total", "ctrl-kpi-total-nunca", "ctrl-kpi-total-nunca-note"),
@@ -217,6 +224,10 @@ def layout():
                             {"field": "fechapermiso", "headerName": "Fecha de permiso", "minWidth": 140},
                             {"field": "fuera_de_gracia", "headerName": "Fuera de año de gracia", "minWidth": 170},
                             {"field": "clasificacion_incumplimiento", "headerName": "Clasificación", "minWidth": 170},
+                            {"field": "formularios_entregados", "headerName": "Formularios entregados", "minWidth": 170},
+                            {"field": "formularios_sin_servicio", "headerName": "Declaran sin servicio", "minWidth": 160},
+                            {"field": "ultimo_formulario_anio", "headerName": "Último formulario (año)", "minWidth": 170},
+                            {"field": "ultimo_formulario_trimestre", "headerName": "Último trimestre", "minWidth": 150},
                         ],
                         rowData=[],
                         defaultColDef={"sortable": True, "filter": True, "resizable": True},
@@ -619,6 +630,10 @@ def update_resumen(seleccion, start_period, end_period, opera_estados, isp_nombr
 @callback(
     Output("ctrl-kpi-activo", "children"),
     Output("ctrl-kpi-activo-note", "children"),
+    Output("ctrl-kpi-sin-servicio", "children"),
+    Output("ctrl-kpi-sin-servicio-note", "children"),
+    Output("ctrl-kpi-sin-detalle", "children"),
+    Output("ctrl-kpi-sin-detalle-note", "children"),
     Output("ctrl-kpi-no-operativo", "children"),
     Output("ctrl-kpi-no-operativo-note", "children"),
     Output("ctrl-kpi-zona-gris", "children"),
@@ -635,43 +650,53 @@ def update_nunca_reportaron(opera_estados, isp_nombres):
         df = get_prestadores_nunca_reportaron_detalle(tuple(opera_estados or ()), tuple(isp_nombres or ()))
     except Exception as exc:
         vacio_txt = ("—", f"No se pudo calcular: {exc}")
-        return (*vacio_txt, *vacio_txt, *vacio_txt, *vacio_txt, empty_figure("No se pudo consultar PostgreSQL"), [])
+        return (*vacio_txt, *vacio_txt, *vacio_txt, *vacio_txt, *vacio_txt, *vacio_txt,
+                empty_figure("No se pudo consultar PostgreSQL"), [])
 
     if df.empty:
         vacio_txt = ("0", "")
-        return (*vacio_txt, *vacio_txt, *vacio_txt, *vacio_txt, empty_figure("No hay prestadores sin reportar"), [])
+        return (*vacio_txt, *vacio_txt, *vacio_txt, *vacio_txt, *vacio_txt, *vacio_txt,
+                empty_figure("No hay prestadores sin líneas reportadas"), [])
 
     conteos = df["clasificacion_incumplimiento"].value_counts()
     activo = int(conteos.get("activo_sin_reportar", 0))
+    sin_servicio = int(conteos.get("sin_servicio", 0))
+    sin_detalle = int(conteos.get("servicio_sin_detalle", 0))
     no_operativo = int(conteos.get("no_operativo", 0))
     zona_gris = int(conteos.get("zona_gris", 0))
     total = len(df)
 
-    # Barras horizontales, no dona/pastel -- con solo 3 categorías el
-    # objetivo es comparar magnitudes con precisión, algo que un gráfico
-    # circular hace mal por diseño. Orden fijo (no por magnitud) para que
-    # la lectura sea siempre la misma: el caso de incumplimiento real
-    # primero.
-    categorias = ["activo_sin_reportar", "no_operativo", "zona_gris"]
+    # Barras horizontales, no dona/pastel -- el objetivo es comparar
+    # magnitudes con precisión, algo que un gráfico circular hace mal por
+    # diseño. Orden fijo (no por magnitud) para que la lectura sea siempre
+    # la misma: el caso de incumplimiento real primero, luego las dos
+    # categorías de quienes SÍ entregaron el formulario.
+    categorias = ["activo_sin_reportar", "sin_servicio", "servicio_sin_detalle", "no_operativo", "zona_gris"]
     etiquetas = {
-        "activo_sin_reportar": "Activo sin reportar", "no_operativo": "No operativo", "zona_gris": "Zona gris",
+        "activo_sin_reportar": "Activo sin reportar", "sin_servicio": "Sin servicio (declarado)",
+        "servicio_sin_detalle": "Servicio sin detalle", "no_operativo": "No operativo", "zona_gris": "Zona gris",
     }
-    colores = {"activo_sin_reportar": PALETTE["red"], "no_operativo": PALETTE["muted"], "zona_gris": PALETTE["cyan"]}
+    colores = {
+        "activo_sin_reportar": PALETTE["red"], "sin_servicio": PALETTE["teal"],
+        "servicio_sin_detalle": PALETTE["orange"], "no_operativo": PALETTE["muted"], "zona_gris": PALETTE["cyan"],
+    }
     valores = [int(conteos.get(c, 0)) for c in categorias]
     nunca_fig = go.Figure(go.Bar(
         x=valores, y=[etiquetas[c] for c in categorias], orientation="h",
         marker_color=[colores[c] for c in categorias], text=valores, textposition="outside",
         hovertemplate="%{y}: %{x}<extra></extra>",
     ))
-    style_figure(nunca_fig, height=230, hovermode="closest")
+    style_figure(nunca_fig, height=300, hovermode="closest")
     nunca_fig.update_xaxes(title="Prestadores")
     nunca_fig.update_yaxes(title="")
 
     return (
-        format_number(activo), "Título vigente, opera, cero reportes -- el caso de incumplimiento real",
+        format_number(activo), "Título vigente, opera, nunca entregó el formulario -- el incumplimiento real",
+        format_number(sin_servicio), "Entregó el formulario declarando que aún no tiene servicio -- no es incumplimiento",
+        format_number(sin_detalle), "Declaró tener servicio pero SIETEL no tiene ninguna línea -- revisar en la fuente",
         format_number(no_operativo), "Cancelado/revocado -- nunca llegó a operar, universo administrativo distinto",
         format_number(zona_gris), "Estado ambiguo en 'opera' -- requiere revisión caso por caso",
-        format_number(total), "Total de prestadores con título habilitante y cero reportes en toda su historia",
+        format_number(total), "Total de prestadores con título habilitante y cero líneas reportadas en toda su historia",
         nunca_fig, clean_records(df),
     )
 

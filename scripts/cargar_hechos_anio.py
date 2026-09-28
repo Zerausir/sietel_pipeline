@@ -51,7 +51,7 @@ import hashlib
 import logging
 from datetime import datetime
 
-from psycopg2.extras import execute_batch
+from psycopg2.extras import execute_batch, execute_values
 
 from config import postgres_cursor, sqlserver_cursor
 
@@ -97,9 +97,18 @@ def calcular_hash_fila(fila: dict) -> str:
     return hashlib.md5("|".join(valores).encode("utf-8")).hexdigest()
 
 
+# UPPER(peva_codigo) (28-sep-2026): SIETEL tiene el mismo PEVA escrito con
+# distinto uso de mayúsculas (caso real: CNT EP, 'peva(usu-8)122' en todo
+# jul-2015 vs 'PEVA(USU-8)122' en el resto y en dbo.PermisoVAgregado).
+# SQL Server (Modern_Spanish_CI_AS) los trata como iguales; PostgreSQL no,
+# y el INNER JOIN de analitico.v_lineas_dedicadas_resumen con
+# dim_permiso_va_agregado descartaba esas filas (2.630 filas, 811.516
+# líneas). Todos los códigos de dbo.PermisoVAgregado están en mayúsculas
+# (verificado), así que normalizar aquí no mezcla PEVA distintos. El GROUP
+# BY usa la misma expresión (en SQL Server agrupa igual, por ser CI).
 SQL_EXTRAER_HECHOS_ANIO = """
     SELECT
-        ld.peva_codigo,
+        UPPER(ld.peva_codigo) AS peva_codigo,
         ld.par_codigo,
         ld.periodoNumero,
         ld.periodoNombre,
@@ -168,7 +177,7 @@ SQL_EXTRAER_HECHOS_ANIO = """
     WHERE ld.anio = ?
     AND ld.periodoNumero = ?
     GROUP BY
-        ld.peva_codigo, ld.par_codigo, ld.periodoNumero,
+        UPPER(ld.peva_codigo), ld.par_codigo, ld.periodoNumero,
         ld.periodoNombre, ld.anio, ld.tipoEnlace,
         ld.tipoCliente, ld.nivelComparticion, ld.portador,
         ld.regional, prov.pro_nombre, ciu.ciu_nombre, par.par_nombre,
@@ -284,6 +293,23 @@ def _cargar_mes(ms_cur, pg_cur, anio: int, mes: int) -> int:
     t_extraccion = (datetime.now() - t_extraccion_inicio).total_seconds()
 
     if not filas:
+        # PROTECCIÓN: con 0 filas en origen NO se borra nada en destino,
+        # aunque el mes tuviera datos -- un vacío repentino puede ser una
+        # falla momentánea de la fuente, no una baja real. Si el mes sí
+        # tenía datos, queda advertido aquí y validar_carga lo marca en rojo
+        # (conteo distinto), para que una persona lo confirme.
+        pg_cur.execute(
+            "SELECT COUNT(*) AS n FROM staging.va_lineas_dedicadas_resumen "
+            "WHERE anio = %s AND periodoNumero = %s",
+            (anio, mes),
+        )
+        previas = pg_cur.fetchone()["n"]
+        if previas:
+            logger.warning(
+                "Año %s, mes %s: SIETEL devolvió 0 filas pero destino tiene %s -- NO se borra nada "
+                "(posible falla momentánea de la fuente); validar_carga lo reportará.",
+                anio, mes, previas,
+            )
         print(f"  Mes {mes:>2}/12 ({nombre_mes:<10}) — 0 filas (sin datos reportados)")
         logger.info("Año %s, mes %s: 0 filas agregadas (sin datos reportados).", anio, mes)
         return 0
@@ -291,17 +317,68 @@ def _cargar_mes(ms_cur, pg_cur, anio: int, mes: int) -> int:
     t_upsert_inicio = datetime.now()
     tuplas = [_fila_a_tupla(fila, calcular_hash_fila(fila)) for fila in filas]
     execute_batch(pg_cur, SQL_UPSERT_HECHOS, tuplas, page_size=1000)
+    eliminadas = _eliminar_combinaciones_obsoletas(pg_cur, anio, mes, filas)
     t_upsert = (datetime.now() - t_upsert_inicio).total_seconds()
 
     print(
-        f"  Mes {mes:>2}/12 ({nombre_mes:<10}) — {len(tuplas):,} filas → upsert OK  "
+        f"  Mes {mes:>2}/12 ({nombre_mes:<10}) — {len(tuplas):,} filas → upsert OK"
+        f"{f', {eliminadas:,} obsoletas eliminadas' if eliminadas else ''}  "
         f"[SQL Server: {t_extraccion:.2f}s | Postgres upsert: {t_upsert:.2f}s]"
     )
     logger.info(
-        "Año %s, mes %s: %s filas agregadas procesadas (extraccion=%.2fs, upsert=%.2fs).",
-        anio, mes, len(tuplas), t_extraccion, t_upsert,
+        "Año %s, mes %s: %s filas agregadas procesadas, %s obsoletas eliminadas "
+        "(extraccion=%.2fs, upsert=%.2fs).",
+        anio, mes, len(tuplas), eliminadas, t_extraccion, t_upsert,
     )
     return len(tuplas)
+
+
+SQL_ELIMINAR_OBSOLETAS = """
+    DELETE FROM staging.va_lineas_dedicadas_resumen h
+    WHERE h.anio = %s AND h.periodoNumero = %s
+      AND NOT EXISTS (
+          SELECT 1 FROM _llaves_mes k
+          WHERE k.peva_codigo = h.peva_codigo
+            AND k.par_codigo = h.par_codigo
+            AND k.tipoenlace IS NOT DISTINCT FROM h.tipoEnlace
+            AND k.tipocliente IS NOT DISTINCT FROM h.tipoCliente
+            AND k.nivelcomparticion IS NOT DISTINCT FROM h.nivelComparticion
+            AND k.portador IS NOT DISTINCT FROM h.portador
+      )
+"""
+
+
+def _eliminar_combinaciones_obsoletas(pg_cur, anio: int, mes: int, filas: list) -> int:
+    """
+    CAMBIO (28-sep-2026): borra de staging las combinaciones de (anio, mes)
+    que SIETEL ya NO reporta. Antes el UPSERT solo insertaba/actualizaba, así
+    que si SIETEL eliminaba o reclasificaba líneas de un mes ya cargado, la
+    combinación vieja quedaba para siempre (inflando totales). Cada fila
+    borrada queda registrada en staging.historial_correcciones por el
+    trigger (hash_nuevo = 'ELIMINADA_EN_ORIGEN'), con su snapshot completo.
+
+    Misma transacción que el UPSERT del mes: si algo falla, no se borra nada.
+    Solo se llama con filas no vacías -- ver la protección en _cargar_mes.
+    """
+    pg_cur.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS _llaves_mes ("
+        " peva_codigo text, par_codigo text, tipoenlace text,"
+        " tipocliente text, nivelcomparticion text, portador text"
+        ") ON COMMIT DROP"
+    )
+    pg_cur.execute("TRUNCATE _llaves_mes")
+    execute_values(
+        pg_cur,
+        "INSERT INTO _llaves_mes VALUES %s",
+        [
+            (f["peva_codigo"], f["par_codigo"], f["tipoEnlace"], f["tipoCliente"],
+             f["nivelComparticion"], f["portador"])
+            for f in filas
+        ],
+        page_size=5000,
+    )
+    pg_cur.execute(SQL_ELIMINAR_OBSOLETAS, (anio, mes))
+    return pg_cur.rowcount
 
 
 def cargar_hechos_anio(anio: int):

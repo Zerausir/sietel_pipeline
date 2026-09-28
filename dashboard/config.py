@@ -40,6 +40,8 @@ class Settings:
     #   python -c "import secrets; print(secrets.token_hex(32))"
     # y guardarla solo en el .env del contenedor -- nunca en Git.
     secret_key: str = os.getenv("SECRET_KEY", "")
+    # true SOLO cuando el dashboard se sirva por HTTPS -- ver app.py.
+    session_cookie_secure: bool = os.getenv("SESSION_COOKIE_SECURE", "false").lower() in {"1", "true", "yes", "si", "sí"}
 
     # ── Conexión de LECTURA analítica: rol dashboard_lector, solo mart.* ──
     mart_pg_host: str = os.getenv("MART_PG_HOST", "")

@@ -2468,26 +2468,66 @@ ANALYZE mart.fact_ihh_geografico;
 -- cada consumidor decida el corte (ej. WHERE fuera_de_gracia AND
 -- clasificacion_incumplimiento = 'activo_sin_reportar' para el número de
 -- 104 verificado en el EDA).
+--
+-- "SIN SERVICIO" (28-sep-2026, decisión de Mercados): un PEVA sin ninguna
+-- línea reportada que SÍ entregó el formulario de líneas dedicadas
+-- declarando tieneServicio='No' NO está en incumplimiento -- declaró
+-- formalmente que aún no tiene servicio (típico en el año que tiene para
+-- iniciar operaciones desde su permiso). Antes el pipeline no leía el
+-- formulario y lo mezclaba con quien nunca entregó nada. Caso que lo
+-- reveló: DIGITEC S.A. La declaración tiene prioridad sobre `opera` al
+-- clasificar (es evidencia del propio prestador); `opera` sigue visible.
+-- Categorías resultantes:
+--   sin_servicio          -- entregó formularios, TODOS "sin servicio".
+--   servicio_sin_detalle  -- declaró "con servicio" en algún formulario
+--                            pero SIETEL no tiene NINGUNA línea de detalle:
+--                            inconsistencia de la fuente, para revisar.
+--   activo_sin_reportar / no_operativo / zona_gris -- como antes, solo
+--                            para quien NUNCA entregó el formulario.
+-- Verificado en producción 28-sep-2026 (antes de la exclusión Grupo A de
+-- abajo): de 419, 173 "sin servicio", 5 "servicio sin detalle", 241 nunca
+-- entregaron nada.
 CREATE VIEW mart.vw_prestadores_sin_reportar AS
 SELECT
-    peva_codigo,
-    isp_nombre,
-    isp_ruc,
-    isp_tipopersona,
-    opera,
-    resolucion,
-    fechapermiso,
+    v.peva_codigo,
+    v.isp_nombre,
+    v.isp_ruc,
+    v.isp_tipopersona,
+    v.opera,
+    v.resolucion,
+    v.fechapermiso,
     CASE
-        WHEN fechapermiso IS NULL THEN NULL
-        ELSE CURRENT_DATE >= (fechapermiso + INTERVAL '1 year')
+        WHEN v.fechapermiso IS NULL THEN NULL
+        ELSE CURRENT_DATE >= (v.fechapermiso + INTERVAL '1 year')
     END AS fuera_de_gracia,
     CASE
-        WHEN opera IN ('Nuevo', 'Opera Normalmente', 'SI') THEN 'activo_sin_reportar'
-        WHEN opera IN ('Cancelación', 'NO', 'Opera Irregularmente') THEN 'no_operativo'
+        WHEN f.formularios_entregados > 0 AND f.formularios_con_servicio = 0 THEN 'sin_servicio'
+        WHEN f.formularios_con_servicio > 0 THEN 'servicio_sin_detalle'
+        WHEN v.opera IN ('Nuevo', 'Opera Normalmente', 'SI') THEN 'activo_sin_reportar'
+        WHEN v.opera IN ('Cancelación', 'NO', 'Opera Irregularmente') THEN 'no_operativo'
         ELSE 'zona_gris'
-    END AS clasificacion_incumplimiento
-FROM analitico.v_ultimo_periodo_reportado_detalle
-WHERE tiene_reportes = FALSE;
+    END AS clasificacion_incumplimiento,
+    COALESCE(f.formularios_entregados, 0)   AS formularios_entregados,
+    COALESCE(f.formularios_sin_servicio, 0) AS formularios_sin_servicio,
+    COALESCE(f.formularios_con_servicio, 0) AS formularios_con_servicio,
+    f.ultima_entrega                        AS ultima_entrega_formulario,
+    f.ultimo_formulario_anio,
+    f.ultimo_formulario_trimestre
+FROM analitico.v_ultimo_periodo_reportado_detalle v
+LEFT JOIN analitico.v_formularios_lineas_por_peva f ON f.peva_codigo = upper(v.peva_codigo)
+WHERE v.tiene_reportes = FALSE
+  -- CORRECCIÓN 28-sep-2026: excluye los PEVA legados del Grupo A
+  -- (duplicado de migración de codificación, calidad.vw_pevas_excluidos) --
+  -- ya se excluyen de capa2 por ser el MISMO prestador que otro PEVA que sí
+  -- reporta, pero aquí se seguían contando como "nunca reportó". Verificado
+  -- en producción 28-sep-2026: 5 PEVA legados dejan de contarse (419 -> 414
+  -- filas); 3 tenían opera='SI' y fuera de gracia, así que el KPI
+  -- activo_sin_reportar baja de 56 a 53. calidad.vw_pevas_excluidos ya
+  -- existe en este punto: la tarea aplicar_ddl_calidad corre primero en el
+  -- DAG.
+  AND NOT EXISTS (
+      SELECT 1 FROM calidad.vw_pevas_excluidos e WHERE e.peva_codigo = v.peva_codigo
+  );
 
 -- vw_prestadores_reporte_detenido (agregado 05-ago-2026, promovido desde el
 -- EDA de líneas dedicadas -- secciones 9.11/9.12/9.13 del notebook, ver
@@ -2762,6 +2802,105 @@ BEGIN
         ALTER DEFAULT PRIVILEGES FOR ROLE mart_user IN SCHEMA mart
             GRANT SELECT ON TABLES TO eda_lector;
     END IF;
+    -- calidad_lector agregado 28-sep-2026: sql/07 y sql/08 le otorgaban
+    -- SELECT sobre vistas de mart, pero ese GRANT se perdía en el siguiente
+    -- DROP SCHEMA mart CASCADE -- mismo fallo ya documentado arriba para
+    -- dashboard_lector y eda_lector (verificado: sin USAGE sobre mart).
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'calidad_lector') THEN
+        GRANT USAGE ON SCHEMA mart TO calidad_lector;
+        GRANT SELECT ON ALL TABLES IN SCHEMA mart TO calidad_lector;
+        ALTER DEFAULT PRIVILEGES FOR ROLE mart_user IN SCHEMA mart
+            GRANT SELECT ON TABLES TO calidad_lector;
+    END IF;
+END $$;
+
+-- ============================================================
+-- 17.0. INVARIANTES BLOQUEANTES (28-sep-2026) -- DENTRO de la transacción
+-- ============================================================
+-- Antes, las validaciones de la sección 17 eran SELECT después del COMMIT:
+-- aplicar_capa3.py las ejecutaba pero nadie leía su resultado, así que un
+-- mart inconsistente se publicaba igual. Aquí se verifican ANTES del
+-- COMMIT: si alguna falla, RAISE EXCEPTION aborta la transacción completa
+-- -- el DROP SCHEMA mart CASCADE del inicio también se revierte, así que el
+-- dashboard sigue sirviendo el mart anterior (bueno) en vez de uno roto --
+-- y la tarea aplicar_capa3 de sietel_mart_pipeline queda en rojo con el
+-- detalle en el log.
+--
+-- Solo entran las validaciones con "resultado esperado: cero filas". Las
+-- informativas (17.1, 17.2, 17.6, 17.7, 17.11) quedan abajo, como antes.
+-- Todas pasaban en producción el 28-sep-2026, salvo la de capa2 (102
+-- pares), que es justo el bug corregido ese día en construir_capa2.py y
+-- que esta verificación habría detectado.
+DO $$
+DECLARE
+    n       bigint;
+    errores text[] := ARRAY[]::text[];
+BEGIN
+    -- capa2: una sola fila por (llave natural, periodo) -- si no, el LOCF
+    -- de construir_capa2.py copia métricas entre filas "empatadas".
+    SELECT COUNT(*) INTO n FROM (
+        SELECT 1 FROM capa2.lineas_dedicadas_consolidado
+        GROUP BY peva_codigo, par_codigo, tipoenlace, tipocliente,
+                 nivelcomparticion, portador, periodo
+        HAVING COUNT(*) > 1) x;
+    IF n > 0 THEN errores := errores || format('capa2: %s (llave, periodo) repetidos', n); END IF;
+
+    -- 17.3
+    SELECT COUNT(*) INTO n FROM (
+        SELECT 1 FROM mart.fact_participacion_mercado
+        WHERE total_lineas_prestador > 0
+        GROUP BY periodo_id, territorio_id
+        HAVING ABS(SUM(participacion_porcentaje) - 100) > 0.001) x;
+    IF n > 0 THEN errores := errores || format('17.3: %s mercados cuya participación no suma 100', n); END IF;
+
+    -- 17.4
+    SELECT COUNT(*) INTO n FROM mart.fact_ihh_geografico WHERE ihh < 0 OR ihh > 10000;
+    IF n > 0 THEN errores := errores || format('17.4: %s IHH fuera de [0, 10000]', n); END IF;
+
+    -- 17.5
+    SELECT COUNT(*) INTO n FROM mart.fact_resumen_mercado_mes
+    WHERE numero_prestadores <> numero_prestadores_con_lineas + numero_prestadores_cero + numero_prestadores_sin_dato;
+    IF n > 0 THEN errores := errores || format('17.5: %s filas con conteo de prestadores inconsistente', n); END IF;
+
+    -- 17.8
+    SELECT COUNT(*) INTO n FROM mart.fact_lineas_geografia_mes
+    WHERE total_lineas IS NOT NULL
+      AND (total_lineas <> lineas_dl_sin_datos + lineas_dl_menos_1mbps + lineas_dl_1_10mbps
+                          + lineas_dl_10_30mbps + lineas_dl_30_100mbps
+                          + lineas_dl_100mbps_1gbps + lineas_dl_1gbps_o_mas
+        OR total_lineas <> lineas_ul_sin_datos + lineas_ul_menos_1mbps + lineas_ul_1_10mbps
+                          + lineas_ul_10_30mbps + lineas_ul_30_100mbps
+                          + lineas_ul_100mbps_1gbps + lineas_ul_1gbps_o_mas);
+    IF n > 0 THEN errores := errores || format('17.8: %s filas donde los rangos de velocidad no suman total_lineas', n); END IF;
+
+    -- 17.9
+    SELECT COUNT(*) INTO n FROM mart.fact_lineas_geografia_mes
+    WHERE total_lineas IS NOT NULL
+      AND total_lineas <> COALESCE(lineas_reportadas, 0) + COALESCE(lineas_imputadas, 0);
+    IF n > 0 THEN errores := errores || format('17.9: %s filas con reportadas + imputadas <> total_lineas', n); END IF;
+
+    -- 17.10
+    SELECT COUNT(*) INTO n FROM mart.fact_lineas_velocidad_mes
+    WHERE total_lineas_velocidad IS NOT NULL
+      AND total_lineas_velocidad <> COALESCE(lineas_reportadas, 0) + COALESCE(lineas_imputadas, 0);
+    IF n > 0 THEN errores := errores || format('17.10: %s filas por velocidad con reportadas + imputadas <> total', n); END IF;
+
+    -- 17.12 (a)
+    SELECT COUNT(*) INTO n FROM mart.fact_participacion_mercado
+    WHERE (NOT tiene_reportado) AND (participacion_porcentaje IS NOT NULL OR aporte_ihh IS NOT NULL);
+    IF n > 0 THEN errores := errores || format('17.12a: %s prestadores sin reporte real con participación/aporte IHH', n); END IF;
+
+    -- 17.12 (b)
+    SELECT COUNT(*) INTO n FROM mart.fact_ihh_geografico
+    WHERE porcentaje_cobertura_prestadores < 0 OR porcentaje_cobertura_prestadores > 100
+       OR cr2 > cr4 + 0.001 OR cr4 > 100.001;
+    IF n > 0 THEN errores := errores || format('17.12b: %s filas con cobertura/CR2/CR4 fuera de rango', n); END IF;
+
+    IF cardinality(errores) > 0 THEN
+        RAISE EXCEPTION 'Invariantes de mart incumplidas -- se revierte el refresco, el mart anterior queda intacto: %',
+            array_to_string(errores, '; ');
+    END IF;
+    RAISE NOTICE 'Invariantes de mart: todas OK.';
 END $$;
 
 COMMIT;
@@ -2769,6 +2908,10 @@ COMMIT;
 -- ============================================================
 -- 17. VALIDACIONES POSTERIORES
 -- ============================================================
+-- NOTA (28-sep-2026): las que dicen "resultado esperado: cero filas" ya se
+-- verifican de forma BLOQUEANTE en 17.0, antes del COMMIT. Se conservan
+-- aquí como SELECT para diagnóstico manual (ver QUÉ filas fallan cuando
+-- 17.0 aborta el refresco).
 
 -- 17.1. Prestadores excluidos por "prueba".
 SELECT *

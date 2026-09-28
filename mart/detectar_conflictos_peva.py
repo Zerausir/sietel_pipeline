@@ -13,14 +13,15 @@ Cada corrida hace UPSERT sobre calidad.conflictos_ruc_peva:
     coexistencia) SIEMPRE se actualizan -- reflejan el estado actual de
     SIETEL.
   - Columnas de workflow (estado_revision, revisado_por, notas_revision,
-    fecha_revision) SOLO se fijan la primera vez que aparece un par. Una
-    vez que una persona confirma o descarta un caso, correr este script de
-    nuevo NUNCA revierte esa decisión.
+    fecha_revision): una decisión HUMANA (CONFIRMADO_MANUAL,
+    DESCARTADO_MANUAL, o un PENDIENTE con revisor/notas/fecha) NUNCA se
+    revierte. Un estado puesto por el SISTEMA se recalcula solo si cambió
+    la clasificación del par (desde 28-sep-2026 -- antes quedaba congelado
+    en el primer INSERT; ver _RECALCULAR_ESTADO).
 
-Se ejecuta como parte de mart/aplicar_capa3.py, ANTES de construir
-capa2.lineas_dedicadas_consolidado, para que los PEVA del Grupo A ya
-confirmados se excluyan antes de llegar a la agregación (ver
-calidad.vw_pevas_excluidos).
+Es la primera tarea de dags/sietel_mart_pipeline.py, ANTES de
+construir_capa2, para que los PEVA del Grupo A ya confirmados se excluyan
+antes de llegar a la agregación (ver calidad.vw_pevas_excluidos).
 
 Uso:
     python detectar_conflictos_peva.py            # detecta y resuelve
@@ -113,7 +114,24 @@ WHERE ra.peva_codigo = :peva_a AND rb.peva_codigo = :peva_b
 LIMIT 1;
 """
 
-SQL_UPSERT = """
+# Condición (sobre la fila EXISTENTE vs EXCLUDED) para recalcular el estado
+# de revisión: el estado actual lo puso el sistema Y la clasificación
+# cambió. Ver comentario en SQL_UPSERT.
+_ESTADO_ES_AUTOMATICO = """(
+        calidad.conflictos_ruc_peva.estado_revision = 'CONFIRMADO_AUTOMATICO'
+        OR (calidad.conflictos_ruc_peva.estado_revision = 'PENDIENTE'
+            AND calidad.conflictos_ruc_peva.revisado_por IS NULL
+            AND calidad.conflictos_ruc_peva.notas_revision IS NULL
+            AND calidad.conflictos_ruc_peva.fecha_revision IS NULL)
+    )"""
+_CLASIFICACION_CAMBIO = """(
+        calidad.conflictos_ruc_peva.categoria IS DISTINCT FROM EXCLUDED.categoria
+        OR calidad.conflictos_ruc_peva.accion_recomendada IS DISTINCT FROM EXCLUDED.accion_recomendada
+        OR calidad.conflictos_ruc_peva.peva_legado_descartado IS DISTINCT FROM EXCLUDED.peva_legado_descartado
+    )"""
+_RECALCULAR_ESTADO = f"({_ESTADO_ES_AUTOMATICO} AND {_CLASIFICACION_CAMBIO})"
+
+SQL_UPSERT = f"""
 INSERT INTO calidad.conflictos_ruc_peva (
     ruc_limpio, peva_a, peva_b,
     isp_nombre_a, isp_nombre_b, opera_a, opera_b, fecha_permiso_a, fecha_permiso_b,
@@ -139,10 +157,24 @@ ON CONFLICT (ruc_limpio, peva_a, peva_b) DO UPDATE SET
     peva_legado_descartado = EXCLUDED.peva_legado_descartado,
     coexisten_en_periodo   = EXCLUDED.coexisten_en_periodo,
     accion_recomendada     = EXCLUDED.accion_recomendada,
-    fecha_ultima_deteccion = now()
-    -- DELIBERADO: estado_revision, revisado_por, notas_revision y
-    -- fecha_revision NO se tocan en el UPDATE -- preserva cualquier
-    -- decisión humana ya registrada. Solo se fijan en el INSERT inicial.
+    fecha_ultima_deteccion = now(),
+    -- Columnas de workflow: una decisión HUMANA nunca se toca. Pero un
+    -- estado puesto por el SISTEMA (CONFIRMADO_AUTOMATICO, o PENDIENTE sin
+    -- ningún rastro de revisión humana) se recalcula si cambió la
+    -- clasificación -- CORRECCIÓN 28-sep-2026: antes se congelaba en el
+    -- primer INSERT, así que un par A/B auto-confirmado que luego pasaba a
+    -- C (o a B con coexistencia) seguía mostrándose como resuelto en vez de
+    -- volver a la cola de revisión, y un C que pasaba a A nunca se
+    -- auto-resolvía. En SET, calidad.conflictos_ruc_peva.* son los valores
+    -- ANTERIORES de la fila.
+    estado_revision = CASE WHEN {_RECALCULAR_ESTADO} THEN EXCLUDED.estado_revision
+                           ELSE calidad.conflictos_ruc_peva.estado_revision END,
+    revisado_por    = CASE WHEN {_RECALCULAR_ESTADO} THEN EXCLUDED.revisado_por
+                           ELSE calidad.conflictos_ruc_peva.revisado_por END,
+    notas_revision  = CASE WHEN {_RECALCULAR_ESTADO} THEN EXCLUDED.notas_revision
+                           ELSE calidad.conflictos_ruc_peva.notas_revision END,
+    fecha_revision  = CASE WHEN {_RECALCULAR_ESTADO} THEN EXCLUDED.fecha_revision
+                           ELSE calidad.conflictos_ruc_peva.fecha_revision END
 ;
 """
 

@@ -26,7 +26,16 @@ logger = logging.getLogger(__name__)
 # Columnas de negocio que, al cambiar, disparan el cierre de la versión
 # vigente y la apertura de una nueva.
 COLUMNAS_VERSIONABLES_ISP = ["isp_nombre", "isp_ruc"]
-COLUMNAS_VERSIONABLES_PERMISO = ["nombreComercial", "opera", "Resolucion"]
+# isp_codigo agregado 28-sep-2026: un PEVA que pasa a otro ISP (transferencia
+# del título) es un hecho de negocio versionable. Antes no estaba aquí NI se
+# actualizaba como Tipo 1, así que la vista de consumo habría seguido
+# atribuyendo el PEVA al ISP anterior para siempre (0 casos al 28-sep-2026).
+COLUMNAS_VERSIONABLES_PERMISO = ["nombreComercial", "opera", "Resolucion", "isp_codigo"]
+
+# Protección de _cerrar_ausentes_en_origen: si una corrida intentara cerrar
+# más de esta fracción de las versiones vigentes, se asume una falla de la
+# fuente (extracción incompleta), no una baja masiva real, y se aborta.
+FRACCION_MAXIMA_CIERRE = 0.10
 
 SQL_EXTRAER_ISP = """
     SELECT
@@ -82,6 +91,50 @@ def _cambio_relevante(fila_origen: dict, fila_vigente: dict, columnas: list) -> 
         if origen_lower.get(col.lower()) != vigente_lower.get(col.lower()):
             return True
     return False
+
+
+def _cerrar_ausentes_en_origen(pg_cursor, tabla: str, sk_col: str, llave_natural: str,
+                               vigentes: dict, filas_origen: list) -> int:
+    """
+    CAMBIO (28-sep-2026): cierra (fecha_fin_vigencia = now(), es_vigente =
+    false) las versiones vigentes cuya llave YA NO existe en SIETEL. Antes
+    un registro borrado en origen seguía "vigente" para siempre (ej. un nodo
+    eliminado seguía en el mapa). Se cierra, no se borra: el historial SCD2
+    se conserva y los hechos anteriores al cierre siguen uniéndose.
+
+    Protecciones contra una extracción incompleta de la fuente: con 0 filas
+    de origen, o si el cierre superaría FRACCION_MAXIMA_CIERRE de las
+    versiones vigentes, se aborta con error (la tarea queda en rojo) en vez
+    de cerrar en masa.
+    """
+    if not filas_origen:
+        raise RuntimeError(
+            f"staging.{tabla}: SIETEL devolvió 0 filas -- se aborta para no cerrar todas las "
+            f"versiones vigentes por una posible falla de la fuente."
+        )
+    llaves_origen = {str(f[llave_natural]) for f in filas_origen}
+    ausentes = [v for k, v in vigentes.items() if str(k) not in llaves_origen]
+    if not ausentes:
+        return 0
+    if len(ausentes) > FRACCION_MAXIMA_CIERRE * len(vigentes):
+        raise RuntimeError(
+            f"staging.{tabla}: {len(ausentes)} de {len(vigentes)} versiones vigentes ya no existen en "
+            f"SIETEL (más del {FRACCION_MAXIMA_CIERRE:.0%}) -- se aborta: parece una extracción "
+            f"incompleta, no una baja real. Revisar la fuente antes de reintentar."
+        )
+    pg_cursor.execute(
+        f"""
+        UPDATE staging.{tabla}
+        SET fecha_fin_vigencia = now(), es_vigente = false
+        WHERE {sk_col} = ANY(%s)
+        """,
+        ([v[sk_col] for v in ausentes],),
+    )
+    logger.info(
+        "staging.%s: %s versiones cerradas porque ya no existen en SIETEL: %s",
+        tabla, len(ausentes), [v[llave_natural] for v in ausentes][:20],
+    )
+    return len(ausentes)
 
 
 def cargar_dim_isp():
@@ -164,11 +217,16 @@ def cargar_dim_isp():
                         ),
                     )
 
+            cerradas = _cerrar_ausentes_en_origen(
+                pg_cur, "dim_isp", "isp_sk", "isp_codigo", vigentes, filas_origen
+            )
+
         _registrar_carga(
             "dimensiones", None, insertadas, actualizadas, "EXITOSO", None, inicio
         )
         logger.info(
-            "dim_isp: %s ISP nuevos, %s nuevas versiones por cambio", insertadas, actualizadas
+            "dim_isp: %s ISP nuevos, %s nuevas versiones por cambio, %s cerrados (ya no existen en SIETEL)",
+            insertadas, actualizadas, cerradas,
         )
     except Exception as exc:
         _registrar_carga("dimensiones", None, insertadas, actualizadas, "FALLIDO", str(exc), inicio)
@@ -229,13 +287,32 @@ def cargar_dim_permiso_va_agregado():
                         ),
                     )
                     actualizadas += 1
+                else:
+                    # Sin cambio en columnas versionables: actualiza en sitio
+                    # el atributo no versionable (Tipo 1) -- AGREGADO
+                    # 28-sep-2026, antes esta rama no existía y fechaPermiso
+                    # corregida en SIETEL nunca llegaba a staging.
+                    pg_cur.execute(
+                        """
+                        UPDATE staging.dim_permiso_va_agregado
+                        SET fechaPermiso = %s
+                        WHERE peva_sk = %s
+                          AND fechaPermiso IS DISTINCT FROM %s
+                        """,
+                        (fila["fechaPermiso"], vigente["peva_sk"], fila["fechaPermiso"]),
+                    )
+
+            cerradas = _cerrar_ausentes_en_origen(
+                pg_cur, "dim_permiso_va_agregado", "peva_sk", "peva_codigo", vigentes, filas_origen
+            )
 
         _registrar_carga(
             "dimensiones", None, insertadas, actualizadas, "EXITOSO", None, inicio
         )
         logger.info(
-            "dim_permiso_va_agregado: %s nuevos, %s nuevas versiones por cambio",
-            insertadas, actualizadas,
+            "dim_permiso_va_agregado: %s nuevos, %s nuevas versiones por cambio, %s cerrados "
+            "(ya no existen en SIETEL)",
+            insertadas, actualizadas, cerradas,
         )
     except Exception as exc:
         _registrar_carga("dimensiones", None, insertadas, actualizadas, "FALLIDO", str(exc), inicio)

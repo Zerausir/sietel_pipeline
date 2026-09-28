@@ -49,7 +49,7 @@ completa de 8 columnas y no reporte falsos positivos.
 import logging
 from datetime import datetime
 
-from cargar_hechos_anio import SQL_EXTRAER_HECHOS_ANIO, calcular_hash_fila, MESES_DEL_ANIO
+from cargar_hechos_anio import COLUMNAS_HASH, SQL_EXTRAER_HECHOS_ANIO, calcular_hash_fila, MESES_DEL_ANIO
 from config import postgres_cursor, sqlserver_cursor
 
 logger = logging.getLogger(__name__)
@@ -134,21 +134,32 @@ def _certificar_contenido_por_anio(anio: int) -> dict:
             for f in cur.fetchall():
                 hashes_origen[_make_key(f)] = calcular_hash_fila(f)
 
+    # CAMBIO (28-sep-2026): el hash de destino se RECALCULA desde los
+    # valores realmente guardados en Postgres, no se toma hash_contenido tal
+    # cual. Antes se comparaba "origen hoy" contra "el hash que Python
+    # calculó del origen al cargar" -- una columna de métrica alterada en
+    # Postgres después de la carga (UPDATE manual, bug de otro script) pasaba
+    # la certificación sin ser detectada. Postgres devuelve las columnas en
+    # minúscula; COLUMNAS_HASH usa el nombre de SQL Server.
+    columnas_pg = ", ".join(c.lower() for c in COLUMNAS_HASH)
+    hashes_destino = {}
+    hash_guardado_inconsistente = []
     with postgres_cursor(commit=False) as cur:
         cur.execute(
-            """
-            SELECT peva_codigo, par_codigo, periodonumero, anio,
-                   tipoenlace, tipocliente, nivelcomparticion, portador,
-                   hash_contenido
+            f"""
+            SELECT {columnas_pg}, hash_contenido
             FROM staging.va_lineas_dedicadas_resumen
             WHERE anio = %s
             """,
             (anio,),
         )
-        hashes_destino = {
-            _make_key(r): r["hash_contenido"]
-            for r in cur.fetchall()
-        }
+        for r in cur.fetchall():
+            valores = {c: r[c.lower()] for c in COLUMNAS_HASH}
+            hash_real = calcular_hash_fila(valores)
+            key = _make_key(r)
+            hashes_destino[key] = hash_real
+            if r["hash_contenido"] != hash_real:
+                hash_guardado_inconsistente.append(str(key))
 
     certificadas = 0
     distintas = []
@@ -163,11 +174,88 @@ def _certificar_contenido_por_anio(anio: int) -> dict:
         else:
             certificadas += 1
 
+    # CAMBIO (28-sep-2026): filas en destino que SIETEL ya no produce --
+    # antes solo se detectaban indirectamente por el conteo.
+    sobrantes = [str(k) for k in hashes_destino.keys() - hashes_origen.keys()]
+
     return {
         "filas_certificadas": certificadas,
         "filas_con_contenido_distinto": distintas,
         "filas_faltantes_en_destino": faltantes,
+        "filas_sobrantes_en_destino": sobrantes,
+        "filas_hash_guardado_inconsistente": hash_guardado_inconsistente,
     }
+
+
+def _certificar_completitud() -> list[str]:
+    """
+    AGREGADO 28-sep-2026: certifica que TODOS los prestadores de SIETEL
+    están en PostgreSQL y que ningún hecho cargado se pierde antes de llegar
+    a capa2/mart/dashboard. Antes solo se certificaban los hechos contra
+    staging, así que una pérdida entre staging y la vista de consumo pasaba
+    sin detectarse (caso real: CNT EP, jul-2015, 2.630 filas descartadas por
+    el JOIN al tener el PEVA en minúsculas).
+
+    Comprueba, en ambas direcciones cuando aplica:
+      1. dbo.ISP vs staging.dim_isp (versiones vigentes).
+      2. dbo.PermisoVAgregado vs staging.dim_permiso_va_agregado (vigentes).
+      3. dbo.VAFormularioLineasDedicadas vs staging.va_formulario_lineas_dedicadas.
+      4. Para TODOS los años (no solo los recién cargados): filas de
+         staging.va_lineas_dedicadas_resumen == filas de
+         analitico.v_lineas_dedicadas_resumen. Barato (~1 s): la vista es
+         un INNER JOIN que no duplica (_verificar_vista_sin_duplicados),
+         así que cualquier diferencia son filas descartadas.
+
+    Los códigos se comparan en MAYÚSCULAS en ambos lados: SQL Server no
+    distingue mayúsculas (Modern_Spanish_CI_AS) y el pipeline normaliza
+    peva_codigo a mayúsculas.
+    """
+    problemas = []
+    with sqlserver_cursor() as ms:
+        ms.execute("SELECT UPPER(isp_codigo) AS k FROM dbo.ISP")
+        isp_src = {r["k"] for r in ms.fetchall()}
+        ms.execute("SELECT UPPER(peva_codigo) AS k FROM dbo.PermisoVAgregado")
+        peva_src = {r["k"] for r in ms.fetchall()}
+        ms.execute("SELECT fld_codigo AS k FROM dbo.VAFormularioLineasDedicadas")
+        form_src = {r["k"] for r in ms.fetchall()}
+
+    with postgres_cursor(commit=False) as cur:
+        cur.execute("SELECT upper(isp_codigo) AS k FROM staging.dim_isp WHERE es_vigente")
+        isp_pg = {r["k"] for r in cur.fetchall()}
+        cur.execute("SELECT upper(peva_codigo) AS k FROM staging.dim_permiso_va_agregado WHERE es_vigente")
+        peva_pg = {r["k"] for r in cur.fetchall()}
+        cur.execute("SELECT fld_codigo AS k FROM staging.va_formulario_lineas_dedicadas")
+        form_pg = {r["k"] for r in cur.fetchall()}
+        cur.execute(
+            """
+            SELECT s.anio, s.n AS staging, COALESCE(v.n, 0) AS vista
+            FROM (SELECT anio, COUNT(*) AS n FROM staging.va_lineas_dedicadas_resumen GROUP BY anio) s
+            LEFT JOIN (SELECT anio, COUNT(*) AS n FROM analitico.v_lineas_dedicadas_resumen GROUP BY anio) v
+                   USING (anio)
+            WHERE s.n <> COALESCE(v.n, 0)
+            ORDER BY s.anio
+            """
+        )
+        perdidas_vista = cur.fetchall()
+
+    for nombre, src, pg in (
+        ("ISP (dbo.ISP / staging.dim_isp)", isp_src, isp_pg),
+        ("PEVA (dbo.PermisoVAgregado / staging.dim_permiso_va_agregado)", peva_src, peva_pg),
+        ("Formularios (dbo.VAFormularioLineasDedicadas / staging.va_formulario_lineas_dedicadas)",
+         form_src, form_pg),
+    ):
+        faltan, sobran = sorted(src - pg), sorted(pg - src)
+        if faltan:
+            problemas.append(f"{nombre}: {len(faltan)} en SIETEL que faltan en PostgreSQL (ej. {faltan[:5]})")
+        if sobran:
+            problemas.append(f"{nombre}: {len(sobran)} vigentes en PostgreSQL que ya no existen en SIETEL "
+                             f"(ej. {sobran[:5]})")
+    for r in perdidas_vista:
+        problemas.append(
+            f"Año {r['anio']}: {r['staging'] - r['vista']} fila(s) de hechos en staging que NO llegan a "
+            f"analitico.v_lineas_dedicadas_resumen (se pierden antes de capa2/mart/dashboard)"
+        )
+    return problemas
 
 
 def _verificar_unicidad_vigencia():
@@ -255,7 +343,8 @@ def _registrar_resultado(anio, estado, mensaje_error, fecha_inicio):
         )
 
 
-def _imprimir_reporte(resultados_por_anio: dict, problemas_vigencia: list):
+def _imprimir_reporte(resultados_por_anio: dict, problemas_vigencia: list,
+                      problemas_completitud: list | None = None):
     """
     Reporte consolidado al estilo pipeline_validation de samm_pipeline:
     conteos + ✅/❌ por chequeo, en vez de solo una excepción con texto
@@ -273,9 +362,17 @@ def _imprimir_reporte(resultados_por_anio: dict, problemas_vigencia: list):
     else:
         print("  Dimensiones SCD (vigencia única)                                 ✅")
 
+    if problemas_completitud:
+        print("  Completitud SIETEL -> PostgreSQL -> vista de consumo            ❌")
+        for p in problemas_completitud:
+            print(f"    ⚠️  {p}")
+    else:
+        print("  Completitud SIETEL -> PostgreSQL -> vista de consumo            ✅")
+
     for anio, r in resultados_por_anio.items():
         conteo_ok = r["filas_origen"] == r["filas_destino"]
-        contenido_ok = not r["distintas"] and not r["faltantes"]
+        contenido_ok = (not r["distintas"] and not r["faltantes"]
+                        and not r["sobrantes"] and not r["hash_inconsistente"])
         vista_ok = not r["duplicados_vista"]
 
         print(f"  ── Año {anio} " + "─" * (58 - len(str(anio))))
@@ -293,6 +390,10 @@ def _imprimir_reporte(resultados_por_anio: dict, problemas_vigencia: list):
             print(f"      ⚠️  {len(r['distintas'])} fila(s) con contenido distinto")
         if r["faltantes"]:
             print(f"      ⚠️  {len(r['faltantes'])} fila(s) faltantes en PostgreSQL")
+        if r["sobrantes"]:
+            print(f"      ⚠️  {len(r['sobrantes'])} fila(s) sobrantes en PostgreSQL (SIETEL ya no las produce)")
+        if r["hash_inconsistente"]:
+            print(f"      ⚠️  {len(r['hash_inconsistente'])} fila(s) con hash_contenido que no coincide con sus valores")
         print(
             f"    Vista analítico.v_lineas_dedicadas_resumen sin duplicados"
             f"{'  ✅' if vista_ok else '  ❌'}"
@@ -303,10 +404,13 @@ def _imprimir_reporte(resultados_por_anio: dict, problemas_vigencia: list):
     print(f"{'=' * 70}")
     todo_ok = (
             not problemas_vigencia
+            and not problemas_completitud
             and all(
         r["filas_origen"] == r["filas_destino"]
         and not r["distintas"]
         and not r["faltantes"]
+        and not r["sobrantes"]
+        and not r["hash_inconsistente"]
         and not r["duplicados_vista"]
         for r in resultados_por_anio.values()
     )
@@ -323,7 +427,9 @@ def validar_anios(anios: list[int]):
     Valida, para cada año recién cargado:
       1. Conteo de filas agregadas idéntico entre SQL Server y PostgreSQL.
       2. Hash MD5 de contenido idéntico fila a fila (certificación real de
-         valores, no solo de cantidad), recalculado mes a mes.
+         valores, no solo de cantidad), recalculado mes a mes en origen y
+         desde los valores guardados en destino; sin filas faltantes ni
+         sobrantes, y hash_contenido consistente con sus propios valores.
       3. Dimensiones SCD Tipo 2 sin versiones vigentes duplicadas.
       4. Vista de consumo sin duplicados por JOIN de vigencia temporal.
 
@@ -339,6 +445,10 @@ def validar_anios(anios: list[int]):
     problemas_vigencia = _verificar_unicidad_vigencia()
     if problemas_vigencia:
         errores.extend(problemas_vigencia)
+
+    print("\nCertificando completitud SIETEL -> PostgreSQL -> vista de consumo...")
+    problemas_completitud = _certificar_completitud()
+    errores.extend(problemas_completitud)
 
     for anio in anios:
         print(f"\nValidando año {anio}...")
@@ -375,6 +485,21 @@ def validar_anios(anios: list[int]):
                 f"existen en SQL Server pero no en PostgreSQL."
             )
 
+        if cert["filas_sobrantes_en_destino"]:
+            errores.append(
+                f"Año {anio}: {len(cert['filas_sobrantes_en_destino'])} fila(s) "
+                f"existen en PostgreSQL pero SIETEL ya no las produce "
+                f"(ej. {cert['filas_sobrantes_en_destino'][0]})."
+            )
+
+        if cert["filas_hash_guardado_inconsistente"]:
+            errores.append(
+                f"Año {anio}: {len(cert['filas_hash_guardado_inconsistente'])} fila(s) "
+                f"cuyo hash_contenido no coincide con sus propios valores guardados "
+                f"(posible edición por fuera del pipeline, "
+                f"ej. {cert['filas_hash_guardado_inconsistente'][0]})."
+            )
+
         duplicados_vista = _verificar_vista_sin_duplicados(anio)
         if duplicados_vista:
             errores.append(
@@ -389,10 +514,12 @@ def validar_anios(anios: list[int]):
             "certificadas": cert["filas_certificadas"],
             "distintas": cert["filas_con_contenido_distinto"],
             "faltantes": cert["filas_faltantes_en_destino"],
+            "sobrantes": cert["filas_sobrantes_en_destino"],
+            "hash_inconsistente": cert["filas_hash_guardado_inconsistente"],
             "duplicados_vista": duplicados_vista,
         }
 
-    _imprimir_reporte(resultados_por_anio, problemas_vigencia)
+    _imprimir_reporte(resultados_por_anio, problemas_vigencia, problemas_completitud)
 
     if errores:
         mensaje = "; ".join(errores)

@@ -3,10 +3,14 @@ Aplica el esquema de PostgreSQL (staging + analitico) de forma idempotente.
 
 Este script ejecuta el archivo sql/01_ddl_postgres.sql completo contra la
 base de datos analítica en cada corrida del DAG. Es seguro ejecutarlo
-repetidamente porque el propio DDL está escrito con cláusulas idempotentes
-(CREATE TABLE IF NOT EXISTS, CREATE INDEX IF NOT EXISTS, CREATE OR REPLACE
-VIEW): si el esquema ya existe y tiene datos, este script no lo destruye
-ni lo recrea -- simplemente no hace nada en las tablas que ya existen.
+repetidamente porque el propio DDL está escrito de forma idempotente
+(CREATE TABLE IF NOT EXISTS, CREATE INDEX IF NOT EXISTS, ADD COLUMN IF NOT
+EXISTS, migraciones en bloques DO que solo actúan si hace falta): las
+TABLAS con datos nunca se destruyen ni se recrean. Las VISTAS de analitico
+sí se recrean en cada corrida (DROP VIEW + CREATE VIEW, ver nota al inicio
+de 01_ddl_postgres.sql) -- y el CASCADE de v_ultimo_periodo_reportado_detalle
+se lleva vistas de mart, que el DAG reconstruye disparando
+sietel_mart_pipeline al final.
 
 IMPORTANTE: este script asume que la base de datos (ej. "sietel_analitico")
 YA EXISTE. PostgreSQL no permite crear una base de datos desde dentro de

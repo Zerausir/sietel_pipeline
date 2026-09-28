@@ -7,10 +7,15 @@ Orquesta la carga del módulo analítico "Usuarios y Cuentas — Internet Fijo":
   3. cargar_nodos_isp   — SCD Tipo 2: NodoISP (geografía de nodos de acceso;
                           dbo.NodoISP_Auxiliar excluida a propósito, ver
                           scripts/cargar_nodo_isp.py).
+  3b. cargar_formularios_lineas — snapshot de dbo.VAFormularioLineasDedicadas
+                          (incluye declaraciones "sin servicio", 28-sep-2026).
   4. obtener_anios_a_cargar — determina qué años cargar en esta corrida.
   5. cargar_hechos_de_anio  — extracción agregada de dbo.VALineasDedicadas,
                               un año a la vez (dynamic task mapping).
   6. validar_carga      — certificación cruzada SQL Server vs PostgreSQL.
+  7. disparar_mart_pipeline — dispara sietel_mart_pipeline si todo lo
+                              anterior pasó (reconstruye las vistas de mart
+                              que el paso 1 borra por CASCADE).
 
 VARIABLE DE AIRFLOW "sietel_anios_a_cargar":
   "historico"  → carga todo el rango ANIO_INICIO_HISTORICO..ANIO_FIN_HISTORICO
@@ -31,6 +36,7 @@ import logging
 import os
 import sys
 
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import dag, task, Variable
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
@@ -73,6 +79,13 @@ def sietel_usuarios_cuentas_pipeline():
         motivo de excluir dbo.NodoISP_Auxiliar."""
         from cargar_nodo_isp import cargar_dim_nodo_isp
         cargar_dim_nodo_isp()
+
+    @task
+    def cargar_formularios_lineas():
+        """Snapshot de dbo.VAFormularioLineasDedicadas (declaraciones 'sin
+        servicio' incluidas) -- ver scripts/cargar_formularios_lineas.py."""
+        from cargar_formularios_lineas import cargar_formularios_lineas as _run
+        _run()
 
     @task
     def obtener_anios_a_cargar() -> list[int]:
@@ -121,14 +134,33 @@ def sietel_usuarios_cuentas_pipeline():
         from validar_carga import validar_anios
         validar_anios(anios)
 
+    # 7. disparar_mart_pipeline (28-sep-2026) -- aplicar_esquema hace
+    # DROP VIEW analitico.v_ultimo_periodo_reportado_detalle CASCADE, que se
+    # lleva mart.vw_prestadores_sin_reportar y mart.vw_nodos_isp_mapa: sin
+    # este paso el dashboard (KPI "sin reportar" y Mapa de nodos) quedaba
+    # roto hasta que alguien disparara sietel_mart_pipeline a mano (opción
+    # b de sql/01_ddl_postgres.sql, sección 6). Solo se dispara si la
+    # validación cruzada pasó (trigger_rule por defecto, all_success) -- no
+    # se publica en el dashboard un dato que no quedó certificado. No espera
+    # a que mart termine: son dos DAGs independientes, con sus propios logs.
+    # REQUIERE que sietel_mart_pipeline esté DESPAUSADO en la UI (schedule
+    # =None, así que despausarlo no agenda nada por sí solo); si está
+    # pausado, la corrida queda en cola sin ejecutarse.
+    disparar_mart = TriggerDagRunOperator(
+        task_id="disparar_mart_pipeline",
+        trigger_dag_id="sietel_mart_pipeline",
+        wait_for_completion=False,
+    )
+
     esquema = aplicar_esquema()
     dimensiones = cargar_dimensiones()
     nodos = cargar_nodos_isp()
+    formularios = cargar_formularios_lineas()
     anios = obtener_anios_a_cargar()
     hechos = cargar_hechos_de_anio.expand(anio=anios)
     validacion = validar_carga(anios)
 
-    esquema >> dimensiones >> nodos >> hechos >> validacion
+    esquema >> dimensiones >> nodos >> formularios >> hechos >> validacion >> disparar_mart
 
 
 sietel_usuarios_cuentas_pipeline()

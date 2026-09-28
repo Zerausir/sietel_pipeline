@@ -13,10 +13,12 @@
 -- SOSTENIBILIDAD: cada vez que se re-detectan conflictos, el UPSERT solo
 -- toca las columnas derivadas de los datos de origen (categoria, fechas,
 -- nombres, coexistencia). Las columnas de workflow (estado_revision,
--- revisado_por, notas_revision, fecha_revision) SOLO se fijan la primera
--- vez que aparece un par -- nunca se sobreescriben en corridas posteriores.
--- Así, una decisión humana no se pierde ni se resetea cuando vuelve a correr
--- el detector.
+-- revisado_por, notas_revision, fecha_revision) nunca se sobreescriben si
+-- reflejan una decisión HUMANA -- una decisión humana no se pierde ni se
+-- resetea cuando vuelve a correr el detector. Desde 28-sep-2026, un estado
+-- puesto por el SISTEMA (CONFIRMADO_AUTOMATICO, o PENDIENTE sin revisor,
+-- notas ni fecha) sí se recalcula si cambia la clasificación del par (ver
+-- _RECALCULAR_ESTADO en mart/detectar_conflictos_peva.py).
 --
 -- ESTE ARCHIVO YA NO CREA ROLES. La creación de calidad_lector y
 -- calidad_revisor (CREATE ROLE + contraseña) se hace por línea de comandos,
@@ -129,6 +131,15 @@ CREATE INDEX IF NOT EXISTS ix_conflictos_ruc_peva_categoria
 
 -- Vista de conveniencia: qué PEVA deben excluirse de capa2 por ser el lado
 -- legado de un duplicado ya confirmado -- la consume construir_capa2.py.
+--
+-- CAMBIO 28-sep-2026: un par CONFIRMADO_AUTOMATICO solo excluye si SIGUE
+-- detectado en la última corrida del detector (mismo criterio que
+-- mart.vw_conflictos_ruc_peva.sigue_detectado). Antes, si SIETEL corregía
+-- el RUC y el par dejaba de existir, su PEVA se seguía excluyendo para
+-- siempre (caso real: PEVA(USU-17)4, sin efecto en cifras porque nunca
+-- reportó). Una confirmación MANUAL excluye siempre -- es decisión humana.
+-- Se aplica sola: la tarea aplicar_ddl_calidad de dags/sietel_mart_pipeline.py
+-- corre este archivo completo (como mart_user) al inicio de cada refresco.
 CREATE OR REPLACE VIEW calidad.vw_pevas_excluidos AS
 SELECT
     peva_legado_descartado AS peva_codigo,
@@ -137,8 +148,16 @@ SELECT
     estado_revision
 FROM calidad.conflictos_ruc_peva
 WHERE categoria = 'A_DUPLICADO_MIGRACION_CODIFICACION'
-  AND estado_revision IN ('CONFIRMADO_AUTOMATICO', 'CONFIRMADO_MANUAL')
-  AND peva_legado_descartado IS NOT NULL;
+  AND peva_legado_descartado IS NOT NULL
+  AND (
+        estado_revision = 'CONFIRMADO_MANUAL'
+        OR (
+            estado_revision = 'CONFIRMADO_AUTOMATICO'
+            AND fecha_ultima_deteccion = (
+                SELECT MAX(fecha_ultima_deteccion) FROM calidad.conflictos_ruc_peva
+            )
+        )
+  );
 
 -- ============================================================================
 -- PERMISOS de los roles del dashboard de consistencia (ya deben existir)

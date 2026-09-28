@@ -37,6 +37,13 @@ FILTRO POR DEFECTO: estado_revision arranca en ["PENDIENTE"] -- el objetivo
 de esta página es mostrar qué priorizar HOY, no un historial completo. Ver
 histórico completo (incluidos ya resueltos) requiere vaciar el filtro
 explícitamente.
+
+PARES YA NO DETECTADOS (28-sep-2026): también se ocultan por defecto los
+pares que la última corrida del detector ya no encontró (sigue_detectado =
+false en mart.vw_conflictos_ruc_peva) -- típicamente SIETEL corrigió el RUC
+de uno de los dos PEVA. Caso real: 5 pares C seguían como PENDIENTE desde
+el 7-ago-2026 sin ser ya un conflicto. El checklist "Pares ya no
+detectados" los vuelve a mostrar, con la columna "Sigue detectado".
 """
 from __future__ import annotations
 
@@ -110,6 +117,18 @@ def layout():
                                     ),
                                 ],
                             ),
+                            html.Div(
+                                className="filter-field",
+                                children=[
+                                    html.Label("Pares ya no detectados"),
+                                    dcc.Checklist(
+                                        id=f"{PREFIX}-incluir-no-detectados",
+                                        options=[{"label": " Incluir (SIETEL ya corrigió el RUC)",
+                                                  "value": "incluir"}],
+                                        value=[],
+                                    ),
+                                ],
+                            ),
                         ],
                     ),
                 ],
@@ -171,6 +190,7 @@ def layout():
                             {"field": "coexisten_en_periodo", "headerName": "Coexisten", "width": 110},
                             {"field": "accion_recomendada", "headerName": "Acción recomendada", "minWidth": 190},
                             {"field": "estado_revision", "headerName": "Estado", "minWidth": 160},
+                            {"field": "sigue_detectado", "headerName": "Sigue detectado", "width": 140},
                             {"field": "revisado_por", "headerName": "Revisado por", "minWidth": 150},
                             {"field": "fecha_deteccion", "headerName": "Detectado", "minWidth": 130},
                             {"field": "fecha_revision", "headerName": "Revisado", "minWidth": 130},
@@ -205,17 +225,30 @@ register_excel_download_callback(f"{PREFIX}-grid", "conflictos_ruc_peva.xlsx")
     Output(f"{PREFIX}-message", "children"),
     Input(f"{PREFIX}-categoria", "value"),
     Input(f"{PREFIX}-estado", "value"),
+    Input(f"{PREFIX}-incluir-no-detectados", "value"),
 )
-def update_conflictos(categorias, estados):
+def update_conflictos(categorias, estados, incluir_no_detectados):
     try:
         df = get_conflictos_ruc_peva(tuple(categorias or ()), tuple(estados or ()))
     except Exception as exc:
         vacio = empty_figure("Error al consultar PostgreSQL")
         return "—", "—", "", "—", "", "—", vacio, vacio, [], f"Error al consultar PostgreSQL: {exc}"
 
+    # Pares que la última corrida del detector ya no encontró (SIETEL
+    # corrigió el RUC) -- se ocultan por defecto: no son trabajo pendiente,
+    # solo historial. Ver sigue_detectado en mart.vw_conflictos_ruc_peva.
+    ocultos = 0
+    if "incluir" not in (incluir_no_detectados or []):
+        ocultos = int((~df["sigue_detectado"].astype(bool)).sum())
+        df = df[df["sigue_detectado"].astype(bool)]
+    nota_ocultos = (
+        f" · {ocultos:,} ya no detectados ocultos".replace(",", ".") if ocultos else ""
+    )
+
     if df.empty:
         vacio = empty_figure("Ningún conflicto para estos filtros")
-        return "0", "0", "", "0", "", "—", vacio, vacio, [], "0 conflictos para los filtros seleccionados."
+        return ("0", "0", "", "0", "", "—", vacio, vacio, [],
+                "0 conflictos para los filtros seleccionados." + nota_ocultos)
 
     df = df.copy()
     df["fecha_deteccion"] = pd.to_datetime(df["fecha_deteccion"])
@@ -274,12 +307,12 @@ def update_conflictos(categorias, estados):
     else:
         antiguedad_fig = empty_figure("Nada pendiente para estos filtros")
 
-    mensaje = f"{total:,} conflictos mostrados ({len(pendientes):,} pendientes)".replace(",", ".")
+    mensaje = f"{total:,} conflictos mostrados ({len(pendientes):,} pendientes)".replace(",", ".") + nota_ocultos
 
     columnas = [
         "ruc_limpio", "categoria", "isp_nombre_a", "peva_a", "isp_nombre_b", "peva_b",
-        "coexisten_en_periodo", "accion_recomendada", "estado_revision", "revisado_por",
-        "fecha_deteccion", "fecha_revision",
+        "coexisten_en_periodo", "accion_recomendada", "estado_revision", "sigue_detectado",
+        "revisado_por", "fecha_deteccion", "fecha_revision",
     ]
     return (
         format_number(total), format_number(b_pendiente), b_nota, format_number(c_pendiente), c_nota,
