@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from urllib.parse import urlparse
 
 import bcrypt
 from flask import Blueprint, redirect, render_template, request, session, url_for
@@ -101,6 +102,20 @@ def _registrar_acceso(user_id: int) -> None:
         )
 
 
+def _destino_seguro(siguiente: str | None) -> str:
+    """
+    Evita open redirect: solo acepta rutas relativas del propio sitio
+    ("/sai/control"), nunca URLs absolutas ("https://otro.com") ni
+    relativas al protocolo ("//otro.com", "/\\otro.com").
+    """
+    if not siguiente or not siguiente.startswith("/") or siguiente.startswith(("//", "/\\")):
+        return "/"
+    partes = urlparse(siguiente)
+    if partes.scheme or partes.netloc:
+        return "/"
+    return siguiente
+
+
 @login_manager.user_loader
 def load_user(user_id: str):
     return _obtener_usuario_por_id(user_id)
@@ -129,8 +144,7 @@ def login():
             usuario = Usuario(fila["id"], fila["username"], fila["nombre_completo"], fila["activo"])
             login_user(usuario)
             _registrar_acceso(fila["id"])
-            siguiente = request.args.get("next") or "/"
-            return redirect(siguiente)
+            return redirect(_destino_seguro(request.args.get("next")))
 
         logger.info("Intento de login fallido para username=%r", username)
         error = "Usuario o contraseña incorrectos."
@@ -154,13 +168,13 @@ def init_auth(server) -> None:
     @server.before_request
     def _requerir_sesion():
         rutas_publicas = {"/login", "/logout"}
-        # Rutas internas de Dash: assets estáticos y los endpoints del
-        # dash-renderer (layout, dependencias, actualización de componentes,
-        # suites de componentes). Sin esto, el before_request bloquearía las
-        # llamadas internas de Dash aun con sesión válida, porque empiezan
-        # con "/_dash-" y no calzan con las rutas públicas.
-        es_interno_dash = request.path.startswith("/assets") or request.path.startswith("/_dash-")
-        if request.path in rutas_publicas or es_interno_dash:
+        # CORRECCIÓN (28-sep-2026, revisión de seguridad): antes se eximía
+        # también todo "/_dash-*" -- eso incluía /_dash-update-component
+        # (ejecuta cualquier callback y devuelve datos de mart) y
+        # /_dash-layout, accesibles SIN sesión. No hacía falta: con sesión
+        # válida, current_user.is_authenticated ya deja pasar esas llamadas.
+        # Solo los assets estáticos quedan públicos (logos/CSS, sin datos).
+        if request.path in rutas_publicas or request.path.startswith("/assets/"):
             return None
         if not current_user.is_authenticated:
             return redirect(url_for("auth.login", next=request.path))
