@@ -2114,7 +2114,8 @@ def get_conflictos_ruc_peva(
             opera_a, opera_b, fecha_permiso_a, fecha_permiso_b,
             categoria, peva_legado_descartado, coexisten_en_periodo,
             accion_recomendada, estado_revision, revisado_por,
-            notas_revision, fecha_revision, fecha_deteccion, fecha_ultima_deteccion
+            notas_revision, fecha_revision, fecha_deteccion, fecha_ultima_deteccion,
+            sigue_detectado
         FROM mart.vw_conflictos_ruc_peva
         WHERE {where}
         ORDER BY fecha_deteccion DESC

@@ -2389,7 +2389,20 @@ SELECT
     notas_revision,
     fecha_revision,
     fecha_deteccion,
-    fecha_ultima_deteccion
+    fecha_ultima_deteccion,
+    -- sigue_detectado (28-sep-2026): FALSE si el par ya no apareció en la
+    -- última corrida de mart/detectar_conflictos_peva.py (típicamente
+    -- porque SIETEL corrigió el RUC de uno de los dos PEVA) -- la fila se
+    -- conserva por su historial de revisión, pero ya no es trabajo
+    -- pendiente. Funciona porque el detector escribe todos los pares de
+    -- una corrida en UNA transacción, así que comparten exactamente el
+    -- mismo now() (verificado en producción: 9 pares, un solo timestamp).
+    -- Caso borde aceptado: si una corrida no detecta NINGÚN par, el MAX
+    -- sigue siendo el de la corrida anterior y esos pares se ven como
+    -- detectados.
+    fecha_ultima_deteccion = (
+        SELECT MAX(fecha_ultima_deteccion) FROM calidad.conflictos_ruc_peva
+    ) AS sigue_detectado
 FROM calidad.conflictos_ruc_peva;
 
 COMMENT ON VIEW mart.vw_conflictos_ruc_peva IS

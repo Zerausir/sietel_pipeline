@@ -131,6 +131,15 @@ CREATE INDEX IF NOT EXISTS ix_conflictos_ruc_peva_categoria
 
 -- Vista de conveniencia: qué PEVA deben excluirse de capa2 por ser el lado
 -- legado de un duplicado ya confirmado -- la consume construir_capa2.py.
+--
+-- CAMBIO 28-sep-2026: un par CONFIRMADO_AUTOMATICO solo excluye si SIGUE
+-- detectado en la última corrida del detector (mismo criterio que
+-- mart.vw_conflictos_ruc_peva.sigue_detectado). Antes, si SIETEL corregía
+-- el RUC y el par dejaba de existir, su PEVA se seguía excluyendo para
+-- siempre (caso real: PEVA(USU-17)4, sin efecto en cifras porque nunca
+-- reportó). Una confirmación MANUAL excluye siempre -- es decisión humana.
+-- Aplicar conectado como mart_user (dueño de la vista):
+--   psql -h <host> -U mart_user -d sietel_analitico -f sql/04_ddl_calidad.sql
 CREATE OR REPLACE VIEW calidad.vw_pevas_excluidos AS
 SELECT
     peva_legado_descartado AS peva_codigo,
@@ -139,8 +148,16 @@ SELECT
     estado_revision
 FROM calidad.conflictos_ruc_peva
 WHERE categoria = 'A_DUPLICADO_MIGRACION_CODIFICACION'
-  AND estado_revision IN ('CONFIRMADO_AUTOMATICO', 'CONFIRMADO_MANUAL')
-  AND peva_legado_descartado IS NOT NULL;
+  AND peva_legado_descartado IS NOT NULL
+  AND (
+        estado_revision = 'CONFIRMADO_MANUAL'
+        OR (
+            estado_revision = 'CONFIRMADO_AUTOMATICO'
+            AND fecha_ultima_deteccion = (
+                SELECT MAX(fecha_ultima_deteccion) FROM calidad.conflictos_ruc_peva
+            )
+        )
+  );
 
 -- ============================================================================
 -- PERMISOS de los roles del dashboard de consistencia (ya deben existir)
