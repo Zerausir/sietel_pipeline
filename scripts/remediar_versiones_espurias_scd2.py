@@ -49,7 +49,10 @@ OBJETIVOS = [
     ),
     (
         "dim_permiso_va_agregado", "peva_sk", "peva_codigo",
-        ["nombreComercial", "opera", "Resolucion"],
+        # isp_codigo (28-sep-2026): mismo cambio que COLUMNAS_VERSIONABLES_PERMISO
+        # en cargar_dimensiones.py -- dos versiones con distinto ISP son
+        # historia real, nunca se fusionan.
+        ["nombreComercial", "opera", "Resolucion", "isp_codigo"],
     ),
 ]
 

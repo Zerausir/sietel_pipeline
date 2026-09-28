@@ -59,11 +59,43 @@ CREATE TABLE IF NOT EXISTS staging.va_lineas_dedicadas_resumen (
     lineas_ul_1gbps_o_mas     INTEGER      NOT NULL DEFAULT 0,
     hash_contenido            VARCHAR(32),
     fecha_carga               TIMESTAMP    NOT NULL DEFAULT now(),
-    CONSTRAINT uq_resumen_natural UNIQUE (
+    CONSTRAINT uq_resumen_natural UNIQUE NULLS NOT DISTINCT (
         peva_codigo, par_codigo, periodoNumero, anio,
         tipoEnlace, tipoCliente, nivelComparticion, portador
     )
 );
+
+-- NULLS NOT DISTINCT en la llave natural (28-sep-2026, requiere PostgreSQL
+-- >= 15; producción es 17.9). tipoCliente, nivelComparticion y portador son
+-- NULLABLE en dbo.VALineasDedicadas (confirmado en INFORMATION_SCHEMA). En un
+-- UNIQUE normal de Postgres dos NULL son "distintos", así que ON CONFLICT
+-- nunca haría match con una fila que tenga NULL en la llave y CADA recarga
+-- del mes la duplicaría. SQL Server, en cambio, agrupa todos los NULL
+-- juntos en el GROUP BY -- con NULLS NOT DISTINCT ambos lados coinciden.
+-- Hoy hay 0 NULLs (verificado), así que esto es blindaje, no corrección.
+-- Migración idempotente para la tabla ya existente: solo actúa si el
+-- índice de la restricción todavía trata los NULL como distintos. Si
+-- existieran duplicados, el ADD CONSTRAINT falla y aplicar_esquema aborta
+-- en rojo (a propósito: no se corrige en silencio).
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_index i ON i.indexrelid = c.conindid
+        WHERE c.conrelid = 'staging.va_lineas_dedicadas_resumen'::regclass
+          AND c.conname = 'uq_resumen_natural'
+          AND NOT i.indnullsnotdistinct
+    ) THEN
+        ALTER TABLE staging.va_lineas_dedicadas_resumen DROP CONSTRAINT uq_resumen_natural;
+        ALTER TABLE staging.va_lineas_dedicadas_resumen
+            ADD CONSTRAINT uq_resumen_natural UNIQUE NULLS NOT DISTINCT (
+                peva_codigo, par_codigo, periodoNumero, anio,
+                tipoEnlace, tipoCliente, nivelComparticion, portador
+            );
+        RAISE NOTICE 'uq_resumen_natural migrada a NULLS NOT DISTINCT';
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS ix_resumen_anio_periodo ON staging.va_lineas_dedicadas_resumen (anio, periodoNumero);
 CREATE INDEX IF NOT EXISTS ix_resumen_peva ON staging.va_lineas_dedicadas_resumen (peva_codigo);
@@ -356,11 +388,29 @@ CREATE INDEX IF NOT EXISTS ix_historial_correcciones_anio ON staging.historial_c
 CREATE INDEX IF NOT EXISTS ix_historial_correcciones_peva ON staging.historial_correcciones (peva_codigo);
 
 COMMENT ON TABLE staging.historial_correcciones IS
-'Registro de cambios de contenido en staging.va_lineas_dedicadas_resumen, detectados por trigger cuando hash_contenido difiere entre la fila vieja y la nueva. valores_anteriores es un snapshot completo (JSONB) de la fila antes de sobreescribirse. No distingue corrección real de origen vs. reprocesamiento propio -- ver control_cargas y Git para esa distinción.';
+'Registro de cambios de contenido en staging.va_lineas_dedicadas_resumen, detectados por trigger cuando hash_contenido difiere entre la fila vieja y la nueva, o cuando la fila se elimina porque SIETEL ya no reporta esa combinación (hash_nuevo = ELIMINADA_EN_ORIGEN, desde 28-sep-2026). valores_anteriores es un snapshot completo (JSONB) de la fila antes de sobreescribirse o borrarse. No distingue corrección real de origen vs. reprocesamiento propio -- ver control_cargas y Git para esa distinción.';
 
 CREATE OR REPLACE FUNCTION staging.fn_registrar_correccion_resumen()
 RETURNS TRIGGER AS $$
 BEGIN
+    -- DELETE (28-sep-2026): cargar_hechos_anio.py ahora borra las
+    -- combinaciones que SIETEL ya no reporta para un mes recargado (antes
+    -- quedaban obsoletas para siempre). Se registra aquí igual que una
+    -- corrección, con hash_nuevo = 'ELIMINADA_EN_ORIGEN' y el snapshot
+    -- completo de la fila borrada en valores_anteriores.
+    IF TG_OP = 'DELETE' THEN
+        INSERT INTO staging.historial_correcciones (
+            resumen_id, peva_codigo, par_codigo, periodoNumero, anio,
+            tipoEnlace, tipoCliente, nivelComparticion, portador,
+            hash_anterior, hash_nuevo, valores_anteriores
+        ) VALUES (
+            OLD.id, OLD.peva_codigo, OLD.par_codigo, OLD.periodoNumero, OLD.anio,
+            OLD.tipoEnlace, OLD.tipoCliente, OLD.nivelComparticion, OLD.portador,
+            COALESCE(OLD.hash_contenido, ''), 'ELIMINADA_EN_ORIGEN', to_jsonb(OLD)
+        );
+        RETURN OLD;
+    END IF;
+
     IF OLD.hash_contenido IS DISTINCT FROM NEW.hash_contenido THEN
         INSERT INTO staging.historial_correcciones (
             resumen_id, peva_codigo, par_codigo, periodoNumero, anio,
@@ -378,7 +428,7 @@ $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS trg_registrar_correccion_resumen ON staging.va_lineas_dedicadas_resumen;
 CREATE TRIGGER trg_registrar_correccion_resumen
-    BEFORE UPDATE ON staging.va_lineas_dedicadas_resumen
+    BEFORE UPDATE OR DELETE ON staging.va_lineas_dedicadas_resumen
     FOR EACH ROW
     EXECUTE FUNCTION staging.fn_registrar_correccion_resumen();
 
@@ -481,6 +531,3 @@ WHERE n.es_vigente = true;
 
 COMMENT ON VIEW analitico.v_nodo_isp_vigente IS
 'Nodos de acceso ISP vigentes (dbo.NodoISP, sin NodoISP_Auxiliar). latitud/longitud crudas, sin limpiar -- la conversión DMS->decimal y validación viven en mart/limpiar_coordenadas_nodo_isp.py (Capa 2/3). codigo_parroquia/codigo_canton/codigo_provincia son códigos INEC (07-ago-2026), para cruce contra el shapefile CONALI en mart/detectar_discrepancias_geografia_nodo.py.';
-
-COMMENT ON VIEW analitico.v_nodo_isp_vigente IS
-'Nodos de acceso ISP vigentes (dbo.NodoISP, sin NodoISP_Auxiliar). latitud/longitud crudas, sin limpiar -- la conversión DMS->decimal y validación viven en mart/limpiar_coordenadas_nodo_isp.py (Capa 2/3).';

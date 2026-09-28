@@ -49,7 +49,7 @@ completa de 8 columnas y no reporte falsos positivos.
 import logging
 from datetime import datetime
 
-from cargar_hechos_anio import SQL_EXTRAER_HECHOS_ANIO, calcular_hash_fila, MESES_DEL_ANIO
+from cargar_hechos_anio import COLUMNAS_HASH, SQL_EXTRAER_HECHOS_ANIO, calcular_hash_fila, MESES_DEL_ANIO
 from config import postgres_cursor, sqlserver_cursor
 
 logger = logging.getLogger(__name__)
@@ -134,21 +134,32 @@ def _certificar_contenido_por_anio(anio: int) -> dict:
             for f in cur.fetchall():
                 hashes_origen[_make_key(f)] = calcular_hash_fila(f)
 
+    # CAMBIO (28-sep-2026): el hash de destino se RECALCULA desde los
+    # valores realmente guardados en Postgres, no se toma hash_contenido tal
+    # cual. Antes se comparaba "origen hoy" contra "el hash que Python
+    # calculó del origen al cargar" -- una columna de métrica alterada en
+    # Postgres después de la carga (UPDATE manual, bug de otro script) pasaba
+    # la certificación sin ser detectada. Postgres devuelve las columnas en
+    # minúscula; COLUMNAS_HASH usa el nombre de SQL Server.
+    columnas_pg = ", ".join(c.lower() for c in COLUMNAS_HASH)
+    hashes_destino = {}
+    hash_guardado_inconsistente = []
     with postgres_cursor(commit=False) as cur:
         cur.execute(
-            """
-            SELECT peva_codigo, par_codigo, periodonumero, anio,
-                   tipoenlace, tipocliente, nivelcomparticion, portador,
-                   hash_contenido
+            f"""
+            SELECT {columnas_pg}, hash_contenido
             FROM staging.va_lineas_dedicadas_resumen
             WHERE anio = %s
             """,
             (anio,),
         )
-        hashes_destino = {
-            _make_key(r): r["hash_contenido"]
-            for r in cur.fetchall()
-        }
+        for r in cur.fetchall():
+            valores = {c: r[c.lower()] for c in COLUMNAS_HASH}
+            hash_real = calcular_hash_fila(valores)
+            key = _make_key(r)
+            hashes_destino[key] = hash_real
+            if r["hash_contenido"] != hash_real:
+                hash_guardado_inconsistente.append(str(key))
 
     certificadas = 0
     distintas = []
@@ -163,10 +174,16 @@ def _certificar_contenido_por_anio(anio: int) -> dict:
         else:
             certificadas += 1
 
+    # CAMBIO (28-sep-2026): filas en destino que SIETEL ya no produce --
+    # antes solo se detectaban indirectamente por el conteo.
+    sobrantes = [str(k) for k in hashes_destino.keys() - hashes_origen.keys()]
+
     return {
         "filas_certificadas": certificadas,
         "filas_con_contenido_distinto": distintas,
         "filas_faltantes_en_destino": faltantes,
+        "filas_sobrantes_en_destino": sobrantes,
+        "filas_hash_guardado_inconsistente": hash_guardado_inconsistente,
     }
 
 
@@ -275,7 +292,8 @@ def _imprimir_reporte(resultados_por_anio: dict, problemas_vigencia: list):
 
     for anio, r in resultados_por_anio.items():
         conteo_ok = r["filas_origen"] == r["filas_destino"]
-        contenido_ok = not r["distintas"] and not r["faltantes"]
+        contenido_ok = (not r["distintas"] and not r["faltantes"]
+                        and not r["sobrantes"] and not r["hash_inconsistente"])
         vista_ok = not r["duplicados_vista"]
 
         print(f"  ── Año {anio} " + "─" * (58 - len(str(anio))))
@@ -293,6 +311,10 @@ def _imprimir_reporte(resultados_por_anio: dict, problemas_vigencia: list):
             print(f"      ⚠️  {len(r['distintas'])} fila(s) con contenido distinto")
         if r["faltantes"]:
             print(f"      ⚠️  {len(r['faltantes'])} fila(s) faltantes en PostgreSQL")
+        if r["sobrantes"]:
+            print(f"      ⚠️  {len(r['sobrantes'])} fila(s) sobrantes en PostgreSQL (SIETEL ya no las produce)")
+        if r["hash_inconsistente"]:
+            print(f"      ⚠️  {len(r['hash_inconsistente'])} fila(s) con hash_contenido que no coincide con sus valores")
         print(
             f"    Vista analítico.v_lineas_dedicadas_resumen sin duplicados"
             f"{'  ✅' if vista_ok else '  ❌'}"
@@ -307,6 +329,8 @@ def _imprimir_reporte(resultados_por_anio: dict, problemas_vigencia: list):
         r["filas_origen"] == r["filas_destino"]
         and not r["distintas"]
         and not r["faltantes"]
+        and not r["sobrantes"]
+        and not r["hash_inconsistente"]
         and not r["duplicados_vista"]
         for r in resultados_por_anio.values()
     )
@@ -323,7 +347,9 @@ def validar_anios(anios: list[int]):
     Valida, para cada año recién cargado:
       1. Conteo de filas agregadas idéntico entre SQL Server y PostgreSQL.
       2. Hash MD5 de contenido idéntico fila a fila (certificación real de
-         valores, no solo de cantidad), recalculado mes a mes.
+         valores, no solo de cantidad), recalculado mes a mes en origen y
+         desde los valores guardados en destino; sin filas faltantes ni
+         sobrantes, y hash_contenido consistente con sus propios valores.
       3. Dimensiones SCD Tipo 2 sin versiones vigentes duplicadas.
       4. Vista de consumo sin duplicados por JOIN de vigencia temporal.
 
@@ -375,6 +401,21 @@ def validar_anios(anios: list[int]):
                 f"existen en SQL Server pero no en PostgreSQL."
             )
 
+        if cert["filas_sobrantes_en_destino"]:
+            errores.append(
+                f"Año {anio}: {len(cert['filas_sobrantes_en_destino'])} fila(s) "
+                f"existen en PostgreSQL pero SIETEL ya no las produce "
+                f"(ej. {cert['filas_sobrantes_en_destino'][0]})."
+            )
+
+        if cert["filas_hash_guardado_inconsistente"]:
+            errores.append(
+                f"Año {anio}: {len(cert['filas_hash_guardado_inconsistente'])} fila(s) "
+                f"cuyo hash_contenido no coincide con sus propios valores guardados "
+                f"(posible edición por fuera del pipeline, "
+                f"ej. {cert['filas_hash_guardado_inconsistente'][0]})."
+            )
+
         duplicados_vista = _verificar_vista_sin_duplicados(anio)
         if duplicados_vista:
             errores.append(
@@ -389,6 +430,8 @@ def validar_anios(anios: list[int]):
             "certificadas": cert["filas_certificadas"],
             "distintas": cert["filas_con_contenido_distinto"],
             "faltantes": cert["filas_faltantes_en_destino"],
+            "sobrantes": cert["filas_sobrantes_en_destino"],
+            "hash_inconsistente": cert["filas_hash_guardado_inconsistente"],
             "duplicados_vista": duplicados_vista,
         }
 

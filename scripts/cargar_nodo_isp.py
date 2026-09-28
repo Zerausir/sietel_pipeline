@@ -44,6 +44,7 @@ perder la fila -- por eso los tres JOIN son LEFT, no INNER.
 import logging
 from datetime import datetime
 
+from cargar_dimensiones import _cerrar_ausentes_en_origen
 from config import postgres_cursor, sqlserver_cursor
 
 logger = logging.getLogger(__name__)
@@ -215,12 +216,20 @@ def cargar_dim_nodo_isp():
                         ),
                     )
 
+            # Nodos borrados en SIETEL: se cierran (28-sep-2026) -- antes
+            # seguían vigentes y en el mapa. Misma lógica y protecciones que
+            # las dimensiones de cargar_dimensiones.py.
+            cerradas = _cerrar_ausentes_en_origen(
+                pg_cur, "dim_nodo_isp", "noisp_sk", "noisp_codigo", vigentes, filas_origen
+            )
+
         _registrar_carga(
             "nodo_isp", None, insertadas, actualizadas, "EXITOSO", None, inicio
         )
         logger.info(
-            "dim_nodo_isp: %s nodos nuevos, %s nuevas versiones por cambio",
-            insertadas, actualizadas,
+            "dim_nodo_isp: %s nodos nuevos, %s nuevas versiones por cambio, %s cerrados "
+            "(ya no existen en SIETEL)",
+            insertadas, actualizadas, cerradas,
         )
     except Exception as exc:
         _registrar_carga("nodo_isp", None, insertadas, actualizadas, "FALLIDO", str(exc), inicio)
