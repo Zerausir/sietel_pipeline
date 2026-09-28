@@ -229,17 +229,18 @@ COMMENT ON VIEW analitico.v_lineas_dedicadas_resumen IS
 -- por primera vez desde que mart.vw_prestadores_sin_reportar existe.
 --
 -- EFECTO SECUNDARIO IMPORTANTE, operativo, no solo de este archivo:
--- CASCADE elimina mart.vw_prestadores_sin_reportar junto con esta vista.
+-- CASCADE elimina junto con esta vista TODAS las vistas de mart que la
+-- leen -- hoy mart.vw_prestadores_sin_reportar (KPI del dashboard) y
+-- mart.vw_nodos_isp_mapa (Mapa de nodos, agregada 07-ago-2026; la nota
+-- original de arriba sobre "unica dependencia" quedo desactualizada).
 -- aplicar_esquema.py (Capa 1) NO reconstruye mart -- eso es exclusivo de
--- aplicar_capa3.py (Capa 2/3, DAG sietel_mart_pipeline). Es decir: toda
--- corrida de Capa 1 que llegue a este DROP deja el KPI "prestadores sin
--- reportar" del dashboard roto hasta que alguien dispare manualmente
--- sietel_mart_pipeline despues. Esto NO esta resuelto todavia a nivel de
--- orquestacion (ver conversacion 06-ago-2026) -- pendiente decidir entre:
--- (a) paso de runbook manual "correr mart_pipeline despues de Capa 1",
--- (b) TriggerDagRunOperator al final de sietel_usuarios_cuentas_pipeline,
--- (c) que aplicar_esquema.py solo haga DROP+CREATE cuando la definicion
--- de la vista realmente cambio, no en cada corrida.
+-- aplicar_capa3.py (Capa 2/3, DAG sietel_mart_pipeline).
+-- RESUELTO 28-sep-2026 con la opcion (b): la tarea disparar_mart_pipeline
+-- al final de dags/sietel_usuarios_cuentas_pipeline.py dispara
+-- sietel_mart_pipeline cuando la validacion cruzada pasa. Si Capa 1 falla
+-- a mitad de camino, las vistas siguen borradas hasta corregir la falla y
+-- volver a correr (o disparar mart a mano) -- a proposito, para no
+-- publicar datos sin certificar.
 DROP VIEW IF EXISTS analitico.v_ultimo_periodo_reportado_detalle CASCADE;
 
 CREATE VIEW analitico.v_ultimo_periodo_reportado_detalle AS
