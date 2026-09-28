@@ -2764,11 +2764,104 @@ BEGIN
     END IF;
 END $$;
 
+-- ============================================================
+-- 17.0. INVARIANTES BLOQUEANTES (28-sep-2026) -- DENTRO de la transacción
+-- ============================================================
+-- Antes, las validaciones de la sección 17 eran SELECT después del COMMIT:
+-- aplicar_capa3.py las ejecutaba pero nadie leía su resultado, así que un
+-- mart inconsistente se publicaba igual. Aquí se verifican ANTES del
+-- COMMIT: si alguna falla, RAISE EXCEPTION aborta la transacción completa
+-- -- el DROP SCHEMA mart CASCADE del inicio también se revierte, así que el
+-- dashboard sigue sirviendo el mart anterior (bueno) en vez de uno roto --
+-- y la tarea aplicar_capa3 de sietel_mart_pipeline queda en rojo con el
+-- detalle en el log.
+--
+-- Solo entran las validaciones con "resultado esperado: cero filas". Las
+-- informativas (17.1, 17.2, 17.6, 17.7, 17.11) quedan abajo, como antes.
+-- Todas pasaban en producción el 28-sep-2026, salvo la de capa2 (102
+-- pares), que es justo el bug corregido ese día en construir_capa2.py y
+-- que esta verificación habría detectado.
+DO $$
+DECLARE
+    n       bigint;
+    errores text[] := ARRAY[]::text[];
+BEGIN
+    -- capa2: una sola fila por (llave natural, periodo) -- si no, el LOCF
+    -- de construir_capa2.py copia métricas entre filas "empatadas".
+    SELECT COUNT(*) INTO n FROM (
+        SELECT 1 FROM capa2.lineas_dedicadas_consolidado
+        GROUP BY peva_codigo, par_codigo, tipoenlace, tipocliente,
+                 nivelcomparticion, portador, periodo
+        HAVING COUNT(*) > 1) x;
+    IF n > 0 THEN errores := errores || format('capa2: %s (llave, periodo) repetidos', n); END IF;
+
+    -- 17.3
+    SELECT COUNT(*) INTO n FROM (
+        SELECT 1 FROM mart.fact_participacion_mercado
+        WHERE total_lineas_prestador > 0
+        GROUP BY periodo_id, territorio_id
+        HAVING ABS(SUM(participacion_porcentaje) - 100) > 0.001) x;
+    IF n > 0 THEN errores := errores || format('17.3: %s mercados cuya participación no suma 100', n); END IF;
+
+    -- 17.4
+    SELECT COUNT(*) INTO n FROM mart.fact_ihh_geografico WHERE ihh < 0 OR ihh > 10000;
+    IF n > 0 THEN errores := errores || format('17.4: %s IHH fuera de [0, 10000]', n); END IF;
+
+    -- 17.5
+    SELECT COUNT(*) INTO n FROM mart.fact_resumen_mercado_mes
+    WHERE numero_prestadores <> numero_prestadores_con_lineas + numero_prestadores_cero + numero_prestadores_sin_dato;
+    IF n > 0 THEN errores := errores || format('17.5: %s filas con conteo de prestadores inconsistente', n); END IF;
+
+    -- 17.8
+    SELECT COUNT(*) INTO n FROM mart.fact_lineas_geografia_mes
+    WHERE total_lineas IS NOT NULL
+      AND (total_lineas <> lineas_dl_sin_datos + lineas_dl_menos_1mbps + lineas_dl_1_10mbps
+                          + lineas_dl_10_30mbps + lineas_dl_30_100mbps
+                          + lineas_dl_100mbps_1gbps + lineas_dl_1gbps_o_mas
+        OR total_lineas <> lineas_ul_sin_datos + lineas_ul_menos_1mbps + lineas_ul_1_10mbps
+                          + lineas_ul_10_30mbps + lineas_ul_30_100mbps
+                          + lineas_ul_100mbps_1gbps + lineas_ul_1gbps_o_mas);
+    IF n > 0 THEN errores := errores || format('17.8: %s filas donde los rangos de velocidad no suman total_lineas', n); END IF;
+
+    -- 17.9
+    SELECT COUNT(*) INTO n FROM mart.fact_lineas_geografia_mes
+    WHERE total_lineas IS NOT NULL
+      AND total_lineas <> COALESCE(lineas_reportadas, 0) + COALESCE(lineas_imputadas, 0);
+    IF n > 0 THEN errores := errores || format('17.9: %s filas con reportadas + imputadas <> total_lineas', n); END IF;
+
+    -- 17.10
+    SELECT COUNT(*) INTO n FROM mart.fact_lineas_velocidad_mes
+    WHERE total_lineas_velocidad IS NOT NULL
+      AND total_lineas_velocidad <> COALESCE(lineas_reportadas, 0) + COALESCE(lineas_imputadas, 0);
+    IF n > 0 THEN errores := errores || format('17.10: %s filas por velocidad con reportadas + imputadas <> total', n); END IF;
+
+    -- 17.12 (a)
+    SELECT COUNT(*) INTO n FROM mart.fact_participacion_mercado
+    WHERE (NOT tiene_reportado) AND (participacion_porcentaje IS NOT NULL OR aporte_ihh IS NOT NULL);
+    IF n > 0 THEN errores := errores || format('17.12a: %s prestadores sin reporte real con participación/aporte IHH', n); END IF;
+
+    -- 17.12 (b)
+    SELECT COUNT(*) INTO n FROM mart.fact_ihh_geografico
+    WHERE porcentaje_cobertura_prestadores < 0 OR porcentaje_cobertura_prestadores > 100
+       OR cr2 > cr4 + 0.001 OR cr4 > 100.001;
+    IF n > 0 THEN errores := errores || format('17.12b: %s filas con cobertura/CR2/CR4 fuera de rango', n); END IF;
+
+    IF cardinality(errores) > 0 THEN
+        RAISE EXCEPTION 'Invariantes de mart incumplidas -- se revierte el refresco, el mart anterior queda intacto: %',
+            array_to_string(errores, '; ');
+    END IF;
+    RAISE NOTICE 'Invariantes de mart: todas OK.';
+END $$;
+
 COMMIT;
 
 -- ============================================================
 -- 17. VALIDACIONES POSTERIORES
 -- ============================================================
+-- NOTA (28-sep-2026): las que dicen "resultado esperado: cero filas" ya se
+-- verifican de forma BLOQUEANTE en 17.0, antes del COMMIT. Se conservan
+-- aquí como SELECT para diagnóstico manual (ver QUÉ filas fallan cuando
+-- 17.0 aborta el refresco).
 
 -- 17.1. Prestadores excluidos por "prueba".
 SELECT *
