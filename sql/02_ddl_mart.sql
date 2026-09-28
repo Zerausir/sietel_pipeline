@@ -2762,6 +2762,16 @@ BEGIN
         ALTER DEFAULT PRIVILEGES FOR ROLE mart_user IN SCHEMA mart
             GRANT SELECT ON TABLES TO eda_lector;
     END IF;
+    -- calidad_lector agregado 28-sep-2026: sql/07 y sql/08 le otorgaban
+    -- SELECT sobre vistas de mart, pero ese GRANT se perdía en el siguiente
+    -- DROP SCHEMA mart CASCADE -- mismo fallo ya documentado arriba para
+    -- dashboard_lector y eda_lector (verificado: sin USAGE sobre mart).
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'calidad_lector') THEN
+        GRANT USAGE ON SCHEMA mart TO calidad_lector;
+        GRANT SELECT ON ALL TABLES IN SCHEMA mart TO calidad_lector;
+        ALTER DEFAULT PRIVILEGES FOR ROLE mart_user IN SCHEMA mart
+            GRANT SELECT ON TABLES TO calidad_lector;
+    END IF;
 END $$;
 
 -- ============================================================
