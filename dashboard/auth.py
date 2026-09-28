@@ -34,6 +34,7 @@ from flask_login import (
 )
 from sqlalchemy import text
 
+from extensions import cache
 from services.database import get_auth_engine
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,41 @@ def _destino_seguro(siguiente: str | None) -> str:
     return siguiente
 
 
+# ── Límite de intentos de login (28-sep-2026) ───────────────────────────────
+# Antes no había ninguno: /login aceptaba intentos ilimitados de contraseña.
+# Contadores en la caché compartida del dashboard (FileSystemCache, ver
+# config.py) -- común a los 4 workers de gunicorn; un contador por proceso
+# multiplicaría el límite real por 4. Dos niveles:
+#   - por usuario: 5 fallos en 15 min bloquean ESE usuario 15 min (freno a
+#     fuerza bruta sobre una cuenta);
+#   - por IP: tope alto (50), no 5 -- la oficina probablemente sale a
+#     internet por una sola IP (NAT) y un tope bajo bloquearía a todos por
+#     los errores de uno. Frena el barrido de muchas cuentas desde una IP.
+# El mensaje de bloqueo es el mismo exista o no el usuario (no revela nada).
+_MAX_FALLOS_USUARIO = 5
+_MAX_FALLOS_IP = 50
+_VENTANA_BLOQUEO_SEGUNDOS = 15 * 60
+
+
+def _claves_fallos(username: str) -> tuple[str, str]:
+    return f"login_fallos:u:{username.lower()}", f"login_fallos:ip:{request.remote_addr}"
+
+
+def _login_bloqueado(username: str) -> bool:
+    clave_usuario, clave_ip = _claves_fallos(username)
+    return ((cache.get(clave_usuario) or 0) >= _MAX_FALLOS_USUARIO
+            or (cache.get(clave_ip) or 0) >= _MAX_FALLOS_IP)
+
+
+def _registrar_fallo(username: str) -> None:
+    for clave in _claves_fallos(username):
+        cache.set(clave, (cache.get(clave) or 0) + 1, timeout=_VENTANA_BLOQUEO_SEGUNDOS)
+
+
+def _limpiar_fallos(username: str) -> None:
+    cache.delete(_claves_fallos(username)[0])
+
+
 @login_manager.user_loader
 def load_user(user_id: str):
     return _obtener_usuario_por_id(user_id)
@@ -131,6 +167,15 @@ def login():
         username = (request.form.get("username") or "").strip()
         password = (request.form.get("password") or "").encode("utf-8")
 
+        if _login_bloqueado(username):
+            logger.warning("Login bloqueado por exceso de intentos: username=%r ip=%s",
+                           username, request.remote_addr)
+            return render_template(
+                "login.html",
+                error=f"Demasiados intentos fallidos. Espera {_VENTANA_BLOQUEO_SEGUNDOS // 60} minutos "
+                      f"e inténtalo de nuevo.",
+            ), 429
+
         fila = _obtener_usuario_por_username(username)
 
         # Deliberadamente el mismo mensaje de error tanto si el usuario no
@@ -144,9 +189,11 @@ def login():
             usuario = Usuario(fila["id"], fila["username"], fila["nombre_completo"], fila["activo"])
             login_user(usuario)
             _registrar_acceso(fila["id"])
+            _limpiar_fallos(username)
             return redirect(_destino_seguro(request.args.get("next")))
 
-        logger.info("Intento de login fallido para username=%r", username)
+        _registrar_fallo(username)
+        logger.info("Intento de login fallido para username=%r ip=%s", username, request.remote_addr)
         error = "Usuario o contraseña incorrectos."
 
     return render_template("login.html", error=error)

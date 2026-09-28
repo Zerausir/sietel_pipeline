@@ -26,6 +26,15 @@ app = Dash(
 )
 server = app.server
 server.config["SECRET_KEY"] = settings.secret_key
+# Cookie de sesión (28-sep-2026): SameSite=Lax impide que otro sitio la
+# envíe en peticiones POST cruzadas (freno a CSRF); HttpOnly ya es el
+# default de Flask (JavaScript no puede leerla). Secure se activa solo si
+# el dashboard se sirve por HTTPS (SESSION_COOKIE_SECURE=true en el .env):
+# forzarlo con el despliegue actual por HTTP haría que el navegador nunca
+# devolviera la cookie y nadie podría iniciar sesión.
+server.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+server.config["SESSION_COOKIE_HTTPONLY"] = True
+server.config["SESSION_COOKIE_SECURE"] = settings.session_cookie_secure
 
 # Debe llamarse antes de que Dash sirva cualquier página -- registra el
 # blueprint de /login y /logout, y el before_request que bloquea todo lo
