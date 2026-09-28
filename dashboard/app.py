@@ -32,6 +32,13 @@ server.config["SECRET_KEY"] = settings.secret_key
 # el dashboard se sirve por HTTPS (SESSION_COOKIE_SECURE=true en el .env):
 # forzarlo con el despliegue actual por HTTP haría que el navegador nunca
 # devolviera la cookie y nadie podría iniciar sesión.
+#
+# PENDIENTE DE TI (decisión 28-sep-2026): el dashboard se sirve hoy por HTTP
+# en el puerto 8050, así que la contraseña del login y la cookie de sesión
+# viajan SIN cifrar dentro de la red interna. Para cerrarlo hace falta un
+# certificado institucional y un proxy con TLS delante de gunicorn --
+# infraestructura, no código. Cuando exista: servir por HTTPS y poner
+# SESSION_COOKIE_SECURE=true en el .env del contenedor.
 server.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 server.config["SESSION_COOKIE_HTTPONLY"] = True
 server.config["SESSION_COOKIE_SECURE"] = settings.session_cookie_secure

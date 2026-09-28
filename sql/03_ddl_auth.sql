@@ -72,6 +72,19 @@ ALTER DEFAULT PRIVILEGES FOR ROLE mart_user IN SCHEMA mart
 
 -- 2) Escritor de autenticación: SELECT/INSERT/UPDATE únicamente sobre la
 --    tabla de usuarios. Sin acceso a mart, staging ni analitico.
+--
+-- RIESGO ACEPTADO (revisión 28-sep-2026, decisión del responsable del
+-- proyecto): el dashboard en ejecución solo usa SELECT y UPDATE de
+-- ultimo_acceso (dashboard/auth.py) -- las altas, bajas y resets van por
+-- gestionar_usuarios.py con otro rol. El mínimo sería
+--   GRANT SELECT, UPDATE (ultimo_acceso) ON auth.usuarios_dashboard TO dashboard_auth;
+-- sin INSERT y sin UPDATE de password_hash/activo. Se mantiene el permiso
+-- actual porque reducirlo exige ejecutar este archivo como auth_admin
+-- (dueño del esquema auth), y ningún proceso automatizado tiene ni debe
+-- tener esas credenciales. Riesgo acotado: las credenciales de
+-- dashboard_auth solo existen en el .env del contenedor del dashboard. Si
+-- ese contenedor se viera comprometido, este es el permiso a reducir
+-- primero.
 GRANT USAGE ON SCHEMA auth TO dashboard_auth;
 GRANT SELECT, INSERT, UPDATE ON auth.usuarios_dashboard TO dashboard_auth;
 GRANT USAGE, SELECT ON SEQUENCE auth.usuarios_dashboard_id_seq TO dashboard_auth;
