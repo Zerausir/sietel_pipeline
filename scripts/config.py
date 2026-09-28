@@ -45,6 +45,18 @@ def get_sqlserver_connection():
     durante el handshake, incluso con conectividad de red y credenciales
     correctas confirmadas. SSMS sí conecta porque usa el mismo stack TLS
     que el driver ODBC oficial de Microsoft.
+
+    RIESGO ACEPTADO (documentado 28-sep-2026): TrustServerCertificate=yes
+    cifra el canal pero NO valida el certificado del servidor, así que no
+    protege contra un intermediario (MITM) en la red entre Airflow y
+    SIETEL. Se suma a UnsafeLegacyRenegotiation en docker/Dockerfile.
+    Ambos son exigencias del servidor SIETEL actual (certificado no
+    verificable por el contenedor, sin renegociación segura RFC 5746), no
+    elecciones de este pipeline. La mitigación real es del lado de SIETEL:
+    un certificado emitido por una CA de confianza (y entonces cambiar a
+    TrustServerCertificate=no) y soporte de renegociación segura. Las
+    credenciales viajan cifradas igual; el riesgo es de suplantación del
+    servidor dentro de la red interna.
     """
     driver = os.environ.get("SIETEL_SQLSERVER_ODBC_DRIVER", "ODBC Driver 18 for SQL Server")
     host = _require_env("SIETEL_SQLSERVER_HOST")
