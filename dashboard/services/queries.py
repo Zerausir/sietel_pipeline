@@ -1920,16 +1920,26 @@ def get_dependencia_geografica_dominante_ausente(periodo_id: int) -> pd.DataFram
     correcta si CNT retoma el reporte, o si en el futuro otro prestador
     cae en el mismo patrón.
 
-    Por provincia: cuántas cuentas se reportan HOY (sin el/los prestador
-    ausente, que por definición no está incluido), cuántas reportaba ESE
-    prestador la última vez que sí reportó, y qué % de la suma de ambas
-    representaría si volviera a reportar -- mismo cálculo que el EDA
-    (ultimo_reporte / (lineas_reportadas + ultimo_reporte) * 100), sobre
-    datos vivos, no un snapshot fijo en el código.
+    Una fila por (prestador ausente, provincia): cuántas cuentas se
+    reportan HOY en la provincia (sin los ausentes, que por definición no
+    están incluidos), cuántas reportaba ESE prestador la última vez que sí
+    reportó, y qué % de la suma de ambas representaría si volviera a
+    reportar -- mismo cálculo que el EDA (ultimo_reporte /
+    (cuentas_actuales + ultimo_reporte) * 100), sobre datos vivos.
+
+    POR PRESTADOR, no sumado (29-sep-2026): con más de un dominante ausente
+    a la vez, cada uno tiene su propio último reporte (pueden ser de años
+    distintos, y el mart nunca "cierra" la ausencia de quien salió del
+    mercado). Sumar esas huellas en una sola barra mezclaba fotos de fechas
+    distintas, y los porcentajes de prestadores distintos no son sumables.
+    ultimo_periodo_con_reporte viaja en cada fila para que el gráfico diga
+    de cuándo es cada huella.
 
     Umbral de dominancia (>=30% de participación histórica a nivel
-    NACIONAL) idéntico al que ya usa mart.fact_ihh_geografico -- no se
-    reinventa aquí, se referencia la misma definición vigente en la base.
+    NACIONAL) idéntico al que ya usa mart.fact_ihh_geografico. Exigir un
+    reporte ANTERIOR al período (ultimo_periodo_ausente) equivale al filtro
+    del mart por primer_periodo_reportado: quien todavía no había reportado
+    nunca no cuenta como ausente.
     """
     return _read(
         """
@@ -1957,12 +1967,16 @@ def get_dependencia_geografica_dominante_ausente(periodo_id: int) -> pd.DataFram
             GROUP BY a.prestador_id
         ),
         huella_ausente AS (
-            SELECT g.pro_nombre AS provincia, SUM(f.total_lineas) AS cuentas_ausente
+            SELECT
+                u.prestador_id,
+                u.ultimo_periodo_con_reporte,
+                g.pro_nombre AS provincia,
+                SUM(f.total_lineas) AS cuentas_ausente
             FROM ultimo_periodo_ausente u
             JOIN mart.fact_lineas_geografia_mes f
               ON f.prestador_id = u.prestador_id AND f.periodo_id = u.ultimo_periodo_con_reporte
             JOIN mart.dim_geografia g ON g.geografia_id = f.geografia_id
-            GROUP BY g.pro_nombre
+            GROUP BY u.prestador_id, u.ultimo_periodo_con_reporte, g.pro_nombre
         ),
         totales_actuales AS (
             SELECT g.pro_nombre AS provincia, SUM(f.total_lineas) AS cuentas_actuales
@@ -1972,21 +1986,22 @@ def get_dependencia_geografica_dominante_ausente(periodo_id: int) -> pd.DataFram
             GROUP BY g.pro_nombre
         )
         SELECT
-            COALESCE(t.provincia, h.provincia) AS provincia,
+            h.prestador_id,
+            COALESCE(p.isp_nombre, p.nombrecomercial, h.prestador_id) AS isp_nombre,
+            h.ultimo_periodo_con_reporte,
+            d.anio_mes AS ultimo_reporte_anio_mes,
+            h.provincia,
             COALESCE(t.cuentas_actuales, 0) AS cuentas_actuales,
-            COALESCE(h.cuentas_ausente, 0) AS cuentas_ausente,
-            CASE
-                WHEN (COALESCE(t.cuentas_actuales, 0) + COALESCE(h.cuentas_ausente, 0)) > 0
-                THEN ROUND(
-                    100.0 * COALESCE(h.cuentas_ausente, 0)
-                    / (COALESCE(t.cuentas_actuales, 0) + COALESCE(h.cuentas_ausente, 0)), 1
-                )
-                ELSE 0
-            END AS pct_potencial_subestimado
-        FROM totales_actuales t
-        FULL OUTER JOIN huella_ausente h ON h.provincia = t.provincia
-        WHERE COALESCE(h.cuentas_ausente, 0) > 0
-        ORDER BY pct_potencial_subestimado DESC
+            h.cuentas_ausente,
+            ROUND(
+                100.0 * h.cuentas_ausente / (COALESCE(t.cuentas_actuales, 0) + h.cuentas_ausente), 1
+            ) AS pct_potencial_subestimado
+        FROM huella_ausente h
+        LEFT JOIN totales_actuales t ON t.provincia = h.provincia
+        JOIN mart.dim_prestador p ON p.prestador_id = h.prestador_id
+        JOIN mart.dim_periodo d ON d.periodo_id = h.ultimo_periodo_con_reporte
+        WHERE h.cuentas_ausente > 0
+        ORDER BY h.ultimo_periodo_con_reporte DESC, pct_potencial_subestimado DESC
         """,
         {"periodo_id": periodo_id},
     )
