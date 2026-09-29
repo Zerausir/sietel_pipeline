@@ -474,7 +474,7 @@ def register_filters_summary_callback(prefix: str) -> None:
 
     @callback(
         Output(f"{prefix}-filters-summary", "children"),
-        Input(f"{prefix}-level", "value"),
+        Input(f"{prefix}-territory-id", "data"),
         Input(f"{prefix}-province", "value"),
         Input(f"{prefix}-province", "options"),
         Input(f"{prefix}-canton", "value"),
@@ -488,7 +488,7 @@ def register_filters_summary_callback(prefix: str) -> None:
         Input(f"{prefix}-isp-nombre", "options"),
     )
     def _actualizar_resumen(
-            level: str | None,
+            territory_id: str | None,
             province: str | None, province_opts: list[dict[str, str]] | None,
             canton: str | None, canton_opts: list[dict[str, str]] | None,
             parish: str | None, parish_opts: list[dict[str, str]] | None,
@@ -499,15 +499,18 @@ def register_filters_summary_callback(prefix: str) -> None:
         def _etiqueta(valor: str | None, opciones: list[dict[str, str]] | None) -> str:
             return next((o["label"] for o in (opciones or []) if o["value"] == valor), valor or "")
 
-        if not level or level == "NACIONAL":
+        # El nivel sale del territorio_id ya validado (components/
+        # territory_filters.py), no de los selectores: en el instante entre
+        # un clic y la limpieza de la cascada, un cantón de otra provincia
+        # no debe aparecer en el resumen.
+        level = (territory_id or "NACIONAL").split("|")[0]
+        if level == "NACIONAL":
             territorio_label = "Nacional"
         else:
-            partes = [NIVEL_LABELS.get(level, level)]
-            if province:
-                partes.append(_etiqueta(province, province_opts))
-            if canton and level in {"CANTON", "PARROQUIA"}:
+            partes = [NIVEL_LABELS.get(level, level), _etiqueta(province, province_opts)]
+            if level in {"CANTON", "PARROQUIA"}:
                 partes.append(_etiqueta(canton, canton_opts))
-            if parish and level == "PARROQUIA":
+            if level == "PARROQUIA":
                 partes.append(_etiqueta(parish, parish_opts))
             territorio_label = " › ".join(p for p in partes if p)
 

@@ -1529,6 +1529,154 @@ def get_territory_hierarchy() -> pd.DataFrame:
 
 
 @cache.memoize(timeout=3600)
+def get_territorios_validos() -> frozenset[str]:
+    """
+    Todos los territorio_id de líneas (mart.dim_territorio) -- para que
+    components/territory_filters.py valide la cadena Provincia→Cantón→
+    Parroquia antes de construir un territorio_id.
+    """
+    df = _read("SELECT territorio_id FROM mart.vw_dashboard_filtros_geograficos")
+    return frozenset(df["territorio_id"])
+
+
+NIVEL_HIJO = {"NACIONAL": "PROVINCIA", "PROVINCIA": "CANTON", "CANTON": "PARROQUIA"}
+
+
+@cache.memoize(timeout=300)
+def get_desglose_territorial(
+        territory_id: str,
+        periodo_id: int,
+        opera_estados: list[str] | None = None,
+        isp_nombres: list[str] | None = None,
+) -> pd.DataFrame:
+    """
+    "Cuentas por territorio" de Evolución: los territorios UN NIVEL más
+    abajo del elegido (Nacional → provincias, provincia → cantones,
+    cantón → parroquias), en el período dado, con:
+      - cuentas reportadas este mes y el anterior (solo lo reportado);
+      - prestadores que reportaron y esperados (panel de obligación), y
+        su cobertura -- sin ella, un territorio donde falta el reporte del
+        prestador principal se leería como un mercado pequeño.
+
+    Respeta Estado/Prestador filtrando ANTES de sumar, igual que el resto
+    de la página. Devuelve además una fila "Sin geografía asignada" cuando
+    las cuentas del territorio padre no se reparten completas entre sus
+    hijos (geografías sin código de provincia/cantón/parroquia, que el
+    mart solo asigna al nivel superior) -- así la suma de la tabla cuadra
+    con el total del padre. Esa fila no tiene prestadores/cobertura: no
+    corresponde a un territorio real.
+
+    Vacío si el territorio ya es una parroquia (no hay nivel inferior).
+    """
+    nivel_padre = territory_id.split("|")[0]
+    nivel_hijo = NIVEL_HIJO.get(nivel_padre)
+    if not nivel_hijo:
+        return pd.DataFrame()
+
+    partes = territory_id.split("|")
+    clauses_padre = ["dt.nivel_geografico = :nivel_hijo"]
+    params: dict[str, Any] = {"nivel_hijo": nivel_hijo, "territory_id": territory_id, "periodo_id": periodo_id}
+    if nivel_padre in {"PROVINCIA", "CANTON"}:
+        clauses_padre.append("dt.codigo_provincia = :codigo_provincia")
+        params["codigo_provincia"] = partes[1]
+    if nivel_padre == "CANTON":
+        clauses_padre.append("dt.codigo_canton = :codigo_canton")
+        params["codigo_canton"] = partes[2]
+
+    clauses_extra, params_extra = _filtros_participacion(opera_estados, isp_nombres)
+    params.update(params_extra)
+    filtros = "".join(f" AND {c}" for c in clauses_extra)
+
+    df = _read(
+        f"""
+        WITH periodos AS (
+            SELECT d.periodo_id,
+                   (SELECT a.periodo_id FROM mart.dim_periodo a
+                    WHERE a.periodo = (d.periodo - INTERVAL '1 month')::date) AS periodo_anterior_id
+            FROM mart.dim_periodo d
+            WHERE d.periodo_id = :periodo_id
+        ),
+        hijos AS (
+            SELECT dt.territorio_id, dt.nombre_geografico
+            FROM mart.dim_territorio dt
+            WHERE {' AND '.join(clauses_padre)}
+        ),
+        lineas AS (
+            -- Hijos y padre en la misma pasada: el padre sirve para la
+            -- fila "Sin geografía asignada".
+            SELECT b.territorio_id, f.periodo_id, SUM(f.total_lineas) AS cuentas
+            FROM mart.fact_lineas_geografia_mes f
+            JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
+            JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
+            CROSS JOIN periodos pe
+            WHERE f.periodo_id IN (pe.periodo_id, pe.periodo_anterior_id)
+              AND (b.territorio_id = :territory_id
+                   OR b.territorio_id IN (SELECT territorio_id FROM hijos))
+              {filtros}
+            GROUP BY b.territorio_id, f.periodo_id
+        ),
+        cobertura AS (
+            SELECT pn.territorio_id,
+                   COUNT(*) FILTER (WHERE pn.reporto) AS prestadores_reportaron,
+                   COUNT(*) AS prestadores_esperados
+            FROM mart.panel_reporte_prestador_mes pn
+            JOIN mart.dim_prestador p ON p.prestador_id = pn.prestador_id
+            WHERE pn.periodo_id = :periodo_id
+              AND pn.territorio_id IN (SELECT territorio_id FROM hijos)
+              {filtros}
+            GROUP BY pn.territorio_id
+        )
+        SELECT
+            h.territorio_id,
+            h.nombre_geografico AS territorio,
+            la.cuentas AS cuentas,
+            lp.cuentas AS cuentas_mes_anterior,
+            c.prestadores_reportaron,
+            c.prestadores_esperados,
+            FALSE AS es_sin_geografia
+        FROM hijos h
+        CROSS JOIN periodos pe
+        LEFT JOIN lineas la ON la.territorio_id = h.territorio_id AND la.periodo_id = pe.periodo_id
+        LEFT JOIN lineas lp ON lp.territorio_id = h.territorio_id AND lp.periodo_id = pe.periodo_anterior_id
+        LEFT JOIN cobertura c ON c.territorio_id = h.territorio_id
+        WHERE la.cuentas IS NOT NULL OR lp.cuentas IS NOT NULL OR c.prestadores_esperados IS NOT NULL
+        UNION ALL
+        SELECT
+            NULL, 'Sin geografía asignada',
+            pa.cuentas - COALESCE((SELECT SUM(la.cuentas) FROM lineas la
+                                   WHERE la.periodo_id = pe.periodo_id AND la.territorio_id <> :territory_id), 0),
+            pp.cuentas - COALESCE((SELECT SUM(lp.cuentas) FROM lineas lp
+                                   WHERE lp.periodo_id = pe.periodo_anterior_id AND lp.territorio_id <> :territory_id), 0),
+            NULL, NULL, TRUE
+        FROM periodos pe
+        LEFT JOIN lineas pa ON pa.territorio_id = :territory_id AND pa.periodo_id = pe.periodo_id
+        LEFT JOIN lineas pp ON pp.territorio_id = :territory_id AND pp.periodo_id = pe.periodo_anterior_id
+        """,
+        params,
+    )
+    if df.empty:
+        return df
+
+    for columna in ["cuentas", "cuentas_mes_anterior", "prestadores_reportaron", "prestadores_esperados"]:
+        df[columna] = pd.to_numeric(df[columna], errors="coerce")
+    sin_geo = df["es_sin_geografia"].astype(bool)
+    df = df[~sin_geo | (df["cuentas"].fillna(0) != 0) | (df["cuentas_mes_anterior"].fillna(0) != 0)].copy()
+
+    total = df["cuentas"].sum(min_count=1)
+    df["diferencia"] = df["cuentas"] - df["cuentas_mes_anterior"]
+    df["variacion_porcentaje"] = (100 * df["diferencia"] / df["cuentas_mes_anterior"]).where(
+        df["cuentas_mes_anterior"] > 0
+    )
+    df["porcentaje_del_total"] = (100 * df["cuentas"] / total) if total else None
+    df["porcentaje_cobertura"] = (100 * df["prestadores_reportaron"] / df["prestadores_esperados"]).where(
+        df["prestadores_esperados"] > 0
+    )
+    return df.sort_values(["es_sin_geografia", "cuentas"], ascending=[True, False], na_position="last").reset_index(
+        drop=True
+    )
+
+
+@cache.memoize(timeout=3600)
 def get_node_territory_hierarchy() -> pd.DataFrame:
     """
     Igual que get_territory_hierarchy() pero para geografía de NODOS
