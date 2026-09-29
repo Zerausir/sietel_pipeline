@@ -267,18 +267,13 @@ def serve_layout() -> html.Div:
             # el contenido de page_container al cambiar de pestaña, así que
             # este Store nunca se destruye ni se reinicia entre Evolución y
             # Concentración. Es lo que permite que el filtro geográfico
-            # (Nivel/Provincia/Cantón/Parroquia) se mantenga sincronizado
+            # (Provincia/Cantón/Parroquia, sin Nivel) se mantenga sincronizado
             # entre ambas páginas -- ver components/territory_filters.py.
+            # Todo en None = Nacional.
             dcc.Store(
                 id="shared-territory",
                 storage_type="memory",
-                data={
-                    "level": "NACIONAL",
-                    "province": None,
-                    "canton": None,
-                    "parish": None,
-                    "territory_id": "NACIONAL|ECUADOR",
-                },
+                data={"province": None, "canton": None, "parish": None},
             ),
             # AMPLIADO A UNIVERSAL (20-ago-2026, a pedido del usuario) --
             # antes solo sincronizaba Estado de operación y Prestador entre

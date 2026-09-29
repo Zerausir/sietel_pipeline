@@ -1,31 +1,40 @@
 """dashboard/pages/evolucion.py — Evolución del mercado: cuentas, prestadores, velocidades."""
 from __future__ import annotations
 
+import dash
+import dash_ag_grid as dag
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from dash import Input, Output, callback, dcc, html, register_page
+from dash import Input, Output, State, callback, dcc, html, register_page
 
 from components.filters_shared import (
     register_shared_filters_callbacks,
     register_universal_opera_isp_sync,
     shared_filters_layout,
 )
-from components.territory_filters import register_territory_callbacks, territory_filter_layout
+from components.territory_filters import (
+    register_territory_callbacks,
+    seleccion_desde_territorio,
+    territory_filter_layout,
+)
 from components.ui import (
     OKABE_ITO,
     PALETTE,
     build_linked_magnitude_variation_figure,
     build_sparkline_figure,
     chart_card,
+    clean_records,
     empty_figure,
     error_panel,
+    excel_download_button,
     filters_summary_bar,
     format_number,
     format_signed,
     kpi_card,
     month_year_picker,
     page_header,
+    register_excel_download_callback,
     register_filters_summary_callback,
     register_month_year_picker_callback,
     register_shared_period_sync,
@@ -33,6 +42,7 @@ from components.ui import (
 )
 from services.queries import (
     get_churn_history,
+    get_desglose_territorial,
     get_evolution_filtrado,
     get_periods,
     get_prestadores_nunca_reportaron_detalle,
@@ -146,6 +156,68 @@ def layout():
                                "Cambio absoluto frente al mes anterior para el último período visible."),
                 ],
             ),
+            html.H3(id="evo-desglose-titulo", children="Cuentas por territorio", style={"marginTop": "28px"}),
+            html.Section(
+                className="chart-grid",
+                children=[
+                    chart_card(
+                        "Cuentas reportadas por territorio", "evo-desglose-chart",
+                        "Un nivel más abajo del territorio elegido, en el último período visible. Haga clic en "
+                        "una barra (o en una fila de la tabla) para bajar a ese territorio.",
+                    ),
+                ],
+            ),
+            html.Section(
+                className="table-card",
+                children=[
+                    html.Div(
+                        className="chart-header",
+                        children=[
+                            html.H3("Detalle por territorio", className="chart-title"),
+                            html.P(
+                                "Solo cuentas reportadas (sin imputación). Lea las cuentas junto a la cobertura: "
+                                "un territorio donde falta el reporte de su prestador principal aparece con "
+                                "pocas cuentas y cobertura baja. Las cuentas de los territorios suman el total "
+                                "(incluida 'Sin geografía asignada', si existe); los prestadores no, porque un "
+                                "prestador puede operar en varios.",
+                                className="chart-subtitle",
+                            ),
+                        ],
+                    ),
+                    dag.AgGrid(
+                        id="evo-desglose-grid",
+                        columnDefs=[
+                            {"field": "territorio", "headerName": "Territorio", "minWidth": 220, "flex": 2},
+                            {"field": "cuentas", "headerName": "Cuentas", "type": "numericColumn",
+                             "minWidth": 120},
+                            {"field": "porcentaje_del_total", "headerName": "% del total",
+                             "type": "numericColumn", "minWidth": 110},
+                            {"field": "cuentas_mes_anterior", "headerName": "Cuentas (mes anterior)",
+                             "type": "numericColumn", "minWidth": 150},
+                            {"field": "diferencia", "headerName": "Diferencia", "type": "numericColumn",
+                             "minWidth": 120},
+                            {"field": "variacion_porcentaje", "headerName": "Variación %",
+                             "type": "numericColumn", "minWidth": 120},
+                            {"field": "prestadores_reportaron", "headerName": "Prestadores que reportaron",
+                             "type": "numericColumn", "minWidth": 170},
+                            {"field": "prestadores_esperados", "headerName": "Prestadores esperados",
+                             "type": "numericColumn", "minWidth": 150},
+                            {"field": "porcentaje_cobertura", "headerName": "Cobertura %",
+                             "type": "numericColumn", "minWidth": 120},
+                        ],
+                        rowData=[],
+                        defaultColDef={"sortable": True, "filter": True, "resizable": True},
+                        dashGridOptions={"theme": "themeBalham", "pagination": True, "paginationPageSize": 15,
+                                         "animateRows": True},
+                        # rowId = territorio_id: identifica la fila del clic aunque el
+                        # usuario haya ordenado o paginado la tabla.
+                        getRowId="params.data.territorio_id || 'SIN_GEOGRAFIA'",
+                        columnSize="responsiveSizeToFit",
+                        className="ag-theme-balham",
+                    ),
+                    excel_download_button("evo-desglose-grid"),
+                ],
+            ),
         ]
     )
 
@@ -157,6 +229,13 @@ register_month_year_picker_callback("evo-start-period")
 register_month_year_picker_callback("evo-end-period")
 register_shared_period_sync("evo-start-period", "evo-end-period")
 register_filters_summary_callback(PREFIX)
+register_excel_download_callback("evo-desglose-grid", "cuentas_por_territorio.xlsx")
+
+NOMBRE_NIVEL_HIJO = {"NACIONAL": "provincia", "PROVINCIA": "cantón", "CANTON": "parroquia"}
+COLUMNAS_DESGLOSE = [
+    "territorio_id", "territorio", "cuentas", "porcentaje_del_total", "cuentas_mes_anterior", "diferencia",
+    "variacion_porcentaje", "prestadores_reportaron", "prestadores_esperados", "porcentaje_cobertura",
+]
 
 
 @callback(
@@ -464,3 +543,90 @@ def update_evolution(
         rango_tasa_value, rango_tasa_note,
         nunca_reportaron_value, nunca_reportaron_note,
     )
+
+
+@callback(
+    Output("evo-desglose-titulo", "children"),
+    Output("evo-desglose-chart", "figure"),
+    Output("evo-desglose-grid", "rowData"),
+    Input("evo-territory-id", "data"),
+    Input("evo-start-period", "data"),
+    Input("evo-end-period", "data"),
+    Input("evo-opera-estado", "value"),
+    Input("evo-isp-nombre", "value"),
+)
+def update_desglose_territorial(territory_id, start_period, end_period, opera_estados, isp_nombres):
+    """
+    "Cuentas por territorio": un nivel más abajo del territorio elegido, en
+    el último período del rango (el mismo "Estado actual" de las tarjetas).
+    Ver services/queries.py:get_desglose_territorial().
+    """
+    if not territory_id or start_period is None or end_period is None:
+        return "Cuentas por territorio", empty_figure("Seleccione todos los filtros"), []
+    nivel = territory_id.split("|")[0]
+    if nivel not in NOMBRE_NIVEL_HIJO:
+        return ("Cuentas por territorio", empty_figure("La parroquia es el nivel más detallado disponible."), [])
+
+    periodo_id = max(int(start_period), int(end_period))
+    periods = get_periods()
+    fila = periods[periods["periodo_id"] == periodo_id]
+    etiqueta_periodo = str(fila.iloc[0]["anio_mes"]) if not fila.empty else str(periodo_id)
+    titulo = f"Cuentas por {NOMBRE_NIVEL_HIJO[nivel]} — {etiqueta_periodo}"
+
+    try:
+        df = get_desglose_territorial(territory_id, periodo_id, opera_estados or [], isp_nombres or [])
+    except Exception:
+        return titulo, empty_figure("Error al consultar PostgreSQL"), []
+    if df.empty or df["cuentas"].fillna(0).sum() == 0:
+        return titulo, empty_figure("Sin cuentas reportadas en este período para los filtros elegidos."), []
+
+    for columna in ["porcentaje_del_total", "variacion_porcentaje", "porcentaje_cobertura"]:
+        df[columna] = pd.to_numeric(df[columna], errors="coerce").round(2)
+
+    # Barras: solo territorios reales (la fila "Sin geografía asignada" va en
+    # la tabla, no se puede profundizar en ella), ordenados por cuentas.
+    TOP = 25
+    reales = df[~df["es_sin_geografia"].astype(bool)].sort_values("cuentas", ascending=False)
+    top = reales.head(TOP).iloc[::-1]
+    cobertura_txt = top["porcentaje_cobertura"].map(lambda v: "—" if pd.isna(v) else f"{v:.1f}%")
+    fig = go.Figure(go.Bar(
+        x=top["cuentas"], y=top["territorio"], orientation="h",
+        marker_color=PALETTE["blue"],
+        customdata=list(zip(top["territorio_id"], top["porcentaje_del_total"].fillna(0), cobertura_txt,
+                            top["prestadores_reportaron"].fillna(0), top["prestadores_esperados"].fillna(0))),
+        hovertemplate=(
+            "%{y}<br>Cuentas: %{x:,.0f} (%{customdata[1]:.1f}% del total)"
+            "<br>Prestadores: %{customdata[3]:,.0f} de %{customdata[4]:,.0f} esperados"
+            " · cobertura %{customdata[2]}<extra></extra>"
+        ),
+    ))
+    style_figure(fig, height=max(320, 22 * len(top) + 80), hovermode="closest")
+    fig.update_xaxes(title="Cuentas reportadas", tickformat=",")
+    fig.update_yaxes(title="")
+    if len(reales) > TOP:
+        fig.update_layout(title={"text": f"Top {TOP} de {len(reales)} -- la tabla trae todos", "font": {"size": 12}})
+
+    return titulo, fig, clean_records(df[COLUMNAS_DESGLOSE])
+
+
+@callback(
+    Output("shared-territory", "data", allow_duplicate=True),
+    Input("evo-desglose-chart", "clickData"),
+    Input("evo-desglose-grid", "cellClicked"),
+    prevent_initial_call=True,
+)
+def profundizar_territorio(click_barra, click_celda):
+    """
+    Clic en una barra o en una fila del desglose = elegir ese territorio en
+    el filtro. Escribe el store compartido; la restauración de
+    components/territory_filters.py actualiza los selectores (y con ellos
+    toda la página, y Concentración si el usuario cambia de pestaña).
+    """
+    territorio_id = None
+    if dash.ctx.triggered_id == "evo-desglose-chart" and click_barra:
+        territorio_id = click_barra["points"][0]["customdata"][0]
+    elif dash.ctx.triggered_id == "evo-desglose-grid" and click_celda:
+        territorio_id = click_celda.get("rowId")
+    if not territorio_id or territorio_id == "SIN_GEOGRAFIA":
+        return dash.no_update
+    return seleccion_desde_territorio(territorio_id)

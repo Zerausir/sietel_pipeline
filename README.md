@@ -254,7 +254,7 @@ sietel_pipeline/
 │   │   ├── ui.py                              # Helpers de UI: kpi_card, chart_card, month_year_picker,
 │   │   │                                      #   numeric_stepper, excel_download_button, filters_summary_bar,
 │   │   │                                      #   compute_mapbox_view, mapbox_polygon_layers
-│   │   ├── territory_filters.py               # Nivel/Provincia/Cantón/Parroquia, selección única -- Evolución/Concentración
+│   │   ├── territory_filters.py               # Provincia→Cantón→Parroquia en cascada, sin Nivel, selección única -- Evolución/Concentración
 │   │   ├── node_territory_filters.py          # Provincia/Cantón/Parroquia, sin Nivel, multi-select -- geografía de NODOS
 │   │   ├── lines_territory_filters.py         # Provincia/Cantón/Parroquia, sin Nivel, multi-select -- geografía de LÍNEAS (Control)
 │   │   └── filters_shared.py                  # Filtro de Estado de operación / Prestador, sincronizado
@@ -496,7 +496,11 @@ Seis páginas Dash (`use_pages=True`), servidas con `gunicorn`, autenticadas con
 - **Evolución** (`pages/evolucion.py`, `/sai/evolucion`): cuentas reportadas y prestadores por mes (**líneas**, no
   barras — series de hasta 180 puntos mensuales), tasa de entrega de reportes, prestadores que nunca han reportado,
   composición (área apilada) y diferencia mensual (barra) por rango de velocidad, ambas respetando Estado de operación y
-  Prestador.
+  Prestador. **Cuentas por territorio** (29-sep-2026): desglose un nivel más abajo del territorio elegido (Nacional →
+  provincias → cantones → parroquias) en el último período visible — barras y tabla con cuentas, % del total, variación
+  frente al mes anterior y prestadores que reportaron / esperados (cobertura), más una fila "Sin geografía asignada"
+  cuando hace falta para que la suma cuadre con el total. Clic en una barra o fila = bajar a ese territorio; descarga a
+  Excel.
 - **IHH y participación** (`pages/concentracion.py`, `/sai/concentracion`): evolución histórica del IHH (con alerta de
   *prestador dominante ausente*), cobertura del índice, líder de mercado, CR2/CR4, participación individual, aporte al
   IHH (barras horizontales top 15), y dos gráficos de un solo eje cada uno para el prestador seleccionado
@@ -529,7 +533,7 @@ scroll para llegar al período más reciente.
 
 | Componente                   | Usado por                    | Universo                                                                                 | Nivel geográfico                         | Selección                                               |
 |------------------------------|------------------------------|------------------------------------------------------------------------------------------|------------------------------------------|---------------------------------------------------------|
-| `territory_filters.py`       | Evolución, Concentración     | Geografía de **líneas** (`mart.dim_territorio`)                                          | Sí (Nacional/Provincia/Cantón/Parroquia) | Única, un valor por nivel                               |
+| `territory_filters.py`       | Evolución, Concentración     | Geografía de **líneas** (`mart.dim_territorio`)                                          | No (se deduce de lo elegido)             | Única, en cascada; vacío = Nacional                     |
 | `node_territory_filters.py`  | Mapa de nodos, Discrepancias | Geografía de **nodos** (`mart.dim_territorio_nodo`, CONALI)                              | No                                       | Múltiple e independiente por Provincia/Cantón/Parroquia |
 | `lines_territory_filters.py` | Control                      | Geografía de **líneas** (`mart.dim_territorio`, misma fuente que `territory_filters.py`) | No                                       | Múltiple e independiente                                |
 
@@ -541,8 +545,14 @@ filas).
 
 **Filtros sincronizados entre páginas** (`dcc.Store` fuera de `dash.page_container`, en `app.py`):
 
-- `shared-territory`: exclusivo de Evolución/Concentración — geografía de **líneas** reportadas, selección única con
-  Nivel geográfico.
+- `shared-territory`: exclusivo de Evolución/Concentración — geografía de **líneas** reportadas, selección única en
+  cascada `{province, canton, parish}` (todo vacío = Nacional). Sin "Nivel geográfico" desde el 29-sep-2026: el nivel
+  es el más profundo elegido. **Selección única a propósito**: el IHH y la participación se calculan sobre UN mercado
+  (un territorio de cualquier nivel); para ver varios territorios a la vez está el desglose "Cuentas por territorio" de
+  Evolución. Mismo mecanismo de restauración que los demás stores (navegación + store, escritura solo con un clic real
+  en UN selector), con una regla propia: la restauración entrega valores **y opciones** de los tres selectores en la
+  misma respuesta — `dcc.Dropdown` descarta un valor que no está en sus opciones, y sin esto el cantón se perdía al
+  cambiar de página (confirmado en navegador).
 - `shared-filters`: **universal** desde el 20-ago-2026 (antes exclusivo de Evolución/Concentración) — Estado de
   operación y Prestador viajan entre las **cinco** páginas (Evolución, Concentración, Control, Mapa de nodos,
   Discrepancias). Restauración disparada por navegación (`Input("obtel-url", "pathname")`), sin ninguna consulta a
@@ -565,7 +575,7 @@ nodos y Discrepancias de geografía, elegir un Prestador acota las opciones de P
 ese prestador tiene presencia real — restricción **adicional** sobre el filtrado cruzado ya existente entre los tres
 niveles geográficos, nunca un reemplazo (`services/queries.py:get_territorios_con_prestador` para geografía de líneas,
 `get_node_territorios_con_prestador` para geografía de nodos, `acotar_opciones_por_prestador` común a ambas).
-Deliberadamente **no** implementado en Evolución/Concentración, que ya tienen Nivel geográfico como primer filtro. La
+Deliberadamente **no** implementado en Evolución/Concentración, cuyo filtro geográfico es una cascada de selección única. La
 dirección contraria (territorio acotando las opciones de Prestador) sigue sin implementarse en Control — ver
 [Hoja de ruta](#hoja-de-ruta--pendientes).
 
