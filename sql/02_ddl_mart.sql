@@ -27,6 +27,14 @@
 --     anterior -- el chequeo que habria detectado el bug si hubiera
 --     existido antes.
 --
+-- SIN IMPUTACIÓN (29-sep-2026, decisión metodológica): capa2 ya no
+-- rellena huecos con el último valor conocido (LOCF) y este archivo ya no
+-- tiene ninguna columna reportado/imputado. Toda cifra de líneas del mart
+-- es exactamente lo reportado. Quién debía reportar un mes y no lo hizo
+-- sale de mart.panel_reporte_prestador_mes (sección 9b), que no contiene
+-- valores de líneas. La invariante bloqueante "sin columnas de
+-- imputación" (17.0) impide reintroducirla por accidente.
+--
 -- REGLAS PRINCIPALES (sin cambios respecto al diseño original)
 -- 1. Excluye por completo prestadores cuyo isp_nombre o
 --    nombrecomercial contenga la palabra "prueba".
@@ -85,13 +93,6 @@ CREATE INDEX IF NOT EXISTS idx_ldc_periodo_geografia
         codigo_provincia,
         codigo_ciudad,
         codigo_parroquia
-    );
-
-CREATE INDEX IF NOT EXISTS idx_ldc_calidad_periodo
-    ON capa2.lineas_dedicadas_consolidado (
-        es_reportado,
-        es_imputado,
-        periodo
     );
 
 ANALYZE capa2.lineas_dedicadas_consolidado;
@@ -200,8 +201,7 @@ mapa_ruc_peva AS (
     WHERE ruc_limpio_original IS NOT NULL
     ORDER BY
         peva_codigo_limpio,
-        periodo DESC,
-        COALESCE(es_reportado, FALSE) DESC
+        periodo DESC
 )
 SELECT
     b.*,
@@ -381,7 +381,6 @@ WITH ultimo_dato AS (
     ORDER BY
         prestador_id,
         periodo DESC,
-        COALESCE(es_reportado, FALSE) DESC,
         (isp_nombre IS NOT NULL) DESC
 ),
 rangos AS (
@@ -389,12 +388,11 @@ rangos AS (
         prestador_id,
         MIN(periodo)::date AS primer_periodo,
         MAX(periodo)::date AS ultimo_periodo,
-        MIN(periodo) FILTER (
-            WHERE COALESCE(es_reportado, FALSE)
-        )::date AS primer_periodo_reportado,
-        MAX(periodo) FILTER (
-            WHERE COALESCE(es_reportado, FALSE)
-        )::date AS ultimo_periodo_reportado,
+        -- Sin imputación, todo período de capa2 es un período reportado:
+        -- primer/ultimo_periodo_reportado coinciden con primer/ultimo_periodo.
+        -- Se conservan ambos nombres porque los consumen vistas y dashboard.
+        MIN(periodo)::date AS primer_periodo_reportado,
+        MAX(periodo)::date AS ultimo_periodo_reportado,
         COALESCE(
             BOOL_AND(es_cancelado_actual)
                 FILTER (
@@ -797,77 +795,23 @@ SELECT
     s.peva_codigo_limpio AS peva_codigo,
     s.geografia_id,
     SUM(s.total_lineas::numeric) AS total_lineas,
-    -- CORRECCIÓN (revisión profesional, 29-jul-2026): sumas condicionadas
-    -- POR FILA, no un booleano BOOL_OR/BOOL_AND aplicado después a la suma
-    -- completa. Un prestador con 10 combinaciones de tipoEnlace/tipoCliente
-    -- en una geografía, donde 9 fueron reportadas de verdad y 1 fue
-    -- rellenada por LOCF, debe repartir el total en 90%/10% -- no
-    -- clasificar el 100% como "imputado" solo porque *alguna* fila lo fue
-    -- (que era exactamente lo que hacía tiene_imputacion más abajo, usado
-    -- en fact_resumen_mercado_mes -- confirmado con datos reales de
-    -- diciembre 2013: 93% "imputado" en el dashboard vs. ~67% real en capa2).
-    SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.total_lineas::numeric ELSE 0 END) AS lineas_reportadas,
-    SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.total_lineas::numeric ELSE 0 END) AS lineas_imputadas,
-        SUM(s.total_usuarios::numeric) AS total_usuarios,
-        SUM(s.lineas_dl_sin_datos::numeric) AS lineas_dl_sin_datos,
-        SUM(s.lineas_dl_menos_1mbps::numeric) AS lineas_dl_menos_1mbps,
-        SUM(s.lineas_dl_1_10mbps::numeric) AS lineas_dl_1_10mbps,
-        SUM(s.lineas_dl_10_30mbps::numeric) AS lineas_dl_10_30mbps,
-        SUM(s.lineas_dl_30_100mbps::numeric) AS lineas_dl_30_100mbps,
-        SUM(s.lineas_dl_100mbps_1gbps::numeric) AS lineas_dl_100mbps_1gbps,
-        SUM(s.lineas_dl_1gbps_o_mas::numeric) AS lineas_dl_1gbps_o_mas,
-        SUM(s.lineas_ul_sin_datos::numeric) AS lineas_ul_sin_datos,
-        SUM(s.lineas_ul_menos_1mbps::numeric) AS lineas_ul_menos_1mbps,
-        SUM(s.lineas_ul_1_10mbps::numeric) AS lineas_ul_1_10mbps,
-        SUM(s.lineas_ul_10_30mbps::numeric) AS lineas_ul_10_30mbps,
-        SUM(s.lineas_ul_30_100mbps::numeric) AS lineas_ul_30_100mbps,
-        SUM(s.lineas_ul_100mbps_1gbps::numeric) AS lineas_ul_100mbps_1gbps,
-        SUM(s.lineas_ul_1gbps_o_mas::numeric) AS lineas_ul_1gbps_o_mas,
-        SUM(s.lineas_dl_banda_ancha::numeric) AS lineas_dl_banda_ancha,
-        SUM(s.lineas_dl_ultra_banda_ancha::numeric) AS lineas_dl_ultra_banda_ancha,
-    -- CORRECCIÓN (auditoría completa, 29-jul-2026): mismas sumas
-    -- condicionadas por fila, ahora para cada rango de velocidad --
-    -- necesarias para que fact_lineas_velocidad_mes clasifique
-    -- reportado/imputado POR RANGO, no con un solo booleano aplicado
-    -- a los 14 rangos por igual (ver bug confirmado con datos reales
-    -- de diciembre 2013: 93% imputado mostrado vs ~67% real).
-        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_dl_sin_datos::numeric ELSE 0 END) AS lineas_dl_sin_datos_reportado,
-        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_dl_sin_datos::numeric ELSE 0 END) AS lineas_dl_sin_datos_imputado,
-        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_dl_menos_1mbps::numeric ELSE 0 END) AS lineas_dl_menos_1mbps_reportado,
-        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_dl_menos_1mbps::numeric ELSE 0 END) AS lineas_dl_menos_1mbps_imputado,
-        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_dl_1_10mbps::numeric ELSE 0 END) AS lineas_dl_1_10mbps_reportado,
-        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_dl_1_10mbps::numeric ELSE 0 END) AS lineas_dl_1_10mbps_imputado,
-        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_dl_10_30mbps::numeric ELSE 0 END) AS lineas_dl_10_30mbps_reportado,
-        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_dl_10_30mbps::numeric ELSE 0 END) AS lineas_dl_10_30mbps_imputado,
-        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_dl_30_100mbps::numeric ELSE 0 END) AS lineas_dl_30_100mbps_reportado,
-        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_dl_30_100mbps::numeric ELSE 0 END) AS lineas_dl_30_100mbps_imputado,
-        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_dl_100mbps_1gbps::numeric ELSE 0 END) AS lineas_dl_100mbps_1gbps_reportado,
-        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_dl_100mbps_1gbps::numeric ELSE 0 END) AS lineas_dl_100mbps_1gbps_imputado,
-        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_dl_1gbps_o_mas::numeric ELSE 0 END) AS lineas_dl_1gbps_o_mas_reportado,
-        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_dl_1gbps_o_mas::numeric ELSE 0 END) AS lineas_dl_1gbps_o_mas_imputado,
-        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_ul_sin_datos::numeric ELSE 0 END) AS lineas_ul_sin_datos_reportado,
-        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_ul_sin_datos::numeric ELSE 0 END) AS lineas_ul_sin_datos_imputado,
-        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_ul_menos_1mbps::numeric ELSE 0 END) AS lineas_ul_menos_1mbps_reportado,
-        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_ul_menos_1mbps::numeric ELSE 0 END) AS lineas_ul_menos_1mbps_imputado,
-        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_ul_1_10mbps::numeric ELSE 0 END) AS lineas_ul_1_10mbps_reportado,
-        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_ul_1_10mbps::numeric ELSE 0 END) AS lineas_ul_1_10mbps_imputado,
-        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_ul_10_30mbps::numeric ELSE 0 END) AS lineas_ul_10_30mbps_reportado,
-        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_ul_10_30mbps::numeric ELSE 0 END) AS lineas_ul_10_30mbps_imputado,
-        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_ul_30_100mbps::numeric ELSE 0 END) AS lineas_ul_30_100mbps_reportado,
-        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_ul_30_100mbps::numeric ELSE 0 END) AS lineas_ul_30_100mbps_imputado,
-        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_ul_100mbps_1gbps::numeric ELSE 0 END) AS lineas_ul_100mbps_1gbps_reportado,
-        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_ul_100mbps_1gbps::numeric ELSE 0 END) AS lineas_ul_100mbps_1gbps_imputado,
-        SUM(CASE WHEN COALESCE(s.es_reportado, FALSE) THEN s.lineas_ul_1gbps_o_mas::numeric ELSE 0 END) AS lineas_ul_1gbps_o_mas_reportado,
-        SUM(CASE WHEN COALESCE(s.es_imputado, FALSE) THEN s.lineas_ul_1gbps_o_mas::numeric ELSE 0 END) AS lineas_ul_1gbps_o_mas_imputado,
-    BOOL_OR(
-        COALESCE(s.es_reportado, FALSE)
-    ) AS tiene_reportado,
-    BOOL_OR(
-        COALESCE(s.es_imputado, FALSE)
-    ) AS tiene_imputacion,
-    BOOL_AND(
-        COALESCE(s.es_reportado, FALSE)
-    ) AS es_totalmente_reportado,
+    SUM(s.total_usuarios::numeric) AS total_usuarios,
+    SUM(s.lineas_dl_sin_datos::numeric) AS lineas_dl_sin_datos,
+    SUM(s.lineas_dl_menos_1mbps::numeric) AS lineas_dl_menos_1mbps,
+    SUM(s.lineas_dl_1_10mbps::numeric) AS lineas_dl_1_10mbps,
+    SUM(s.lineas_dl_10_30mbps::numeric) AS lineas_dl_10_30mbps,
+    SUM(s.lineas_dl_30_100mbps::numeric) AS lineas_dl_30_100mbps,
+    SUM(s.lineas_dl_100mbps_1gbps::numeric) AS lineas_dl_100mbps_1gbps,
+    SUM(s.lineas_dl_1gbps_o_mas::numeric) AS lineas_dl_1gbps_o_mas,
+    SUM(s.lineas_ul_sin_datos::numeric) AS lineas_ul_sin_datos,
+    SUM(s.lineas_ul_menos_1mbps::numeric) AS lineas_ul_menos_1mbps,
+    SUM(s.lineas_ul_1_10mbps::numeric) AS lineas_ul_1_10mbps,
+    SUM(s.lineas_ul_10_30mbps::numeric) AS lineas_ul_10_30mbps,
+    SUM(s.lineas_ul_30_100mbps::numeric) AS lineas_ul_30_100mbps,
+    SUM(s.lineas_ul_100mbps_1gbps::numeric) AS lineas_ul_100mbps_1gbps,
+    SUM(s.lineas_ul_1gbps_o_mas::numeric) AS lineas_ul_1gbps_o_mas,
+    SUM(s.lineas_dl_banda_ancha::numeric) AS lineas_dl_banda_ancha,
+    SUM(s.lineas_dl_ultra_banda_ancha::numeric) AS lineas_dl_ultra_banda_ancha,
     COUNT(*) AS filas_origen
 FROM mart.stg_fuente_normalizada s
 GROUP BY
@@ -954,15 +898,6 @@ WITH agregados AS (
             AS valores_distintos_total_lineas,
         MAX(p.total_lineas) AS max_total_lineas,
         SUM(p.total_lineas) AS sum_total_lineas,
-        -- Propaga las sumas condicionadas por fila que ya vienen correctas
-        -- desde stg_lineas_por_peva_geografia_mes -- misma decisión
-        -- MAX-vs-SUM que total_lineas (ver estado_resolucion_peva más abajo),
-        -- para mantener la invariante lineas_reportadas + lineas_imputadas =
-        -- total_lineas también en este nivel de resolución por PEVA.
-        MAX(p.lineas_reportadas) AS max_lineas_reportadas,
-        SUM(p.lineas_reportadas) AS sum_lineas_reportadas,
-        MAX(p.lineas_imputadas) AS max_lineas_imputadas,
-        SUM(p.lineas_imputadas) AS sum_lineas_imputadas,
         MAX(p.total_usuarios) AS max_total_usuarios,
         SUM(p.total_usuarios) AS sum_total_usuarios,
         MAX(p.lineas_dl_sin_datos) AS max_lineas_dl_sin_datos,
@@ -997,65 +932,6 @@ WITH agregados AS (
         SUM(p.lineas_dl_banda_ancha) AS sum_lineas_dl_banda_ancha,
         MAX(p.lineas_dl_ultra_banda_ancha) AS max_lineas_dl_ultra_banda_ancha,
         SUM(p.lineas_dl_ultra_banda_ancha) AS sum_lineas_dl_ultra_banda_ancha,
-        MAX(p.lineas_dl_sin_datos_reportado) AS max_lineas_dl_sin_datos_reportado,
-        SUM(p.lineas_dl_sin_datos_reportado) AS sum_lineas_dl_sin_datos_reportado,
-        MAX(p.lineas_dl_sin_datos_imputado) AS max_lineas_dl_sin_datos_imputado,
-        SUM(p.lineas_dl_sin_datos_imputado) AS sum_lineas_dl_sin_datos_imputado,
-        MAX(p.lineas_dl_menos_1mbps_reportado) AS max_lineas_dl_menos_1mbps_reportado,
-        SUM(p.lineas_dl_menos_1mbps_reportado) AS sum_lineas_dl_menos_1mbps_reportado,
-        MAX(p.lineas_dl_menos_1mbps_imputado) AS max_lineas_dl_menos_1mbps_imputado,
-        SUM(p.lineas_dl_menos_1mbps_imputado) AS sum_lineas_dl_menos_1mbps_imputado,
-        MAX(p.lineas_dl_1_10mbps_reportado) AS max_lineas_dl_1_10mbps_reportado,
-        SUM(p.lineas_dl_1_10mbps_reportado) AS sum_lineas_dl_1_10mbps_reportado,
-        MAX(p.lineas_dl_1_10mbps_imputado) AS max_lineas_dl_1_10mbps_imputado,
-        SUM(p.lineas_dl_1_10mbps_imputado) AS sum_lineas_dl_1_10mbps_imputado,
-        MAX(p.lineas_dl_10_30mbps_reportado) AS max_lineas_dl_10_30mbps_reportado,
-        SUM(p.lineas_dl_10_30mbps_reportado) AS sum_lineas_dl_10_30mbps_reportado,
-        MAX(p.lineas_dl_10_30mbps_imputado) AS max_lineas_dl_10_30mbps_imputado,
-        SUM(p.lineas_dl_10_30mbps_imputado) AS sum_lineas_dl_10_30mbps_imputado,
-        MAX(p.lineas_dl_30_100mbps_reportado) AS max_lineas_dl_30_100mbps_reportado,
-        SUM(p.lineas_dl_30_100mbps_reportado) AS sum_lineas_dl_30_100mbps_reportado,
-        MAX(p.lineas_dl_30_100mbps_imputado) AS max_lineas_dl_30_100mbps_imputado,
-        SUM(p.lineas_dl_30_100mbps_imputado) AS sum_lineas_dl_30_100mbps_imputado,
-        MAX(p.lineas_dl_100mbps_1gbps_reportado) AS max_lineas_dl_100mbps_1gbps_reportado,
-        SUM(p.lineas_dl_100mbps_1gbps_reportado) AS sum_lineas_dl_100mbps_1gbps_reportado,
-        MAX(p.lineas_dl_100mbps_1gbps_imputado) AS max_lineas_dl_100mbps_1gbps_imputado,
-        SUM(p.lineas_dl_100mbps_1gbps_imputado) AS sum_lineas_dl_100mbps_1gbps_imputado,
-        MAX(p.lineas_dl_1gbps_o_mas_reportado) AS max_lineas_dl_1gbps_o_mas_reportado,
-        SUM(p.lineas_dl_1gbps_o_mas_reportado) AS sum_lineas_dl_1gbps_o_mas_reportado,
-        MAX(p.lineas_dl_1gbps_o_mas_imputado) AS max_lineas_dl_1gbps_o_mas_imputado,
-        SUM(p.lineas_dl_1gbps_o_mas_imputado) AS sum_lineas_dl_1gbps_o_mas_imputado,
-        MAX(p.lineas_ul_sin_datos_reportado) AS max_lineas_ul_sin_datos_reportado,
-        SUM(p.lineas_ul_sin_datos_reportado) AS sum_lineas_ul_sin_datos_reportado,
-        MAX(p.lineas_ul_sin_datos_imputado) AS max_lineas_ul_sin_datos_imputado,
-        SUM(p.lineas_ul_sin_datos_imputado) AS sum_lineas_ul_sin_datos_imputado,
-        MAX(p.lineas_ul_menos_1mbps_reportado) AS max_lineas_ul_menos_1mbps_reportado,
-        SUM(p.lineas_ul_menos_1mbps_reportado) AS sum_lineas_ul_menos_1mbps_reportado,
-        MAX(p.lineas_ul_menos_1mbps_imputado) AS max_lineas_ul_menos_1mbps_imputado,
-        SUM(p.lineas_ul_menos_1mbps_imputado) AS sum_lineas_ul_menos_1mbps_imputado,
-        MAX(p.lineas_ul_1_10mbps_reportado) AS max_lineas_ul_1_10mbps_reportado,
-        SUM(p.lineas_ul_1_10mbps_reportado) AS sum_lineas_ul_1_10mbps_reportado,
-        MAX(p.lineas_ul_1_10mbps_imputado) AS max_lineas_ul_1_10mbps_imputado,
-        SUM(p.lineas_ul_1_10mbps_imputado) AS sum_lineas_ul_1_10mbps_imputado,
-        MAX(p.lineas_ul_10_30mbps_reportado) AS max_lineas_ul_10_30mbps_reportado,
-        SUM(p.lineas_ul_10_30mbps_reportado) AS sum_lineas_ul_10_30mbps_reportado,
-        MAX(p.lineas_ul_10_30mbps_imputado) AS max_lineas_ul_10_30mbps_imputado,
-        SUM(p.lineas_ul_10_30mbps_imputado) AS sum_lineas_ul_10_30mbps_imputado,
-        MAX(p.lineas_ul_30_100mbps_reportado) AS max_lineas_ul_30_100mbps_reportado,
-        SUM(p.lineas_ul_30_100mbps_reportado) AS sum_lineas_ul_30_100mbps_reportado,
-        MAX(p.lineas_ul_30_100mbps_imputado) AS max_lineas_ul_30_100mbps_imputado,
-        SUM(p.lineas_ul_30_100mbps_imputado) AS sum_lineas_ul_30_100mbps_imputado,
-        MAX(p.lineas_ul_100mbps_1gbps_reportado) AS max_lineas_ul_100mbps_1gbps_reportado,
-        SUM(p.lineas_ul_100mbps_1gbps_reportado) AS sum_lineas_ul_100mbps_1gbps_reportado,
-        MAX(p.lineas_ul_100mbps_1gbps_imputado) AS max_lineas_ul_100mbps_1gbps_imputado,
-        SUM(p.lineas_ul_100mbps_1gbps_imputado) AS sum_lineas_ul_100mbps_1gbps_imputado,
-        MAX(p.lineas_ul_1gbps_o_mas_reportado) AS max_lineas_ul_1gbps_o_mas_reportado,
-        SUM(p.lineas_ul_1gbps_o_mas_reportado) AS sum_lineas_ul_1gbps_o_mas_reportado,
-        MAX(p.lineas_ul_1gbps_o_mas_imputado) AS max_lineas_ul_1gbps_o_mas_imputado,
-        SUM(p.lineas_ul_1gbps_o_mas_imputado) AS sum_lineas_ul_1gbps_o_mas_imputado,
-        BOOL_OR(p.tiene_reportado) AS tiene_reportado,
-        BOOL_OR(p.tiene_imputacion) AS tiene_imputacion,
-        BOOL_AND(p.es_totalmente_reportado) AS es_totalmente_reportado,
         SUM(p.filas_origen) AS filas_origen
     FROM mart.stg_lineas_por_peva_geografia_mes p
     GROUP BY
@@ -1095,16 +971,6 @@ SELECT
         WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_total_lineas
         ELSE a.max_total_lineas
     END AS total_lineas,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_reportadas
-        ELSE a.max_lineas_reportadas
-    END AS lineas_reportadas,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_imputadas
-        ELSE a.max_lineas_imputadas
-    END AS lineas_imputadas,
     CASE
         WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
         WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_total_usuarios
@@ -1190,149 +1056,6 @@ SELECT
         WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_ultra_banda_ancha
         ELSE a.max_lineas_dl_ultra_banda_ancha
     END AS lineas_dl_ultra_banda_ancha,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_sin_datos_reportado
-        ELSE a.max_lineas_dl_sin_datos_reportado
-    END AS lineas_dl_sin_datos_reportado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_sin_datos_imputado
-        ELSE a.max_lineas_dl_sin_datos_imputado
-    END AS lineas_dl_sin_datos_imputado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_menos_1mbps_reportado
-        ELSE a.max_lineas_dl_menos_1mbps_reportado
-    END AS lineas_dl_menos_1mbps_reportado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_menos_1mbps_imputado
-        ELSE a.max_lineas_dl_menos_1mbps_imputado
-    END AS lineas_dl_menos_1mbps_imputado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_1_10mbps_reportado
-        ELSE a.max_lineas_dl_1_10mbps_reportado
-    END AS lineas_dl_1_10mbps_reportado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_1_10mbps_imputado
-        ELSE a.max_lineas_dl_1_10mbps_imputado
-    END AS lineas_dl_1_10mbps_imputado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_10_30mbps_reportado
-        ELSE a.max_lineas_dl_10_30mbps_reportado
-    END AS lineas_dl_10_30mbps_reportado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_10_30mbps_imputado
-        ELSE a.max_lineas_dl_10_30mbps_imputado
-    END AS lineas_dl_10_30mbps_imputado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_30_100mbps_reportado
-        ELSE a.max_lineas_dl_30_100mbps_reportado
-    END AS lineas_dl_30_100mbps_reportado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_30_100mbps_imputado
-        ELSE a.max_lineas_dl_30_100mbps_imputado
-    END AS lineas_dl_30_100mbps_imputado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_100mbps_1gbps_reportado
-        ELSE a.max_lineas_dl_100mbps_1gbps_reportado
-    END AS lineas_dl_100mbps_1gbps_reportado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_100mbps_1gbps_imputado
-        ELSE a.max_lineas_dl_100mbps_1gbps_imputado
-    END AS lineas_dl_100mbps_1gbps_imputado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_1gbps_o_mas_reportado
-        ELSE a.max_lineas_dl_1gbps_o_mas_reportado
-    END AS lineas_dl_1gbps_o_mas_reportado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_dl_1gbps_o_mas_imputado
-        ELSE a.max_lineas_dl_1gbps_o_mas_imputado
-    END AS lineas_dl_1gbps_o_mas_imputado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_sin_datos_reportado
-        ELSE a.max_lineas_ul_sin_datos_reportado
-    END AS lineas_ul_sin_datos_reportado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_sin_datos_imputado
-        ELSE a.max_lineas_ul_sin_datos_imputado
-    END AS lineas_ul_sin_datos_imputado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_menos_1mbps_reportado
-        ELSE a.max_lineas_ul_menos_1mbps_reportado
-    END AS lineas_ul_menos_1mbps_reportado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_menos_1mbps_imputado
-        ELSE a.max_lineas_ul_menos_1mbps_imputado
-    END AS lineas_ul_menos_1mbps_imputado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_1_10mbps_reportado
-        ELSE a.max_lineas_ul_1_10mbps_reportado
-    END AS lineas_ul_1_10mbps_reportado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_1_10mbps_imputado
-        ELSE a.max_lineas_ul_1_10mbps_imputado
-    END AS lineas_ul_1_10mbps_imputado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_10_30mbps_reportado
-        ELSE a.max_lineas_ul_10_30mbps_reportado
-    END AS lineas_ul_10_30mbps_reportado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_10_30mbps_imputado
-        ELSE a.max_lineas_ul_10_30mbps_imputado
-    END AS lineas_ul_10_30mbps_imputado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_30_100mbps_reportado
-        ELSE a.max_lineas_ul_30_100mbps_reportado
-    END AS lineas_ul_30_100mbps_reportado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_30_100mbps_imputado
-        ELSE a.max_lineas_ul_30_100mbps_imputado
-    END AS lineas_ul_30_100mbps_imputado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_100mbps_1gbps_reportado
-        ELSE a.max_lineas_ul_100mbps_1gbps_reportado
-    END AS lineas_ul_100mbps_1gbps_reportado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_100mbps_1gbps_imputado
-        ELSE a.max_lineas_ul_100mbps_1gbps_imputado
-    END AS lineas_ul_100mbps_1gbps_imputado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_1gbps_o_mas_reportado
-        ELSE a.max_lineas_ul_1gbps_o_mas_reportado
-    END AS lineas_ul_1gbps_o_mas_reportado,
-    CASE
-        WHEN e.estado_resolucion_peva = 'TODOS_SIN_DATO' THEN NULL::numeric
-        WHEN e.estado_resolucion_peva = 'PEVA_VALORES_DIFERENTES_SUMADOS' THEN a.sum_lineas_ul_1gbps_o_mas_imputado
-        ELSE a.max_lineas_ul_1gbps_o_mas_imputado
-    END AS lineas_ul_1gbps_o_mas_imputado,
-    a.tiene_reportado,
-    a.tiene_imputacion,
-    a.es_totalmente_reportado,
     a.filas_origen,
     e.estado_resolucion_peva
 FROM agregados a
@@ -1371,6 +1094,82 @@ CREATE INDEX idx_fact_lineas_resolucion
     );
 
 -- ============================================================
+-- 9b. PANEL DE OBLIGACION DE REPORTE (SIN VALORES)
+-- ============================================================
+
+-- Reemplaza la única función legítima que cumplían las filas imputadas:
+-- saber QUIÉN DEBÍA reportar en un territorio y mes, y no lo hizo. Una fila
+-- por (periodo, territorio, prestador) desde el primer hasta el último
+-- reporte real del prestador en ese territorio; `reporto` indica si ese mes
+-- exacto hubo reporte real. NO contiene ningún valor de líneas -- nada
+-- se hereda ni se estima.
+--
+-- Es el denominador de la cobertura (fact_resumen_mercado_mes,
+-- fact_participacion_mercado, fact_ihh_geografico) y la base de las filas
+-- SIN_REPORTE_ESTE_MES de participación.
+--
+-- La ventana es por prestador y TERRITORIO, no por combinación
+-- (tipoEnlace/tipoCliente/...): el LOCF anterior solo marcaba un hueco si la
+-- MISMA combinación reaparecía después, así que un prestador que cambiaba
+-- de combinación entre dos reportes quedaba fuera del denominador en el
+-- mes que no reportó. Aquí cuenta como esperado.
+--
+-- Límite conocido (igual que antes): tras el ÚLTIMO reporte real de un
+-- prestador no hay filas -- este panel no puede distinguir "salió del
+-- mercado" de "dejó de reportar". Ese caso lo cubren
+-- vw_prestadores_reporte_detenido y la alerta de prestador dominante
+-- ausente (sección 14); quien nunca reportó, vw_prestadores_sin_reportar.
+
+CREATE MATERIALIZED VIEW mart.panel_reporte_prestador_mes AS
+WITH reporte AS (
+    SELECT DISTINCT
+        f.periodo_id,
+        f.periodo,
+        b.territorio_id,
+        f.prestador_id
+    FROM mart.fact_lineas_geografia_mes f
+    JOIN mart.bridge_geografia_territorio b
+      ON b.geografia_id = f.geografia_id
+),
+ventana AS (
+    SELECT
+        territorio_id,
+        prestador_id,
+        MIN(periodo) AS primer_periodo,
+        MAX(periodo) AS ultimo_periodo
+    FROM reporte
+    GROUP BY
+        territorio_id,
+        prestador_id
+)
+SELECT
+    d.periodo_id,
+    d.periodo,
+    v.territorio_id,
+    v.prestador_id,
+    (r.prestador_id IS NOT NULL) AS reporto
+FROM ventana v
+JOIN mart.dim_periodo d
+  ON d.periodo BETWEEN v.primer_periodo AND v.ultimo_periodo
+LEFT JOIN reporte r
+  ON  r.periodo_id = d.periodo_id
+  AND r.territorio_id = v.territorio_id
+  AND r.prestador_id = v.prestador_id;
+
+CREATE UNIQUE INDEX uq_panel_reporte_prestador_mes
+    ON mart.panel_reporte_prestador_mes (
+        periodo_id,
+        territorio_id,
+        prestador_id
+    );
+
+CREATE INDEX idx_panel_reporte_territorio
+    ON mart.panel_reporte_prestador_mes (
+        territorio_id,
+        periodo_id
+    );
+
+-- ============================================================
 -- 10. HECHO BASE DE VELOCIDADES
 -- ============================================================
 
@@ -1384,14 +1183,6 @@ SELECT
     v.orden_rango,
     v.rango_velocidad,
     v.total_lineas_velocidad,
-    -- CORRECCIÓN (auditoría completa, 29-jul-2026): antes se usaba
-    -- es_totalmente_reportado/tiene_imputacion (dos booleanos NO
-    -- complementarios) para clasificar CADA valor de rango como 100%
-    -- reportado o 100% imputado. Ahora se usan directamente los valores
-    -- ya resueltos por rango desde fact_lineas_geografia_mes.
-    v.lineas_reportadas,
-    v.lineas_imputadas,
-    f.tiene_imputacion,
     f.estado_resolucion_peva
 FROM mart.fact_lineas_geografia_mes f
 CROSS JOIN LATERAL (
@@ -1400,121 +1191,91 @@ CROSS JOIN LATERAL (
             'DESCARGA',
             1,
             'Sin datos',
-            f.lineas_dl_sin_datos,
-            f.lineas_dl_sin_datos_reportado,
-            f.lineas_dl_sin_datos_imputado
+            f.lineas_dl_sin_datos
         ),
         (
             'DESCARGA',
             2,
             'Menos de 1 Mbps',
-            f.lineas_dl_menos_1mbps,
-            f.lineas_dl_menos_1mbps_reportado,
-            f.lineas_dl_menos_1mbps_imputado
+            f.lineas_dl_menos_1mbps
         ),
         (
             'DESCARGA',
             3,
             '1 a 10 Mbps',
-            f.lineas_dl_1_10mbps,
-            f.lineas_dl_1_10mbps_reportado,
-            f.lineas_dl_1_10mbps_imputado
+            f.lineas_dl_1_10mbps
         ),
         (
             'DESCARGA',
             4,
             '10 a 30 Mbps',
-            f.lineas_dl_10_30mbps,
-            f.lineas_dl_10_30mbps_reportado,
-            f.lineas_dl_10_30mbps_imputado
+            f.lineas_dl_10_30mbps
         ),
         (
             'DESCARGA',
             5,
             '30 a 100 Mbps',
-            f.lineas_dl_30_100mbps,
-            f.lineas_dl_30_100mbps_reportado,
-            f.lineas_dl_30_100mbps_imputado
+            f.lineas_dl_30_100mbps
         ),
         (
             'DESCARGA',
             6,
             '100 Mbps a 1 Gbps',
-            f.lineas_dl_100mbps_1gbps,
-            f.lineas_dl_100mbps_1gbps_reportado,
-            f.lineas_dl_100mbps_1gbps_imputado
+            f.lineas_dl_100mbps_1gbps
         ),
         (
             'DESCARGA',
             7,
             '1 Gbps o más',
-            f.lineas_dl_1gbps_o_mas,
-            f.lineas_dl_1gbps_o_mas_reportado,
-            f.lineas_dl_1gbps_o_mas_imputado
+            f.lineas_dl_1gbps_o_mas
         ),
         (
             'SUBIDA',
             1,
             'Sin datos',
-            f.lineas_ul_sin_datos,
-            f.lineas_ul_sin_datos_reportado,
-            f.lineas_ul_sin_datos_imputado
+            f.lineas_ul_sin_datos
         ),
         (
             'SUBIDA',
             2,
             'Menos de 1 Mbps',
-            f.lineas_ul_menos_1mbps,
-            f.lineas_ul_menos_1mbps_reportado,
-            f.lineas_ul_menos_1mbps_imputado
+            f.lineas_ul_menos_1mbps
         ),
         (
             'SUBIDA',
             3,
             '1 a 10 Mbps',
-            f.lineas_ul_1_10mbps,
-            f.lineas_ul_1_10mbps_reportado,
-            f.lineas_ul_1_10mbps_imputado
+            f.lineas_ul_1_10mbps
         ),
         (
             'SUBIDA',
             4,
             '10 a 30 Mbps',
-            f.lineas_ul_10_30mbps,
-            f.lineas_ul_10_30mbps_reportado,
-            f.lineas_ul_10_30mbps_imputado
+            f.lineas_ul_10_30mbps
         ),
         (
             'SUBIDA',
             5,
             '30 a 100 Mbps',
-            f.lineas_ul_30_100mbps,
-            f.lineas_ul_30_100mbps_reportado,
-            f.lineas_ul_30_100mbps_imputado
+            f.lineas_ul_30_100mbps
         ),
         (
             'SUBIDA',
             6,
             '100 Mbps a 1 Gbps',
-            f.lineas_ul_100mbps_1gbps,
-            f.lineas_ul_100mbps_1gbps_reportado,
-            f.lineas_ul_100mbps_1gbps_imputado
+            f.lineas_ul_100mbps_1gbps
         ),
         (
             'SUBIDA',
             7,
             '1 Gbps o más',
-            f.lineas_ul_1gbps_o_mas,
-            f.lineas_ul_1gbps_o_mas_reportado,
-            f.lineas_ul_1gbps_o_mas_imputado
+            f.lineas_ul_1gbps_o_mas
         )
 ) AS v(
     tipo_velocidad,
     orden_rango,
     rango_velocidad,
-    total_lineas_velocidad,
-    lineas_reportadas,
-    lineas_imputadas
+    total_lineas_velocidad
 );
 
 CREATE UNIQUE INDEX uq_fact_lineas_velocidad_mes
@@ -1536,6 +1297,12 @@ CREATE INDEX idx_fact_velocidad_periodo
 -- 11. RESUMEN DE EVOLUCION DEL MERCADO
 -- ============================================================
 
+-- Solo cifras reportadas. La cobertura (cuántos de los prestadores
+-- esperados en ese territorio y mes reportaron de verdad) viene del panel
+-- de la sección 9b y acompaña siempre al total: un total bajo con
+-- cobertura baja es falta de reporte, no caída del mercado. La base es el
+-- panel para que un mes en que NADIE reportó siga apareciendo (con
+-- cobertura 0), en vez de desaparecer de la serie.
 CREATE MATERIALIZED VIEW mart.fact_resumen_mercado_mes AS
 WITH prestador_territorio AS (
     SELECT
@@ -1543,21 +1310,7 @@ WITH prestador_territorio AS (
         b.territorio_id,
         f.prestador_id,
         SUM(f.total_lineas) AS total_lineas_prestador,
-        SUM(f.total_usuarios) AS total_usuarios_prestador,
-        -- CORRECCIÓN (revisión profesional, 29-jul-2026): antes se usaba
-        -- CASE WHEN f.tiene_imputacion (un booleano "¿ALGO se imputó?")
-        -- para clasificar el total_lineas COMPLETO de cada prestador como
-        -- 100% reportado o 100% imputado. Un prestador con 9 de 10
-        -- combinaciones reportadas y solo 1 imputada caía entero en
-        -- "imputado". Ahora se suman directamente lineas_reportadas/
-        -- lineas_imputadas, que ya vienen resueltas correctamente por fila
-        -- desde stg_lineas_por_peva_geografia_mes -- la invariante
-        -- lineas_reportadas + lineas_imputadas = total_lineas se mantiene
-        -- de principio a fin de la cadena.
-        SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas_prestador,
-        SUM(COALESCE(f.lineas_imputadas, 0)) AS lineas_imputadas_prestador,
-        BOOL_OR(f.tiene_imputacion)
-            AS tiene_imputacion
+        SUM(f.total_usuarios) AS total_usuarios_prestador
     FROM mart.fact_lineas_geografia_mes f
     JOIN mart.bridge_geografia_territorio b
       ON b.geografia_id = f.geografia_id
@@ -1566,7 +1319,7 @@ WITH prestador_territorio AS (
         b.territorio_id,
         f.prestador_id
 ),
-mercado AS (
+reportado AS (
     SELECT
         periodo_id,
         territorio_id,
@@ -1583,18 +1336,37 @@ mercado AS (
         ) AS numero_prestadores_cero,
         COUNT(*) FILTER (
             WHERE total_lineas_prestador IS NULL
-        ) AS numero_prestadores_sin_dato,
-        SUM(lineas_reportadas_prestador)
-            AS lineas_reportadas,
-        SUM(lineas_imputadas_prestador)
-            AS lineas_imputadas,
-        COUNT(*) FILTER (
-            WHERE tiene_imputacion
-        ) AS numero_prestadores_imputados
+        ) AS numero_prestadores_sin_dato
     FROM prestador_territorio
     GROUP BY
         periodo_id,
         territorio_id
+),
+esperado AS (
+    SELECT
+        periodo_id,
+        territorio_id,
+        COUNT(*) AS numero_prestadores_esperados
+    FROM mart.panel_reporte_prestador_mes
+    GROUP BY
+        periodo_id,
+        territorio_id
+),
+mercado AS (
+    SELECT
+        e.periodo_id,
+        e.territorio_id,
+        r.total_lineas,
+        r.total_usuarios,
+        COALESCE(r.numero_prestadores, 0) AS numero_prestadores,
+        COALESCE(r.numero_prestadores_con_lineas, 0) AS numero_prestadores_con_lineas,
+        COALESCE(r.numero_prestadores_cero, 0) AS numero_prestadores_cero,
+        COALESCE(r.numero_prestadores_sin_dato, 0) AS numero_prestadores_sin_dato,
+        e.numero_prestadores_esperados
+    FROM esperado e
+    LEFT JOIN reportado r
+      ON r.periodo_id = e.periodo_id
+     AND r.territorio_id = e.territorio_id
 ),
 con_fechas AS (
     SELECT
@@ -1613,15 +1385,13 @@ SELECT
     a.numero_prestadores_con_lineas,
     a.numero_prestadores_cero,
     a.numero_prestadores_sin_dato,
-    a.numero_prestadores_imputados,
-    a.lineas_reportadas,
-    a.lineas_imputadas,
+    a.numero_prestadores_esperados,
     ROUND(
         100.0
-        * a.lineas_imputadas
-        / NULLIF(a.total_lineas, 0),
-        6
-    ) AS porcentaje_imputado,
+        * a.numero_prestadores
+        / NULLIF(a.numero_prestadores_esperados, 0),
+        4
+    ) AS porcentaje_cobertura_prestadores,
     a.total_lineas - pm.total_lineas
         AS diferencia_mensual_lineas,
     ROUND(
@@ -1685,11 +1455,7 @@ WITH mercado AS (
         f.orden_rango,
         f.rango_velocidad,
         SUM(f.total_lineas_velocidad)
-            AS total_lineas,
-        SUM(f.lineas_reportadas)
-            AS lineas_reportadas,
-        SUM(f.lineas_imputadas)
-            AS lineas_imputadas
+            AS total_lineas
     FROM mart.fact_lineas_velocidad_mes f
     JOIN mart.bridge_geografia_territorio b
       ON b.geografia_id = f.geografia_id
@@ -1728,14 +1494,6 @@ SELECT
         / NULLIF(a.total_lineas_tipo, 0),
         6
     ) AS participacion_rango_porcentaje,
-    a.lineas_reportadas,
-    a.lineas_imputadas,
-    ROUND(
-        100.0
-        * a.lineas_imputadas
-        / NULLIF(a.total_lineas, 0),
-        6
-    ) AS porcentaje_imputado,
     a.total_lineas - pm.total_lineas
         AS diferencia_mensual,
     ROUND(
@@ -1791,18 +1549,22 @@ CREATE INDEX idx_fact_velocidad_mercado_filtro
 -- 13. PARTICIPACION DE MERCADO
 -- ============================================================
 
+-- Práctica de autoridades de competencia (DOJ/FTC, Ofcom, ARCEP): la
+-- participación y el IHH se calculan con lo que cada prestador reportó ese
+-- mes exacto. Un prestador esperado (panel 9b) que no reportó queda FUERA
+-- del índice, con estado SIN_REPORTE_ESTE_MES y sin ningún valor -- no se
+-- le asigna 0% ni su último valor conocido.
+--
+-- El denominador es la suma de lo reportado por quienes reportaron ese
+-- mes, consistente con el numerador.
 CREATE MATERIALIZED VIEW mart.fact_participacion_mercado AS
-WITH prestador_territorio AS (
+WITH lineas_prestador AS (
     SELECT
         f.periodo_id,
         b.territorio_id,
         f.prestador_id,
         SUM(f.total_lineas)
-            AS total_lineas_prestador,
-        SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas,
-        SUM(COALESCE(f.lineas_imputadas, 0)) AS lineas_imputadas,
-        BOOL_OR(f.tiene_reportado) AS tiene_reportado,
-        BOOL_OR(f.tiene_imputacion) AS tiene_imputacion
+            AS total_lineas_prestador
     FROM mart.fact_lineas_geografia_mes f
     JOIN mart.bridge_geografia_territorio b
       ON b.geografia_id = f.geografia_id
@@ -1811,30 +1573,29 @@ WITH prestador_territorio AS (
         b.territorio_id,
         f.prestador_id
 ),
--- CORRECCIÓN METODOLÓGICA (31-jul-2026, a pedido del usuario, siguiendo
--- práctica de autoridades de competencia -- DOJ/FTC, Ofcom, ARCEP: el HHI
--- y la participación de mercado NUNCA se calculan con datos imputados o
--- heredados. Un prestador sin reporte real ese mes exacto queda FUERA del
--- cálculo del índice -- no se le asigna 0% (eso también sería fabricar un
--- hecho que no conocemos), ni se hereda su último valor conocido (eso
--- distorsiona la estructura competitiva real de ese mes específico).
---
--- El denominador ("mercado") se recalcula de forma consistente con el
--- numerador: es la suma de lineas_reportadas SOLO entre quienes
--- reportaron ese mes -- no el total mezclado con imputados. Si se usara
--- el total mezclado como denominador mientras el numerador es solo
--- reportado, TODOS los prestadores quedarían con participación
--- artificialmente baja por igual -- un sesgo sutil pero real.
+prestador_territorio AS (
+    SELECT
+        p.periodo_id,
+        p.territorio_id,
+        p.prestador_id,
+        p.reporto AS tiene_reportado,
+        l.total_lineas_prestador
+    FROM mart.panel_reporte_prestador_mes p
+    LEFT JOIN lineas_prestador l
+      ON l.periodo_id = p.periodo_id
+     AND l.territorio_id = p.territorio_id
+     AND l.prestador_id = p.prestador_id
+),
 mercado_reportado AS (
     SELECT
         periodo_id,
         territorio_id,
-        SUM(lineas_reportadas) FILTER (WHERE tiene_reportado)
+        SUM(total_lineas_prestador) FILTER (WHERE tiene_reportado)
             AS total_lineas_mercado_reportado,
         COUNT(*) FILTER (WHERE tiene_reportado)
             AS numero_prestadores_reportaron_periodo,
         COUNT(*)
-            AS numero_prestadores_totales_periodo
+            AS numero_prestadores_esperados_periodo
     FROM prestador_territorio
     GROUP BY periodo_id, territorio_id
 ),
@@ -1843,7 +1604,7 @@ con_mercado AS (
         p.*,
         m.total_lineas_mercado_reportado,
         m.numero_prestadores_reportaron_periodo,
-        m.numero_prestadores_totales_periodo
+        m.numero_prestadores_esperados_periodo
     FROM prestador_territorio p
     JOIN mercado_reportado m
       ON m.periodo_id = p.periodo_id
@@ -1854,14 +1615,14 @@ ranking AS (
         c.*,
         CASE
             WHEN c.tiene_reportado
-             AND c.lineas_reportadas > 0
+             AND c.total_lineas_prestador > 0
              AND c.total_lineas_mercado_reportado > 0
             THEN ROW_NUMBER() OVER (
                 PARTITION BY
                     c.periodo_id,
                     c.territorio_id
                 ORDER BY
-                    c.lineas_reportadas DESC NULLS LAST,
+                    c.total_lineas_prestador DESC NULLS LAST,
                     c.prestador_id
             )
         END AS ranking_prestador
@@ -1875,39 +1636,36 @@ SELECT
     total_lineas_mercado_reportado AS total_lineas_mercado,
     CASE
         WHEN tiene_reportado
-         AND lineas_reportadas > 0
+         AND total_lineas_prestador > 0
          AND total_lineas_mercado_reportado > 0
-        THEN ROUND(lineas_reportadas / total_lineas_mercado_reportado, 10)
+        THEN ROUND(total_lineas_prestador / total_lineas_mercado_reportado, 10)
     END AS participacion_decimal,
     CASE
         WHEN tiene_reportado
-         AND lineas_reportadas > 0
+         AND total_lineas_prestador > 0
          AND total_lineas_mercado_reportado > 0
-        THEN ROUND(100.0 * lineas_reportadas / total_lineas_mercado_reportado, 8)
+        THEN ROUND(100.0 * total_lineas_prestador / total_lineas_mercado_reportado, 8)
     END AS participacion_porcentaje,
     CASE
         WHEN tiene_reportado
-         AND lineas_reportadas > 0
+         AND total_lineas_prestador > 0
          AND total_lineas_mercado_reportado > 0
-        THEN ROUND(POWER(100.0 * lineas_reportadas / total_lineas_mercado_reportado, 2), 8)
+        THEN ROUND(POWER(100.0 * total_lineas_prestador / total_lineas_mercado_reportado, 2), 8)
     END AS aporte_ihh,
     ranking_prestador,
     ranking_prestador = 1 AS es_lider,
     CASE
         WHEN NOT tiene_reportado THEN 'SIN_REPORTE_ESTE_MES'
-        WHEN lineas_reportadas > 0 THEN 'POSITIVO'
-        WHEN lineas_reportadas = 0 THEN 'CERO'
+        WHEN total_lineas_prestador > 0 THEN 'POSITIVO'
+        WHEN total_lineas_prestador = 0 THEN 'CERO'
         ELSE 'SIN_DATO'
     END AS estado_lineas,
-    lineas_reportadas,
-    lineas_imputadas,
     tiene_reportado,
-    tiene_imputacion,
     numero_prestadores_reportaron_periodo,
-    numero_prestadores_totales_periodo,
+    numero_prestadores_esperados_periodo,
     ROUND(
         100.0 * numero_prestadores_reportaron_periodo
-        / NULLIF(numero_prestadores_totales_periodo, 0),
+        / NULLIF(numero_prestadores_esperados_periodo, 0),
         4
     ) AS porcentaje_cobertura_prestadores
 FROM ranking;
@@ -1941,7 +1699,7 @@ CREATE MATERIALIZED VIEW mart.fact_ihh_geografico AS
 -- líneas dedicadas -- sección 9.10). NO modifica el IHH/CR2/CR4 en
 -- absoluto -- es exclusivamente informativa, mismo principio que
 -- porcentaje_cobertura_prestadores: el índice se calcula igual que siempre
--- (solo con lineas_reportadas de quien reportó ese mes), y esta bandera
+-- (solo con lo reportado por quien reportó ese mes), y esta bandera
 -- se agrega al lado para que nadie lo lea sin ese contexto.
 --
 -- Por qué hace falta además de porcentaje_cobertura_prestadores: esa
@@ -2038,15 +1796,19 @@ SELECT
     territorio_id,
     MAX(total_lineas_mercado)
         AS total_lineas_mercado,
-    COUNT(*) AS numero_prestadores,
+    -- Conteos solo sobre quienes reportaron ese mes (los SIN_REPORTE del
+    -- panel no tienen cifra); los esperados van en la cobertura de abajo.
     COUNT(*) FILTER (
-        WHERE total_lineas_prestador > 0
+        WHERE tiene_reportado
+    ) AS numero_prestadores,
+    COUNT(*) FILTER (
+        WHERE tiene_reportado AND total_lineas_prestador > 0
     ) AS numero_prestadores_con_lineas,
     COUNT(*) FILTER (
-        WHERE total_lineas_prestador = 0
+        WHERE tiene_reportado AND total_lineas_prestador = 0
     ) AS numero_prestadores_cero,
     COUNT(*) FILTER (
-        WHERE total_lineas_prestador IS NULL
+        WHERE tiene_reportado AND total_lineas_prestador IS NULL
     ) AS numero_prestadores_sin_dato,
     ROUND(
         COALESCE(
@@ -2081,34 +1843,16 @@ SELECT
         ),
         6
     ) AS cr4,
-    SUM(lineas_reportadas)
-        AS lineas_reportadas_mercado,
-    SUM(lineas_imputadas)
-        AS lineas_imputadas_mercado,
-    ROUND(
-        100.0
-        * SUM(lineas_imputadas)
-        / NULLIF(
-            MAX(total_lineas_mercado),
-            0
-        ),
-        6
-    ) AS porcentaje_imputado_mercado,
-    COUNT(*) FILTER (
-        WHERE tiene_imputacion
-    ) AS numero_prestadores_imputados,
     -- COBERTURA (31-jul-2026): el IHH/CR2/CR4 de arriba se calculan SOLO
-    -- sobre lineas_reportadas de quien reportó ese mes exacto -- estas
-    -- columnas dejan explícito CUÁNTO del universo conocido queda
-    -- representado, para que el índice nunca se lea sin su contexto de
-    -- completitud (mismo principio ya aplicado en Evolución con
-    -- "% de prestadores que reportaron").
+    -- sobre lo reportado ese mes exacto -- estas columnas dejan explícito
+    -- CUÁNTOS de los prestadores esperados (panel 9b) quedan representados,
+    -- para que el índice nunca se lea sin su contexto de completitud.
     MAX(numero_prestadores_reportaron_periodo) AS numero_prestadores_reportaron,
-    MAX(numero_prestadores_totales_periodo) AS numero_prestadores_registrados,
+    MAX(numero_prestadores_esperados_periodo) AS numero_prestadores_esperados,
     ROUND(
         100.0
         * MAX(numero_prestadores_reportaron_periodo)
-        / NULLIF(MAX(numero_prestadores_totales_periodo), 0),
+        / NULLIF(MAX(numero_prestadores_esperados_periodo), 0),
         4
     ) AS porcentaje_cobertura_prestadores
 FROM mart.fact_participacion_mercado
@@ -2168,10 +1912,8 @@ SELECT
     f.numero_prestadores_con_lineas,
     f.numero_prestadores_cero,
     f.numero_prestadores_sin_dato,
-    f.numero_prestadores_imputados,
-    f.lineas_reportadas,
-    f.lineas_imputadas,
-    f.porcentaje_imputado,
+    f.numero_prestadores_esperados,
+    f.porcentaje_cobertura_prestadores,
     f.diferencia_mensual_lineas,
     f.variacion_mensual_porcentaje,
     f.diferencia_anual_lineas,
@@ -2209,9 +1951,6 @@ SELECT
     f.total_lineas,
     f.total_lineas_tipo,
     f.participacion_rango_porcentaje,
-    f.lineas_reportadas,
-    f.lineas_imputadas,
-    f.porcentaje_imputado,
     f.diferencia_mensual,
     f.variacion_mensual_porcentaje,
     f.diferencia_anual,
@@ -2259,12 +1998,9 @@ SELECT
     f.ranking_prestador,
     f.es_lider,
     f.estado_lineas,
-    f.lineas_reportadas,
-    f.lineas_imputadas,
     f.tiene_reportado,
-    f.tiene_imputacion,
     f.numero_prestadores_reportaron_periodo,
-    f.numero_prestadores_totales_periodo,
+    f.numero_prestadores_esperados_periodo,
     f.porcentaje_cobertura_prestadores
 FROM mart.fact_participacion_mercado f
 JOIN mart.dim_periodo d
@@ -2306,12 +2042,8 @@ SELECT
     f.participacion_lider,
     f.cr2,
     f.cr4,
-    f.lineas_reportadas_mercado,
-    f.lineas_imputadas_mercado,
-    f.porcentaje_imputado_mercado,
-    f.numero_prestadores_imputados,
     f.numero_prestadores_reportaron,
-    f.numero_prestadores_registrados,
+    f.numero_prestadores_esperados,
     f.porcentaje_cobertura_prestadores,
     f.prestador_dominante_ausente,
     f.prestadores_dominantes_ausentes_nombres
@@ -2408,6 +2140,7 @@ ANALYZE mart.bridge_geografia_territorio;
 ANALYZE mart.stg_lineas_por_peva_geografia_mes;
 ANALYZE mart.audit_conflictos_peva;
 ANALYZE mart.fact_lineas_geografia_mes;
+ANALYZE mart.panel_reporte_prestador_mes;
 ANALYZE mart.fact_lineas_velocidad_mes;
 ANALYZE mart.fact_resumen_mercado_mes;
 ANALYZE mart.fact_velocidad_mercado_mes;
@@ -2454,8 +2187,7 @@ ANALYZE mart.fact_ihh_geografico;
 -- 125 son no_operativo (cancelados/revocados -- nunca llegaron a operar,
 -- universo administrativo distinto), y 56 quedan en zona_gris (estado
 -- ambiguo, requiere revisión caso por caso, nunca se fuerzan a una
--- categoría por conveniencia estadística -- mismo principio que
--- es_reportado/es_imputado en Capa 3).
+-- categoría por conveniencia estadística).
 --
 -- fuera_de_gracia usa la misma regla del año de gracia que
 -- dashboard/services/queries.py:get_reporting_summary (un año calendario
@@ -2557,9 +2289,7 @@ WHERE v.tiene_reportes = FALSE
 -- tras verificar en producción que usar MAX(periodo) sin ajuste produce
 -- falsos positivos: cuando sietel_mart_pipeline avanza y carga meses nuevos,
 -- los últimos ~3 meses todavía están incompletos por rezago normal de
--- reporte (mismo fenómeno ya documentado en 9.7 -- construir_capa2.py solo
--- rellena huecos interiores, así que el borde de la ventana no tiene
--- "futuro" contra el cual anclar el LOCF). Confirmado con datos reales
+-- reporte (mismo fenómeno ya documentado en 9.7). Confirmado con datos reales
 -- (05-ago-2026): al cargar hasta dic-2025, 13 prestadores con último
 -- reporte real en sep-2025 (exactamente 3 meses de rezago) aparecían como
 -- "detenidos" cuando en realidad solo estaban esperando su próximo reporte
@@ -2595,13 +2325,13 @@ SELECT
 FROM mart.dim_prestador p
 CROSS JOIN periodo_confiable pc
 LEFT JOIN LATERAL (
-    SELECT SUM(f.lineas_reportadas) AS lineas_reportadas
+    SELECT SUM(f.total_lineas) AS lineas_reportadas
     FROM mart.fact_lineas_geografia_mes f
     WHERE f.prestador_id = p.prestador_id
       AND f.periodo = p.ultimo_periodo_reportado
 ) ultimo ON TRUE
 LEFT JOIN LATERAL (
-    SELECT SUM(f.lineas_reportadas) AS total_lineas_historico
+    SELECT SUM(f.total_lineas) AS total_lineas_historico
     FROM mart.fact_lineas_geografia_mes f
     WHERE f.prestador_id = p.prestador_id
 ) historico ON TRUE
@@ -2836,8 +2566,9 @@ DECLARE
     n       bigint;
     errores text[] := ARRAY[]::text[];
 BEGIN
-    -- capa2: una sola fila por (llave natural, periodo) -- si no, el LOCF
-    -- de construir_capa2.py copia métricas entre filas "empatadas".
+    -- capa2: una sola fila por (llave natural, periodo) -- si no, la
+    -- consolidación de variantes de construir_capa2.py falló y se
+    -- duplicarían métricas.
     SELECT COUNT(*) INTO n FROM (
         SELECT 1 FROM capa2.lineas_dedicadas_consolidado
         GROUP BY peva_codigo, par_codigo, tipoenlace, tipocliente,
@@ -2873,17 +2604,33 @@ BEGIN
                           + lineas_ul_100mbps_1gbps + lineas_ul_1gbps_o_mas);
     IF n > 0 THEN errores := errores || format('17.8: %s filas donde los rangos de velocidad no suman total_lineas', n); END IF;
 
-    -- 17.9
-    SELECT COUNT(*) INTO n FROM mart.fact_lineas_geografia_mes
-    WHERE total_lineas IS NOT NULL
-      AND total_lineas <> COALESCE(lineas_reportadas, 0) + COALESCE(lineas_imputadas, 0);
-    IF n > 0 THEN errores := errores || format('17.9: %s filas con reportadas + imputadas <> total_lineas', n); END IF;
+    -- 17.9 (29-sep-2026): SIN IMPUTACIÓN. Ninguna columna de capa2 ni de
+    -- mart puede volver a llevar datos o marcas de imputación -- si alguien
+    -- reintroduce el relleno (LOCF u otro), el refresco se aborta aquí.
+    -- pg_attribute y no information_schema.columns: este último NO lista
+    -- las vistas materializadas, que son la mayoría de los hechos de mart.
+    SELECT COUNT(*) INTO n
+    FROM pg_attribute a
+    JOIN pg_class t ON t.oid = a.attrelid
+    JOIN pg_namespace ns ON ns.oid = t.relnamespace
+    WHERE ns.nspname IN ('capa2', 'mart')
+      AND t.relkind IN ('r', 'p', 'v', 'm')
+      AND a.attnum > 0 AND NOT a.attisdropped
+      AND t.relname NOT LIKE '%\_prev'
+      AND (a.attname ILIKE '%imput%' OR a.attname IN ('es_reportado', 'grupo_carry'));
+    IF n > 0 THEN errores := errores || format('17.9: %s columnas de imputación en capa2/mart', n); END IF;
 
-    -- 17.10
-    SELECT COUNT(*) INTO n FROM mart.fact_lineas_velocidad_mes
-    WHERE total_lineas_velocidad IS NOT NULL
-      AND total_lineas_velocidad <> COALESCE(lineas_reportadas, 0) + COALESCE(lineas_imputadas, 0);
-    IF n > 0 THEN errores := errores || format('17.10: %s filas por velocidad con reportadas + imputadas <> total', n); END IF;
+    -- 17.10 (29-sep-2026): el panel de obligación (9b) es coherente con los
+    -- hechos -- quien reportó según el panel es exactamente quien tiene
+    -- filas reales, y nadie reporta más que los esperados.
+    SELECT COUNT(*) INTO n FROM mart.fact_resumen_mercado_mes
+    WHERE numero_prestadores > numero_prestadores_esperados
+       OR numero_prestadores <> (
+            SELECT COUNT(*) FROM mart.panel_reporte_prestador_mes p
+            WHERE p.periodo_id = fact_resumen_mercado_mes.periodo_id
+              AND p.territorio_id = fact_resumen_mercado_mes.territorio_id
+              AND p.reporto);
+    IF n > 0 THEN errores := errores || format('17.10: %s filas con panel de reporte incoherente', n); END IF;
 
     -- 17.12 (a)
     SELECT COUNT(*) INTO n FROM mart.fact_participacion_mercado
@@ -3016,68 +2763,34 @@ WHERE total_lineas IS NOT NULL
 
 -- Resultado esperado: cero filas.
 
--- 17.9. NUEVA (auditoría completa, 29-jul-2026).
--- lineas_reportadas + lineas_imputadas debe ser igual a total_lineas en
--- fact_lineas_geografia_mes -- esta es la invariante que el bug de
--- clasificación por booleano (BOOL_OR/BOOL_AND sobre un grupo mixto)
--- podía romper. Con la corrección de las secciones 7 y 9 (sumas
--- condicionadas por fila en vez de un booleano sobre el total agregado),
--- esta consulta debe devolver siempre cero filas.
-SELECT
-    periodo_id,
-    prestador_id,
-    geografia_id,
-    estado_resolucion_peva,
-    total_lineas,
-    lineas_reportadas,
-    lineas_imputadas,
-    (COALESCE(lineas_reportadas, 0) + COALESCE(lineas_imputadas, 0)) AS suma_reportado_imputado
-FROM mart.fact_lineas_geografia_mes
-WHERE total_lineas IS NOT NULL
-  AND total_lineas <> (COALESCE(lineas_reportadas, 0) + COALESCE(lineas_imputadas, 0));
+-- 17.9. SIN IMPUTACIÓN (29-sep-2026) -- ninguna columna de imputación en
+-- capa2/mart (bloqueante en 17.0).
+SELECT ns.nspname AS esquema, t.relname AS objeto, a.attname AS columna
+FROM pg_attribute a
+JOIN pg_class t ON t.oid = a.attrelid
+JOIN pg_namespace ns ON ns.oid = t.relnamespace
+WHERE ns.nspname IN ('capa2', 'mart')
+  AND t.relkind IN ('r', 'p', 'v', 'm')
+  AND a.attnum > 0 AND NOT a.attisdropped
+  AND t.relname NOT LIKE '%\_prev'
+  AND (a.attname ILIKE '%imput%' OR a.attname IN ('es_reportado', 'grupo_carry'));
 
 -- Resultado esperado: cero filas.
 
--- 17.10. NUEVA (auditoría completa, 29-jul-2026).
--- Misma invariante que 17.9, pero POR RANGO DE VELOCIDAD, en
--- fact_lineas_velocidad_mes -- este era el caso más grave encontrado
--- (es_totalmente_reportado/tiene_imputacion no eran complementarios).
-SELECT
-    periodo_id,
-    prestador_id,
-    geografia_id,
-    tipo_velocidad,
-    rango_velocidad,
-    total_lineas_velocidad,
-    lineas_reportadas,
-    lineas_imputadas
-FROM mart.fact_lineas_velocidad_mes
-WHERE total_lineas_velocidad IS NOT NULL
-  AND total_lineas_velocidad <> (COALESCE(lineas_reportadas, 0) + COALESCE(lineas_imputadas, 0));
-
--- Resultado esperado: cero filas.
-
--- 17.11. NUEVA (auditoría completa, 29-jul-2026) -- verificación puntual
--- del hallazgo original que motivó esta auditoría: diciembre 2013 mostraba
--- 93.76% imputado antes de la corrección (ver sección 11, lineas_reportadas
--- = 141233 / lineas_imputadas = 2121874 en fact_resumen_mercado_mes).
--- Después de la corrección, debe acercarse al ~66.7% observado directamente
--- en capa2.lineas_dedicadas_consolidado para ese mismo mes
--- (751979 reportadas / 1511154 imputadas, calculado a mano el 29-jul-2026).
+-- 17.10. Cobertura nacional por mes: prestadores esperados (panel 9b) vs.
+-- los que reportaron de verdad.
 SELECT
     periodo,
     total_lineas,
-    lineas_reportadas,
-    lineas_imputadas,
-    porcentaje_imputado
+    numero_prestadores,
+    numero_prestadores_esperados,
+    porcentaje_cobertura_prestadores
 FROM mart.vw_dashboard_evolucion
 WHERE territorio_id = 'NACIONAL|ECUADOR'
-  AND periodo = '2013-12-01';
-
--- Resultado esperado: porcentaje_imputado cercano a 66-67, NO 93.76.
+ORDER BY periodo;
 
 -- 17.12. NUEVA (31-jul-2026) -- IHH/participación exclusivamente sobre
--- datos reales. Verifica: (a) ningún prestador sin reporte real ese mes
+-- lo reportado. Verifica: (a) ningún prestador sin reporte real ese mes
 -- tiene participación o aporte_ihh distinto de NULL; (b) la cobertura de
 -- prestadores está siempre entre 0 y 100; (c) CR2 <= CR4 <= 100 siempre.
 SELECT *

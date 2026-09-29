@@ -1,4 +1,17 @@
 -- ============================================================================
+-- OBSOLETO (29-sep-2026) -- NO APLICAR.
+-- Parche histórico: su contenido ya vive en sql/02_ddl_mart.sql, que el DAG
+-- reconstruye completo en cada corrida. Además referencia columnas de
+-- imputación (lineas_reportadas/lineas_imputadas/...) que se eliminaron del
+-- mart; aplicarlo sobre el mart actual lo rompería. Se conserva solo como
+-- registro histórico. La guarda de abajo aborta antes de ejecutar nada, ya
+-- sea con `psql -f` (ON_ERROR_STOP) o enviado por un driver (el comando
+-- \set no es SQL y falla de inmediato).
+-- ============================================================================
+\set ON_ERROR_STOP on
+DO $$ BEGIN RAISE EXCEPTION '07_patch_vw_prestadores_reporte_detenido.sql es obsoleto: ver sql/02_ddl_mart.sql'; END $$;
+
+-- ============================================================================
 -- sql/07_patch_vw_prestadores_reporte_detenido.sql
 --
 -- Parche puntual para aplicar en producción SIN esperar al próximo refresco

@@ -13,27 +13,27 @@ lo contrario: capa2 debe conservar la MISMA granularidad que la fuente
 cruda -- una fila por (peva_codigo, par_codigo, periodo, tipoEnlace,
 tipoCliente, nivelComparticion, portador) -- con isp_ruc y peva_codigo SIN
 limpiar (mart.stg_fuente_normalizada, sección 2 de 02_ddl_mart.sql, hace su
-propia limpieza y resuelve prestador_id/geografia_id), y con columnas
-es_reportado/es_imputado que mart.stg_lineas_por_peva_geografia_mes
-(sección 7) consume directamente. Esta versión corrige eso: ya no
-precomputa prestador_id ni geografia_id, y el relleno de huecos interiores
-(LOCF) opera sobre la combinación completa de 6 columnas -- exactamente la
-llave natural documentada de dbo.VALineasDedicadas / va_lineas_dedicadas_resumen --
-en vez de una llave agregada que rompía la sección 7 de 02_ddl_mart.sql.
+propia limpieza y resuelve prestador_id/geografia_id). Esta versión ya no
+precomputa prestador_id ni geografia_id: conserva la combinación completa
+de 6 columnas -- exactamente la llave natural documentada de
+dbo.VALineasDedicadas / va_lineas_dedicadas_resumen.
 
-CAMBIO METODOLÓGICO DELIBERADO respecto al notebook original (documentado
-para revisión de Mercados -- ver discusión completa en el hilo de trabajo):
-  - El notebook original rellenaba (LOCF) desde el último reporte real
-    HACIA ADELANTE, indefinidamente, hasta una fecha de corte hardcodeada.
-    Este script SOLO rellena huecos INTERIORES -- entre el primer y el
-    último reporte real de cada combinación (peva_codigo, par_codigo,
-    tipoEnlace, tipoCliente, nivelComparticion, portador). NUNCA
-    extrapola más allá del último reporte real.
-  - Cada fila queda marcada con es_reportado / es_imputado, visibles para
-    el futuro dashboard de consistencia de datos.
-  - Esto NO resuelve, por sí solo, si interpolar huecos interiores es
-    aceptable para el uso regulatorio de este dato -- eso lo sigue
-    debiendo confirmar Mercados.
+SIN IMPUTACIÓN (29-sep-2026, decisión metodológica): capa2 contiene
+EXCLUSIVAMENTE lo que los prestadores reportaron. Versiones anteriores
+rellenaban los huecos interiores de cada combinación con el último valor
+conocido (LOCF) y marcaban cada fila con es_reportado/es_imputado. Se
+eliminó por completo porque:
+  - el faltante de un prestador que deja de reportar es no aleatorio
+    (MNAR): heredar su último valor supone "sin cambios" cuando lo más
+    probable es lo contrario;
+  - cuando un prestador SÍ entregó su reporte pero omitió una
+    combinación (parroquia/tipo de enlace...), lo más probable es un cero
+    estructural, no un faltante -- el LOCF inventaba líneas ahí;
+  - los totales mixtos (reportado + imputado) terminaban usándose en
+    cálculos del dashboard que debían ser solo reportados.
+Quién DEBÍA reportar en cada mes y no lo hizo ya no se deduce de filas
+imputadas: lo resuelve mart.panel_reporte_prestador_mes (sección 9b de
+sql/02_ddl_mart.sql), que no contiene ningún valor de líneas.
 
 EXCLUSIÓN aplicada en este script (además de lo que ya excluye Capa 3 por
 su cuenta -- ver sección 2 de 02_ddl_mart.sql, ruc_prueba/peva_prueba):
@@ -89,10 +89,8 @@ def _engine():
     return create_engine(url, connect_args={"connect_timeout": 10})
 
 
-# Columnas de ATRIBUTOS que se transportan como snapshot atómico durante el
-# relleno de huecos interiores (constantes dentro de cada grupo de llave
-# natural, pero pueden variar de una carga a otra -- ej. isp_nombre tras un
-# cambio de razón social).
+# Columnas de ATRIBUTOS del PEVA/ISP/parroquia -- constantes dentro de
+# cada (llave natural, periodo), se consolidan con MAX/BOOL_OR.
 COLUMNAS_ATRIBUTOS = [
     "isp_codigo", "isp_ruc", "isp_nombre", "isp_tipopersona", "isp_regional",
     "nombrecomercial", "opera", "resolucion", "fechapermiso",
@@ -101,8 +99,8 @@ COLUMNAS_ATRIBUTOS = [
     "opera_actual", "es_cancelado_actual",
 ]
 
-# Columnas de MÉTRICAS -- mismo principio de snapshot atómico (nunca
-# columna por columna de forma independiente).
+# Columnas de MÉTRICAS -- se suman al consolidar variantes de la misma
+# llave (ver CTE "reportado" más abajo).
 COLUMNAS_METRICAS = [
     "total_lineas", "total_usuarios",
     "lineas_dl_sin_datos", "lineas_dl_menos_1mbps", "lineas_dl_1_10mbps",
@@ -114,15 +112,12 @@ COLUMNAS_METRICAS = [
     "lineas_dl_banda_ancha", "lineas_dl_ultra_banda_ancha",
 ]
 
-COLUMNAS_SNAPSHOT = COLUMNAS_ATRIBUTOS + COLUMNAS_METRICAS
-
-# Llave natural para el relleno de huecos interiores -- misma granularidad
+# Llave natural de capa2 -- misma granularidad
 # que dbo.VALineasDedicadas / staging.va_lineas_dedicadas_resumen.
 LLAVE_NATURAL = ["peva_codigo", "par_codigo", "tipoenlace", "tipocliente", "nivelcomparticion", "portador"]
 
 
 def _sentencias_construccion() -> list[str]:
-    bloque_snapshot = "\n".join(f"    FIRST_VALUE({c}) OVER w AS {c}," for c in COLUMNAS_SNAPSHOT)
     llave_sql = ", ".join(LLAVE_NATURAL)
     bloque_atributos_agregados = "\n".join(
         f"            BOOL_OR({c}) AS {c}," if c == "es_cancelado_actual" else f"            MAX({c}) AS {c},"
@@ -183,13 +178,10 @@ def _sentencias_construccion() -> list[str]:
     -- CORRECCIÓN (28-sep-2026): SIETEL reporta algunos valores de la llave
     -- con espacios al inicio (ej. ' NEDETEL S.A.' y 'NEDETEL S.A.' en el
     -- mismo PEVA/parroquia/mes -- SQL Server los trata como distintos). El
-    -- BTRIM de arriba los unifica en la MISMA llave y el MISMO período, y
-    -- antes de esta corrección ambas filas llegaban separadas a la ventana
-    -- FIRST_VALUE de abajo: como son "pares" en ORDER BY periodo, las dos
-    -- recibían las métricas de UNA sola de ellas -- una variante se contaba
-    -- doble y la otra se perdía. Confirmado en producción: 102 pares, 96
-    -- llaves descuadradas contra la fuente, -19.346 líneas netas
-    -- (2024-2026). Aquí se consolidan sumando las métricas, de modo que
+    -- BTRIM de arriba los unifica en la MISMA llave y el MISMO período.
+    -- Confirmado en producción: 102 pares, 96 llaves descuadradas contra
+    -- la fuente, -19.346 líneas netas (2024-2026) cuando no se
+    -- consolidaban. Aquí se consolidan sumando las métricas, de modo que
     -- quede exactamente una fila por (llave, periodo). Los atributos son
     -- de PEVA/ISP/parroquia, constantes dentro del grupo -- MAX es seguro.
     reportado AS (
@@ -199,73 +191,8 @@ def _sentencias_construccion() -> list[str]:
 {bloque_metricas_sumadas}
         FROM reportado_crudo
         GROUP BY {llave_sql}, periodo
-    ),
-    series AS (
-        SELECT {llave_sql}, MIN(periodo) AS periodo_min, MAX(periodo) AS periodo_max
-        FROM reportado
-        GROUP BY {llave_sql}
-    ),
-    -- Calendario FIJO y pequeño (0 a 240 meses = 20 años de margen), en vez
-    -- de un generate_series() correlacionado por fila (LATERAL). Con
-    -- límites literales, Postgres estima su cardinalidad con precisión
-    -- (~241 filas, sabido de antemano) -- con el LATERAL anterior, el
-    -- planificador asumía 1000 filas por cada una de las ~94,000
-    -- combinaciones (43 millones), cuando el promedio real es ~24. Esa
-    -- mala estimación forzaba un Sort gigantesco antes del Merge Join.
-    calendario AS (
-        SELECT gs AS indice_mes
-        FROM generate_series(0, 240) AS gs
-    ),
-    spine AS (
-        SELECT
-            s.{", s.".join(LLAVE_NATURAL)},
-            (s.periodo_min + (c.indice_mes || ' months')::interval)::date AS periodo
-        FROM series s
-        JOIN calendario c
-          ON c.indice_mes <= (
-                (DATE_PART('year', s.periodo_max) - DATE_PART('year', s.periodo_min)) * 12
-                + (DATE_PART('month', s.periodo_max) - DATE_PART('month', s.periodo_min))
-             )
-    ),
-    combinado AS (
-        SELECT
-            sp.{", sp.".join(LLAVE_NATURAL)},
-            sp.periodo,
-            r.isp_codigo, r.isp_ruc, r.isp_nombre, r.isp_tipopersona, r.isp_regional,
-            r.nombrecomercial, r.opera, r.resolucion, r.fechapermiso,
-            r.codigo_provincia, r.codigo_ciudad, r.codigo_parroquia,
-            r.pro_nombre, r.ciu_nombre, r.par_nombre, r.regional_reporte,
-            r.opera_actual, r.es_cancelado_actual,
-            r.total_lineas, r.total_usuarios,
-            r.lineas_dl_sin_datos, r.lineas_dl_menos_1mbps, r.lineas_dl_1_10mbps,
-            r.lineas_dl_10_30mbps, r.lineas_dl_30_100mbps, r.lineas_dl_100mbps_1gbps,
-            r.lineas_dl_1gbps_o_mas,
-            r.lineas_ul_sin_datos, r.lineas_ul_menos_1mbps, r.lineas_ul_1_10mbps,
-            r.lineas_ul_10_30mbps, r.lineas_ul_30_100mbps, r.lineas_ul_100mbps_1gbps,
-            r.lineas_ul_1gbps_o_mas,
-            r.lineas_dl_banda_ancha, r.lineas_dl_ultra_banda_ancha,
-            (r.peva_codigo IS NOT NULL) AS es_reportado
-        FROM spine sp
-        LEFT JOIN reportado r
-          ON {" AND ".join(f"COALESCE(r.{c}, '§SIN_VALOR§') = COALESCE(sp.{c}, '§SIN_VALOR§')" for c in LLAVE_NATURAL)}
-         AND r.periodo = sp.periodo
-    ),
-    agrupado AS (
-        SELECT
-            *,
-            COUNT(CASE WHEN es_reportado THEN 1 END) OVER (
-                PARTITION BY {", ".join(LLAVE_NATURAL)} ORDER BY periodo
-            ) AS grupo_carry
-        FROM combinado
     )
-    SELECT
-        {", ".join(LLAVE_NATURAL)},
-        periodo,
-{bloque_snapshot}
-        es_reportado,
-        (FIRST_VALUE(periodo) OVER w <> periodo) AS es_imputado
-    FROM agrupado
-    WINDOW w AS (PARTITION BY {", ".join(LLAVE_NATURAL)}, grupo_carry ORDER BY periodo)
+    SELECT * FROM reportado
     """
 
     return [
@@ -300,7 +227,6 @@ def _sentencias_construccion() -> list[str]:
 
 
 def _sql_conteo_dry_run() -> str:
-    llave_sql = ", ".join(LLAVE_NATURAL)
     llave_select = (
         "v.peva_codigo, v.par_codigo, "
         "BTRIM(v.tipoenlace) AS tipoenlace, BTRIM(v.tipocliente) AS tipocliente, "
@@ -308,26 +234,14 @@ def _sql_conteo_dry_run() -> str:
     )
     return f"""
     WITH reportado AS (
-        SELECT
+        SELECT DISTINCT
             {llave_select},
             MAKE_DATE(v.anio::int, v.periodoNumero::int, 1) AS periodo
         FROM analitico.v_lineas_dedicadas_resumen v
         WHERE v.peva_codigo NOT IN (SELECT peva_codigo FROM calidad.vw_pevas_excluidos)
-    ),
-    series AS (
-        SELECT {llave_sql}, MIN(periodo) AS periodo_min, MAX(periodo) AS periodo_max,
-               COUNT(DISTINCT periodo) AS filas_reales
-        FROM reportado
-        GROUP BY {llave_sql}
     )
-    SELECT
-        COUNT(*) AS combinaciones,
-        SUM(filas_reales) AS filas_reales_totales,
-        SUM(
-            (DATE_PART('year', periodo_max) - DATE_PART('year', periodo_min)) * 12
-            + (DATE_PART('month', periodo_max) - DATE_PART('month', periodo_min)) + 1
-        )::bigint AS filas_totales_tras_relleno_interior
-    FROM series;
+    SELECT COUNT(*) AS filas_reportadas
+    FROM reportado;
     """
 
 
@@ -341,17 +255,7 @@ def construir_capa2(dry_run: bool = False) -> None:
     if dry_run:
         with engine.connect() as conn:
             fila = conn.execute(text(_sql_conteo_dry_run())).mappings().one()
-        reales = fila["filas_reales_totales"]
-        total = fila["filas_totales_tras_relleno_interior"]
-        logger.info("Combinaciones (peva/par/tipoEnlace/tipoCliente/nivelComparticion/portador): %s",
-                    fila["combinaciones"])
-        logger.info("Filas reales (reportadas de verdad): %s", reales)
-        logger.info("Filas totales tras relleno interior (reales + imputadas): %s", total)
-        logger.info("Filas que serían imputadas (huecos interiores): %s",
-                    (total - reales) if (total is not None and reales is not None) else None)
-        if reales is not None and total is not None and total < reales:
-            logger.error(
-                "INCONSISTENCIA: el total tras relleno es MENOR que las filas reales -- no debería pasar nunca. No confíes en este resultado, avisa antes de continuar.")
+        logger.info("Filas (llave natural, periodo) reportadas: %s", fila["filas_reportadas"])
         logger.info("--dry-run: no se escribió nada.")
         return
 
@@ -361,12 +265,9 @@ def construir_capa2(dry_run: bool = False) -> None:
 
     with engine.connect() as conn:
         total = conn.execute(text("SELECT COUNT(*) FROM capa2.lineas_dedicadas_consolidado")).scalar_one()
-        imputadas = conn.execute(
-            text("SELECT COUNT(*) FROM capa2.lineas_dedicadas_consolidado WHERE es_imputado")
-        ).scalar_one()
 
-    logger.info("capa2.lineas_dedicadas_consolidado construida: %s filas totales, %s imputadas (%.1f%%).",
-                total, imputadas, 100 * imputadas / total if total else 0)
+    logger.info("capa2.lineas_dedicadas_consolidado construida: %s filas, todas reportadas (sin imputación).",
+                total)
     logger.info(
         "Tabla anterior conservada en capa2.lineas_dedicadas_consolidado_prev por si hay que comparar o revertir.")
 

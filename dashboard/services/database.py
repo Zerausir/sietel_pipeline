@@ -130,6 +130,7 @@ def validate_mart() -> dict[str, bool]:
         "mart.vw_dashboard_participacion",
         "mart.vw_dashboard_ihh",
         "mart.vw_dashboard_filtros_geograficos",
+        "mart.panel_reporte_prestador_mes",
         "mart.dim_periodo",
     ]
 
