@@ -128,9 +128,10 @@ def layout():
                 children=[
                     chart_card(
                         "Dependencia geográfica del prestador ausente", "con-dependencia-geografica-chart",
-                        "Solo aparece cuando el prestador dominante (Nacional) no reportó en el período de "
+                        "Solo aparece cuando un prestador dominante (Nacional) no reportó en el período de "
                         "participación elegido -- % que representaría su última huella geográfica conocida "
-                        "sobre el total actual de cada provincia, si retomara el reporte.",
+                        "sobre el total actual de cada provincia, si retomara el reporte. Una barra por "
+                        "prestador ausente; la leyenda indica de qué mes es cada huella.",
                     ),
                 ],
             ),
@@ -499,36 +500,76 @@ def update_concentration(
     # histórico completo) -- es una foto de un momento específico, no una
     # serie de tiempo. Ver services/queries.py:
     # get_dependencia_geografica_dominante_ausente().
+    #
+    # Se consulta el MISMO período que muestran las tarjetas (selected_row),
+    # no current_period a secas: si el período de participación queda fuera
+    # del rango Desde-Hasta, selected_row cae al último mes del rango y
+    # ambos deben hablar del mismo mes.
+    #
+    # Una barra (serie) por prestador ausente, con el mes de su huella en la
+    # leyenda -- ver get_dependencia_geografica_dominante_ausente() para por
+    # qué no se suman.
     ausente_periodo_actual = bool(selected_row.get("prestador_dominante_ausente"))
-    if territory_id == "NACIONAL|ECUADOR" and ausente_periodo_actual:
+    if territory_id != "NACIONAL|ECUADOR":
+        dependencia_fig = empty_figure("Este análisis solo aplica a nivel Nacional.")
+    elif hay_filtros:
+        dependencia_fig = empty_figure(
+            "No aplica con filtros de Estado o Prestador: la ausencia del prestador dominante se evalúa "
+            "sobre el mercado completo."
+        )
+    elif not ausente_periodo_actual:
+        dependencia_fig = empty_figure(
+            "El prestador dominante sí reportó en el período de participación elegido -- nada que mostrar."
+        )
+    else:
         try:
-            dependencia = get_dependencia_geografica_dominante_ausente(current_period)
+            dependencia = get_dependencia_geografica_dominante_ausente(int(selected_row["periodo_id"]))
+            error_dependencia = False
         except Exception:
-            dependencia = pd.DataFrame()
-        if dependencia.empty:
+            dependencia, error_dependencia = pd.DataFrame(), True
+        if error_dependencia:
+            dependencia_fig = empty_figure("Error al consultar la huella geográfica del prestador ausente")
+        elif dependencia.empty:
             dependencia_fig = empty_figure(
                 "El prestador ausente no tiene huella geográfica histórica registrada"
             )
         else:
-            dependencia = dependencia.sort_values("pct_potencial_subestimado")
-            dependencia_fig = go.Figure(go.Bar(
-                x=dependencia["pct_potencial_subestimado"], y=dependencia["provincia"], orientation="h",
-                marker_color=PALETTE["red"],
-                text=dependencia["cuentas_ausente"],
-                hovertemplate=(
-                    "%{y}<br>Subestimación potencial: %{x}%"
-                    "<br>Cuentas del ausente (último reporte): %{text:,.0f}<extra></extra>"
-                ),
-            ))
-            style_figure(dependencia_fig, height=max(280, 24 * len(dependencia)), hovermode="closest")
+            dependencia = dependencia.copy()
+            for column in ["pct_potencial_subestimado", "cuentas_ausente", "cuentas_actuales"]:
+                dependencia[column] = pd.to_numeric(dependencia[column], errors="coerce")
+            orden_provincias = (
+                dependencia.groupby("provincia")["pct_potencial_subestimado"].max().sort_values().index.tolist()
+            )
+            prestadores = (
+                dependencia[["prestador_id", "isp_nombre", "ultimo_reporte_anio_mes"]]
+                .drop_duplicates("prestador_id")
+                .sort_values("ultimo_reporte_anio_mes", ascending=False)
+            )
+            # Rojo para el ausente más reciente (el caso principal); los
+            # demás en tonos neutros para no competir con él.
+            colores = [PALETTE["red"], PALETTE["orange"], PALETTE["muted"], PALETTE["navy"]]
+            dependencia_fig = go.Figure()
+            for indice, prestador in enumerate(prestadores.itertuples()):
+                sub = dependencia[dependencia["prestador_id"] == prestador.prestador_id]
+                etiqueta = f"{prestador.isp_nombre} — último reporte {prestador.ultimo_reporte_anio_mes}"
+                dependencia_fig.add_trace(go.Bar(
+                    x=sub["pct_potencial_subestimado"], y=sub["provincia"], orientation="h",
+                    name=etiqueta, marker_color=colores[indice % len(colores)],
+                    customdata=sub[["cuentas_ausente", "cuentas_actuales"]].to_numpy(),
+                    hovertemplate=(
+                        f"%{{y}}<br>{etiqueta}<br>Subestimación potencial: %{{x:.1f}}%"
+                        "<br>Cuentas del ausente (su último reporte): %{customdata[0]:,.0f}"
+                        "<br>Cuentas reportadas este mes: %{customdata[1]:,.0f}<extra></extra>"
+                    ),
+                ))
+            altura = max(280, 24 * len(orden_provincias) * max(1, len(prestadores)) + 80)
+            style_figure(dependencia_fig, height=altura, hovermode="closest")
+            dependencia_fig.update_layout(
+                barmode="group", showlegend=True,
+                legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
+            )
             dependencia_fig.update_xaxes(title="% potencial de subestimación por provincia")
-            dependencia_fig.update_yaxes(title="")
-    else:
-        motivo = (
-            "Este análisis solo aplica a nivel Nacional." if territory_id != "NACIONAL|ECUADOR"
-            else "El prestador dominante sí reportó en el período de participación elegido -- nada que mostrar."
-        )
-        dependencia_fig = empty_figure(motivo)
+            dependencia_fig.update_yaxes(title="", categoryorder="array", categoryarray=orden_provincias)
 
     # CR2/CR4 en el tiempo -- responde una pregunta que el IHH por sí solo
     # no responde directamente ("¿cuánto controlan específicamente los 2 o

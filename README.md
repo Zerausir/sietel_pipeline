@@ -905,6 +905,14 @@ nuevo coincide exactamente con el "reportado" anterior. El panel de obligación 
 versión con LOCF: la cobertura no contaba como esperado a un prestador que cambiaba de combinación entre dos reportes,
 y el churn por `LAG()` nunca contaba a quien dejaba de reportar para siempre.
 
+**Dependencia geográfica del prestador ausente, una serie por prestador (IHH y participación, 29-sep-2026)**: con más
+de un dominante ausente en el mismo mes, el gráfico sumaba en una sola barra las huellas de cada uno, tomadas de su
+propio último reporte (fechas distintas; el mart nunca "cierra" la ausencia de quien salió del mercado). Ahora cada
+prestador ausente es una serie aparte, con el mes de su huella en la leyenda. Además: el gráfico usa el mismo período
+que las tarjetas, dice "no aplica" con filtros de Estado/Prestador (antes afirmaba que el dominante sí había
+reportado) y distingue un error de consulta de "sin huella". En producción, al 29-sep-2026, solo CNT EP está ausente en
+el último período, así que su gráfico no cambia.
+
 **Bug crítico corregido en `_cambio_relevante()`** (`cargar_dimensiones.py` y `cargar_nodo_isp.py`, 07-ago-2026):
 comparaba claves de diccionario con el *case* exacto de SQL Server (`tipoNodo`, `Resolucion`, `nombreComercial`)
 contra claves de Postgres siempre plegadas a minúscula — el *mismatch* hacía que **toda** fila se detectara como cambio
