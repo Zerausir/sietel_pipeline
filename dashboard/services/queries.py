@@ -160,14 +160,11 @@ def get_territory_options(
 @cache.memoize(timeout=300)
 def get_provider_count_in_range(territory_id: str, start_period: int, end_period: int) -> int:
     """
-    Cuenta prestadores DISTINTOS con AL MENOS UN REPORTE REAL (no imputado)
-    dentro de TODO el rango Desde-Hasta -- a diferencia de "numero_prestadores"
-    en vw_dashboard_evolucion, que es una fotografía de un solo mes.
-
-    CORRECCIÓN (30-jul-2026): el filtro anterior era `total_lineas IS NOT
-    NULL`, que incluye filas IMPUTADAS (relleno LOCF) -- no es lo mismo que
-    "al menos un reporte real", que es lo que el texto del KPI afirma. Ahora
-    filtra por tiene_reportado = TRUE explícitamente.
+    Cuenta prestadores DISTINTOS con AL MENOS UN REPORTE dentro de TODO el
+    rango Desde-Hasta -- a diferencia de "numero_prestadores" en
+    vw_dashboard_evolucion, que es una fotografía de un solo mes. El mart
+    solo contiene filas reportadas (sin imputación), así que basta con que
+    exista una fila.
 
     Esto tampoco equivale a "título habilitante vigente" (un concepto
     administrativo de permisos, ajeno a esta tabla) -- es estrictamente
@@ -180,7 +177,6 @@ def get_provider_count_in_range(territory_id: str, start_period: int, end_period
         JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
         WHERE b.territorio_id = :territory_id
           AND f.periodo_id BETWEEN :start_period AND :end_period
-          AND f.tiene_reportado = TRUE
         """,
         {"territory_id": territory_id, "start_period": start_period, "end_period": end_period},
     )
@@ -283,7 +279,6 @@ def get_reporting_summary(
             JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
             JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
             WHERE {' AND '.join(clauses_registro)}
-              AND f.tiene_reportado = TRUE
         ),
         nunca_reportaron AS (
             {sql_nunca_reportaron}
@@ -347,7 +342,6 @@ def get_reporting_summary(
             JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
             WHERE b.territorio_id = :territory_id
               AND f.periodo_id BETWEEN :start_period AND :end_period
-              AND f.tiene_reportado = TRUE
         )
         SELECT
             (SELECT COUNT(*) FROM registro_total) + (SELECT COUNT(*) FROM nunca_reportaron)
@@ -445,18 +439,58 @@ def get_provider_options(territory_id: str) -> list[dict[str, str]]:
     return sorted(opciones, key=lambda o: o["label"])
 
 
-@cache.memoize(timeout=300)
-def get_evolution(territory_id: str, start_period: int, end_period: int) -> pd.DataFrame:
-    return _read(
-        """
-        SELECT *
-        FROM mart.vw_dashboard_evolucion
-        WHERE territorio_id = :territory_id
-          AND periodo_id BETWEEN :start_period AND :end_period
-        ORDER BY periodo_id
+def _evolucion_con_cobertura(panel_sql: str, lineas_where: str, filtros: str, params: dict[str, Any]) -> pd.DataFrame:
+    """
+    Serie mensual de cuentas REPORTADAS + cobertura, compartida por
+    Evolución y Control. Parte del panel de obligación
+    (mart.panel_reporte_prestador_mes, ya acotado al territorio por
+    `panel_sql`) para que cada mes traiga cuántos prestadores se esperaban
+    y cuántos reportaron: una caída del total con cobertura baja es falta
+    de reporte, no del mercado. No hay ningún valor imputado -- quien no
+    reportó aporta 0 prestadores y ninguna cuenta.
+
+    diferencia/variación mes a mes se calculan en pandas sobre el total
+    reportado; con cobertura distinta entre dos meses no son comparables
+    (por eso la cobertura viaja en la misma fila).
+    """
+    df = _read(
+        f"""
+        WITH panel AS (
+            {panel_sql}
+        ),
+        lineas AS (
+            SELECT f.periodo_id, f.prestador_id, SUM(f.total_lineas) AS total_lineas
+            FROM mart.fact_lineas_geografia_mes f
+            WHERE f.periodo_id BETWEEN :start_period AND :end_period
+              {lineas_where}
+            GROUP BY f.periodo_id, f.prestador_id
+        )
+        SELECT
+            pn.periodo_id,
+            pn.periodo,
+            SUM(l.total_lineas) AS total_lineas,
+            COUNT(*) FILTER (WHERE pn.reporto) AS numero_prestadores,
+            COUNT(*) AS numero_prestadores_esperados,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE pn.reporto) / NULLIF(COUNT(*), 0), 4)
+                AS porcentaje_cobertura_prestadores
+        FROM panel pn
+        JOIN mart.dim_prestador p ON p.prestador_id = pn.prestador_id
+        LEFT JOIN lineas l ON l.periodo_id = pn.periodo_id AND l.prestador_id = pn.prestador_id
+        WHERE pn.periodo_id BETWEEN :start_period AND :end_period
+          {filtros}
+        GROUP BY pn.periodo_id, pn.periodo
+        ORDER BY pn.periodo_id
         """,
-        {"territory_id": territory_id, "start_period": start_period, "end_period": end_period},
+        params,
     )
+    if df.empty:
+        return df
+    periods = get_periods()[["periodo_id", "anio_mes"]]
+    df = df.merge(periods, on="periodo_id", how="left")
+    df = df.sort_values("periodo_id").reset_index(drop=True)
+    df["diferencia_mensual_lineas"] = df["total_lineas"].diff()
+    df["variacion_mensual_porcentaje"] = df["total_lineas"].pct_change() * 100
+    return df
 
 
 @cache.memoize(timeout=300)
@@ -468,75 +502,22 @@ def get_evolution_filtrado(
         isp_nombres: list[str] | None = None,
 ) -> pd.DataFrame:
     """
-    Igual que get_evolution, pero agregando en tiempo de consulta desde
-    fact_lineas_geografia_mes + dim_prestador, para poder filtrar por
-    estado de operación y/o nombre de prestador ANTES de sumar --
-    vw_dashboard_evolucion ya viene pre-agregada a nivel de territorio y
-    no permite bajar a este nivel de detalle.
-
-    opera_estados / isp_nombres aceptan LISTAS (selección múltiple) -- si
-    se pasa una lista vacía o None, no se filtra por ese criterio.
-
-    CORRECCIÓN (30-jul-2026, tras discusión con el usuario): se eliminó
-    por completo el desglose "con líneas / sin dato" -- dependía de forma
-    indirecta de la distinción reportado/imputado (un prestador con líneas
-    > 0 podía ser 100% imputado), lo cual generaba una aparente
-    contradicción frente al conteo de "reportaron". Ahora solo existe UN
-    conteo de prestadores: los que tuvieron un reporte REAL ese mes
-    (tiene_reportado = TRUE) -- nada de imputados, ni como categoría de
-    desglose.
-
-    Las columnas de comparación mes a mes (diferencia_mensual_lineas,
-    variacion_mensual_porcentaje) se calculan en pandas (.diff()), no en
-    SQL -- más simple que replicar el JOIN por fecha de fact_resumen_mercado_mes.
+    Evolución mensual del territorio, filtrable por estado de operación y/o
+    nombre de prestador ANTES de sumar (listas de selección múltiple; vacía
+    o None = sin filtro). Ver _evolucion_con_cobertura().
     """
-    clauses = [
-        "b.territorio_id = :territory_id",
-        "f.periodo_id BETWEEN :start_period AND :end_period",
-    ]
-    params: dict[str, Any] = {
-        "territory_id": territory_id,
-        "start_period": start_period,
-        "end_period": end_period,
-    }
-    if opera_estados:
-        clauses.append(
-            "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
-            "WHERE p.opera_actual ILIKE '%' || estado || '%')"
-        )
-        params["opera_estados"] = list(opera_estados)
-    if isp_nombres:
-        clauses.append("p.isp_nombre = ANY(:isp_nombres)")
-        params["isp_nombres"] = list(isp_nombres)
-
-    df = _read(
-        f"""
-        SELECT
-            f.periodo_id,
-            f.periodo,
-            SUM(f.total_lineas) AS total_lineas,
-            SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas,
-            COUNT(DISTINCT f.prestador_id) FILTER (WHERE f.tiene_reportado) AS numero_prestadores
-        FROM mart.fact_lineas_geografia_mes f
-        JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
-        JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
-        WHERE {' AND '.join(clauses)}
-        GROUP BY f.periodo_id, f.periodo
-        ORDER BY f.periodo_id
-        """,
-        params,
+    clauses_extra, params = _filtros_participacion(opera_estados, isp_nombres)
+    params.update({"territory_id": territory_id, "start_period": start_period, "end_period": end_period})
+    panel_sql = """
+            SELECT periodo_id, periodo, prestador_id, reporto
+            FROM mart.panel_reporte_prestador_mes
+            WHERE territorio_id = :territory_id"""
+    lineas_where = (
+        "AND EXISTS (SELECT 1 FROM mart.bridge_geografia_territorio b "
+        "WHERE b.geografia_id = f.geografia_id AND b.territorio_id = :territory_id)"
     )
-
-    if df.empty:
-        return df
-
-    periods = get_periods()[["periodo_id", "anio_mes"]]
-    df = df.merge(periods, on="periodo_id", how="left")
-
-    df = df.sort_values("periodo_id").reset_index(drop=True)
-    df["diferencia_mensual_lineas"] = df["lineas_reportadas"].diff()
-    df["variacion_mensual_porcentaje"] = df["lineas_reportadas"].pct_change() * 100
-    return df
+    filtros = "".join(f" AND {c}" for c in clauses_extra)
+    return _evolucion_con_cobertura(panel_sql, lineas_where, filtros, params)
 
 
 @cache.memoize(timeout=300)
@@ -742,45 +723,50 @@ def get_participation_filtrado(
     pre-calculada sobre TODO el universo de prestadores del territorio, sin
     posibilidad de excluir antes de calcular el mercado.
 
-    Replica exactamente la misma metodología ya aplicada en
-    fact_participacion_mercado (31-jul-2026): solo lineas_reportadas de
-    quien reportó ese mes exacto, denominador (mercado) recalculado de
-    forma consistente sobre el mismo subconjunto filtrado -- nunca sobre
-    el total sin filtrar mientras el numerador sí está filtrado.
+    Replica exactamente la misma metodología de fact_participacion_mercado:
+    solo lo reportado por quien reportó ese mes exacto; los esperados que
+    no reportaron salen de mart.panel_reporte_prestador_mes, sin valores;
+    denominador (mercado) recalculado de forma consistente sobre el mismo
+    subconjunto filtrado -- nunca sobre el total sin filtrar mientras el
+    numerador sí está filtrado.
     """
     clauses_extra, params = _filtros_participacion(opera_estados, isp_nombres)
-    clauses = ["b.territorio_id = :territory_id", "f.periodo_id = :period_id", *clauses_extra]
+    clauses = ["pn.territorio_id = :territory_id", "pn.periodo_id = :period_id", *clauses_extra]
     params.update({"territory_id": territory_id, "period_id": period_id})
 
     return _read(
         f"""
-        WITH base AS (
-            SELECT
-                f.prestador_id,
-                SUM(f.total_lineas) AS total_lineas_prestador,
-                SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas,
-                SUM(COALESCE(f.lineas_imputadas, 0)) AS lineas_imputadas,
-                BOOL_OR(f.tiene_reportado) AS tiene_reportado
+        WITH lineas AS (
+            SELECT f.prestador_id, SUM(f.total_lineas) AS total_lineas_prestador
             FROM mart.fact_lineas_geografia_mes f
             JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
-            JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
-            WHERE {' AND '.join(clauses)}
+            WHERE b.territorio_id = :territory_id AND f.periodo_id = :period_id
             GROUP BY f.prestador_id
+        ),
+        base AS (
+            SELECT
+                pn.prestador_id,
+                pn.reporto AS tiene_reportado,
+                l.total_lineas_prestador
+            FROM mart.panel_reporte_prestador_mes pn
+            JOIN mart.dim_prestador p ON p.prestador_id = pn.prestador_id
+            LEFT JOIN lineas l ON l.prestador_id = pn.prestador_id
+            WHERE {' AND '.join(clauses)}
         ),
         mercado AS (
             SELECT
-                SUM(lineas_reportadas) FILTER (WHERE tiene_reportado) AS total_mercado,
+                SUM(total_lineas_prestador) FILTER (WHERE tiene_reportado) AS total_mercado,
                 COUNT(*) FILTER (WHERE tiene_reportado) AS n_reportaron,
-                COUNT(*) AS n_total
+                COUNT(*) AS n_esperados
             FROM base
         ),
         ranking AS (
             SELECT
                 b.*,
-                m.total_mercado, m.n_reportaron, m.n_total,
+                m.total_mercado, m.n_reportaron, m.n_esperados,
                 CASE
-                    WHEN b.tiene_reportado AND b.lineas_reportadas > 0 AND m.total_mercado > 0
-                    THEN ROW_NUMBER() OVER (ORDER BY b.lineas_reportadas DESC NULLS LAST, b.prestador_id)
+                    WHEN b.tiene_reportado AND b.total_lineas_prestador > 0 AND m.total_mercado > 0
+                    THEN ROW_NUMBER() OVER (ORDER BY b.total_lineas_prestador DESC NULLS LAST, b.prestador_id)
                 END AS ranking_prestador
             FROM base b
             CROSS JOIN mercado m
@@ -791,24 +777,24 @@ def get_participation_filtrado(
             p.isp_nombre, p.nombrecomercial, p.opera_actual, p.es_cancelado_actual,
             r.total_lineas_prestador,
             r.total_mercado AS total_lineas_mercado,
-            CASE WHEN r.tiene_reportado AND r.lineas_reportadas > 0 AND r.total_mercado > 0
-                THEN ROUND(r.lineas_reportadas / r.total_mercado, 10) END AS participacion_decimal,
-            CASE WHEN r.tiene_reportado AND r.lineas_reportadas > 0 AND r.total_mercado > 0
-                THEN ROUND(100.0 * r.lineas_reportadas / r.total_mercado, 8) END AS participacion_porcentaje,
-            CASE WHEN r.tiene_reportado AND r.lineas_reportadas > 0 AND r.total_mercado > 0
-                THEN ROUND(POWER(100.0 * r.lineas_reportadas / r.total_mercado, 2), 8) END AS aporte_ihh,
+            CASE WHEN r.tiene_reportado AND r.total_lineas_prestador > 0 AND r.total_mercado > 0
+                THEN ROUND(r.total_lineas_prestador / r.total_mercado, 10) END AS participacion_decimal,
+            CASE WHEN r.tiene_reportado AND r.total_lineas_prestador > 0 AND r.total_mercado > 0
+                THEN ROUND(100.0 * r.total_lineas_prestador / r.total_mercado, 8) END AS participacion_porcentaje,
+            CASE WHEN r.tiene_reportado AND r.total_lineas_prestador > 0 AND r.total_mercado > 0
+                THEN ROUND(POWER(100.0 * r.total_lineas_prestador / r.total_mercado, 2), 8) END AS aporte_ihh,
             r.ranking_prestador,
             r.ranking_prestador = 1 AS es_lider,
             CASE
                 WHEN NOT r.tiene_reportado THEN 'SIN_REPORTE_ESTE_MES'
-                WHEN r.lineas_reportadas > 0 THEN 'POSITIVO'
-                WHEN r.lineas_reportadas = 0 THEN 'CERO'
+                WHEN r.total_lineas_prestador > 0 THEN 'POSITIVO'
+                WHEN r.total_lineas_prestador = 0 THEN 'CERO'
                 ELSE 'SIN_DATO'
             END AS estado_lineas,
-            r.lineas_reportadas, r.lineas_imputadas, r.tiene_reportado,
+            r.tiene_reportado,
             r.n_reportaron AS numero_prestadores_reportaron_periodo,
-            r.n_total AS numero_prestadores_totales_periodo,
-            ROUND(100.0 * r.n_reportaron / NULLIF(r.n_total, 0), 4) AS porcentaje_cobertura_prestadores
+            r.n_esperados AS numero_prestadores_esperados_periodo,
+            ROUND(100.0 * r.n_reportaron / NULLIF(r.n_esperados, 0), 4) AS porcentaje_cobertura_prestadores
         FROM ranking r
         JOIN mart.dim_prestador p ON p.prestador_id = r.prestador_id
         ORDER BY r.ranking_prestador NULLS LAST, p.isp_nombre NULLS LAST
@@ -832,38 +818,44 @@ def get_ihh_filtrado(
     """
     clauses_extra, params = _filtros_participacion(opera_estados, isp_nombres)
     clauses = [
-        "b.territorio_id = :territory_id",
-        "f.periodo_id BETWEEN :start_period AND :end_period",
+        "pn.territorio_id = :territory_id",
+        "pn.periodo_id BETWEEN :start_period AND :end_period",
         *clauses_extra,
     ]
     params.update({"territory_id": territory_id, "start_period": start_period, "end_period": end_period})
 
     df = _read(
         f"""
-        WITH base AS (
-            SELECT
-                f.periodo_id,
-                f.prestador_id,
-                SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas,
-                SUM(COALESCE(f.lineas_imputadas, 0)) AS lineas_imputadas,
-                BOOL_OR(f.tiene_reportado) AS tiene_reportado
+        WITH lineas AS (
+            SELECT f.periodo_id, f.prestador_id, SUM(f.total_lineas) AS total_lineas_prestador
             FROM mart.fact_lineas_geografia_mes f
             JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
-            JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
-            WHERE {' AND '.join(clauses)}
+            WHERE b.territorio_id = :territory_id
+              AND f.periodo_id BETWEEN :start_period AND :end_period
             GROUP BY f.periodo_id, f.prestador_id
+        ),
+        base AS (
+            SELECT
+                pn.periodo_id,
+                pn.prestador_id,
+                pn.reporto AS tiene_reportado,
+                l.total_lineas_prestador
+            FROM mart.panel_reporte_prestador_mes pn
+            JOIN mart.dim_prestador p ON p.prestador_id = pn.prestador_id
+            LEFT JOIN lineas l ON l.periodo_id = pn.periodo_id AND l.prestador_id = pn.prestador_id
+            WHERE {' AND '.join(clauses)}
         ),
         mercado AS (
             SELECT
                 periodo_id,
-                SUM(lineas_reportadas) FILTER (WHERE tiene_reportado) AS total_mercado,
+                SUM(total_lineas_prestador) FILTER (WHERE tiene_reportado) AS total_mercado,
                 COUNT(*) FILTER (WHERE tiene_reportado) AS n_reportaron,
-                COUNT(*) AS n_total
+                COUNT(*) AS n_esperados
             FROM base
             GROUP BY periodo_id
         ),
         con_mercado AS (
-            SELECT b.*, m.total_mercado, m.n_reportaron, m.n_total
+            SELECT b.*, m.total_mercado, m.n_reportaron, m.n_esperados
             FROM base b
             JOIN mercado m ON m.periodo_id = b.periodo_id
         ),
@@ -871,34 +863,32 @@ def get_ihh_filtrado(
             SELECT
                 c.*,
                 CASE
-                    WHEN c.tiene_reportado AND c.lineas_reportadas > 0 AND c.total_mercado > 0
+                    WHEN c.tiene_reportado AND c.total_lineas_prestador > 0 AND c.total_mercado > 0
                     THEN ROW_NUMBER() OVER (
                         PARTITION BY c.periodo_id
-                        ORDER BY c.lineas_reportadas DESC NULLS LAST, c.prestador_id
+                        ORDER BY c.total_lineas_prestador DESC NULLS LAST, c.prestador_id
                     )
                 END AS ranking_prestador,
-                CASE WHEN c.tiene_reportado AND c.lineas_reportadas > 0 AND c.total_mercado > 0
-                    THEN ROUND(POWER(100.0 * c.lineas_reportadas / c.total_mercado, 2), 8) END AS aporte_ihh,
-                CASE WHEN c.tiene_reportado AND c.lineas_reportadas > 0 AND c.total_mercado > 0
-                    THEN ROUND(100.0 * c.lineas_reportadas / c.total_mercado, 8) END AS participacion_porcentaje
+                CASE WHEN c.tiene_reportado AND c.total_lineas_prestador > 0 AND c.total_mercado > 0
+                    THEN ROUND(POWER(100.0 * c.total_lineas_prestador / c.total_mercado, 2), 8) END AS aporte_ihh,
+                CASE WHEN c.tiene_reportado AND c.total_lineas_prestador > 0 AND c.total_mercado > 0
+                    THEN ROUND(100.0 * c.total_lineas_prestador / c.total_mercado, 8) END AS participacion_porcentaje
             FROM con_mercado c
         ),
         agregado AS (
             SELECT
                 r.periodo_id,
                 MAX(r.total_mercado) AS total_lineas_mercado,
-                MAX(r.n_total) AS numero_prestadores,
-                COUNT(*) FILTER (WHERE r.tiene_reportado AND r.lineas_reportadas > 0) AS numero_prestadores_con_lineas,
+                MAX(r.n_reportaron) AS numero_prestadores,
+                COUNT(*) FILTER (WHERE r.tiene_reportado AND r.total_lineas_prestador > 0) AS numero_prestadores_con_lineas,
                 ROUND(COALESCE(SUM(r.aporte_ihh), 0), 6) AS ihh,
                 MAX(r.prestador_id) FILTER (WHERE r.ranking_prestador = 1) AS prestador_lider_id,
                 MAX(r.participacion_porcentaje) FILTER (WHERE r.ranking_prestador = 1) AS participacion_lider,
                 ROUND(COALESCE(SUM(r.participacion_porcentaje) FILTER (WHERE r.ranking_prestador <= 2), 0), 6) AS cr2,
                 ROUND(COALESCE(SUM(r.participacion_porcentaje) FILTER (WHERE r.ranking_prestador <= 4), 0), 6) AS cr4,
-                SUM(r.lineas_reportadas) AS lineas_reportadas_mercado,
-                SUM(r.lineas_imputadas) AS lineas_imputadas_mercado,
                 MAX(r.n_reportaron) AS numero_prestadores_reportaron,
-                MAX(r.n_total) AS numero_prestadores_registrados,
-                ROUND(100.0 * MAX(r.n_reportaron) / NULLIF(MAX(r.n_total), 0), 4) AS porcentaje_cobertura_prestadores
+                MAX(r.n_esperados) AS numero_prestadores_esperados,
+                ROUND(100.0 * MAX(r.n_reportaron) / NULLIF(MAX(r.n_esperados), 0), 4) AS porcentaje_cobertura_prestadores
             FROM ranking r
             GROUP BY r.periodo_id
         )
@@ -1341,13 +1331,13 @@ def get_variacion_mensual_anomala(
 ) -> pd.DataFrame:
     """
     Variación mes a mes de cuentas reportadas, por prestador, dentro del
-    rango -- SOLO entre pares de meses consecutivos donde el prestador
-    tiene_reportado=TRUE en AMBOS meses (mismo principio metodológico que
+    rango -- SOLO entre pares de meses CALENDARIO consecutivos en los que el
+    prestador reportó en AMBOS (mismo principio metodológico que
     IHH/participación: nunca mezclar "dejó de reportar" -- ya cubierto por
     get_prestadores_reporte_detenido_detalle -- con "reportó de verdad un
-    cambio real"). Un salto grande entre un mes reportado y uno imputado no
-    es una variación real, es artefacto del relleno LOCF -- se excluye
-    explícitamente filtrando por tiene_reportado en ambos extremos del par.
+    cambio real"). Como el mart solo tiene filas reportadas, LAG() devuelve
+    el reporte ANTERIOR, que puede estar meses atrás: por eso se exige que
+    ese reporte sea exactamente del mes previo.
 
     umbral_porcentaje filtra el resultado a |variación| >= umbral, para que
     la tabla no se llene de ruido de variaciones normales -- 30% es un
@@ -1387,8 +1377,7 @@ def get_variacion_mensual_anomala(
                 f.prestador_id,
                 f.periodo_id,
                 f.periodo,
-                SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas,
-                BOOL_OR(f.tiene_reportado) AS tiene_reportado
+                SUM(COALESCE(f.total_lineas, 0)) AS lineas_reportadas
             FROM mart.fact_lineas_geografia_mes f
             WHERE f.periodo_id BETWEEN :start_period AND :end_period
             {territorio_where}
@@ -1398,7 +1387,7 @@ def get_variacion_mensual_anomala(
             SELECT
                 s.*,
                 LAG(s.lineas_reportadas) OVER (PARTITION BY s.prestador_id ORDER BY s.periodo_id) AS lineas_mes_anterior,
-                LAG(s.tiene_reportado) OVER (PARTITION BY s.prestador_id ORDER BY s.periodo_id) AS reporto_mes_anterior
+                LAG(s.periodo) OVER (PARTITION BY s.prestador_id ORDER BY s.periodo_id) AS periodo_anterior
             FROM serie s
         )
         SELECT
@@ -1414,8 +1403,7 @@ def get_variacion_mensual_anomala(
             END AS variacion_porcentaje
         FROM con_lag c
         JOIN mart.dim_prestador p ON p.prestador_id = c.prestador_id
-        WHERE c.tiene_reportado = TRUE
-          AND c.reporto_mes_anterior = TRUE
+        WHERE c.periodo_anterior = (c.periodo - INTERVAL '1 month')::date
           AND c.lineas_mes_anterior IS NOT NULL
           AND c.lineas_mes_anterior > 0
           AND ABS(100.0 * (c.lineas_reportadas - c.lineas_mes_anterior) / c.lineas_mes_anterior) >= :umbral
@@ -1432,61 +1420,86 @@ def get_variacion_mensual_anomala(
     return df
 
 
-@cache.memoize(timeout=300)
-def get_churn_history(territory_id: str, end_period: int, meses: int = 12) -> pd.DataFrame:
+def _churn_por_mes(territorio_join: str, filtros: str, params: dict[str, Any], meses: int) -> pd.DataFrame:
     """
-    Historial reciente de "prestadores que dejaron de reportar cada mes"
-    (churn), para el sparkline de "Dejaron de reportar este mes" en
-    Evolución -- ese KPI era un número aislado sin ningún gráfico en la
-    página que mostrara su tendencia (a diferencia de "Cuentas
-    reportadas", que ya tiene su línea completa debajo).
+    Serie de "prestadores que dejaron de reportar cada mes" (churn), única
+    definición compartida por Evolución (KPI + sparkline) y Control.
 
-    Acotado a los últimos `meses` períodos terminando en end_period, NO al
-    rango Desde-Hasta completo (que puede cubrir 15 años) -- un sparkline
-    es contexto reciente, no un historial completo; calcularlo sobre 180
-    meses sería costoso para una tendencia que además sería ilegible a ese
-    tamaño de todas formas.
+    "activo" en un mes = reportó ese mes, en el territorio, con al menos una
+    cuenta (SUM(total_lineas) > 0). churn del mes M = activos en M-1 que no
+    están activos en M. Compara meses CALENDARIO (dim_periodo), no filas
+    consecutivas: el mart solo tiene filas reportadas, así que quien deja
+    de reportar no tiene fila en M -- un LAG() sobre filas no lo vería.
+    Se lee un mes extra antes de la ventana para que el primer punto
+    también tenga mes anterior.
 
-    "activo" = tiene_reportado Y al menos una cuenta reportada ese mes,
-    vía LAG() sobre mart.vw_dashboard_participacion -- mismo patrón que
-    get_variacion_mensual_anomala. El primer período de la ventana no
-    tiene mes anterior DENTRO de la ventana, así que su churn queda en 0
-    en vez del valor real (subestima ese único punto) -- aceptable para
-    una tendencia reciente, no para una cifra certificada.
+    Ojo con el borde reciente: un prestador que carga con rezago aparece
+    como churn hasta que llega su reporte (ver MARGEN_REZAGO_MESES en
+    vw_prestadores_reporte_detenido).
     """
-    meses = max(2, int(meses))
-    df = _read(
+    params = {**params, "meses": max(2, int(meses))}
+    return _read(
         f"""
         WITH ancla AS (
             SELECT periodo FROM mart.dim_periodo WHERE periodo_id = :end_period
         ),
-        serie AS (
-            SELECT
-                vp.periodo_id,
-                vp.prestador_id,
-                (vp.tiene_reportado AND COALESCE(vp.total_lineas_prestador, 0) > 0) AS activo
-            FROM mart.vw_dashboard_participacion vp, ancla
-            WHERE vp.territorio_id = :territory_id
-              AND vp.periodo BETWEEN (ancla.periodo - INTERVAL '{meses} months') AND ancla.periodo
+        periodos AS (
+            SELECT d.periodo_id, d.periodo, d.anio_mes
+            FROM mart.dim_periodo d, ancla
+            WHERE d.periodo BETWEEN (ancla.periodo - make_interval(months => :meses)) AND ancla.periodo
         ),
-        con_lag AS (
-            SELECT
-                periodo_id, prestador_id, activo,
-                LAG(activo) OVER (PARTITION BY prestador_id ORDER BY periodo_id) AS activo_anterior
-            FROM serie
+        activo AS (
+            SELECT f.periodo, f.prestador_id
+            FROM mart.fact_lineas_geografia_mes f
+            {territorio_join}
+            JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id,
+            ancla
+            WHERE f.periodo BETWEEN (ancla.periodo - make_interval(months => :meses + 1)) AND ancla.periodo
+              {filtros}
+            GROUP BY f.periodo, f.prestador_id
+            HAVING SUM(COALESCE(f.total_lineas, 0)) > 0
         )
         SELECT
-            c.periodo_id,
-            d.anio_mes,
-            COUNT(*) FILTER (WHERE c.activo_anterior = TRUE AND c.activo = FALSE) AS churn
-        FROM con_lag c
-        JOIN mart.dim_periodo d ON d.periodo_id = c.periodo_id
-        GROUP BY c.periodo_id, d.anio_mes
-        ORDER BY c.periodo_id
+            pe.periodo_id,
+            pe.anio_mes,
+            COUNT(ant.prestador_id) FILTER (WHERE act.prestador_id IS NULL) AS churn,
+            COUNT(ant.prestador_id) AS activos_mes_anterior
+        FROM periodos pe
+        LEFT JOIN activo ant
+          ON ant.periodo = (pe.periodo - INTERVAL '1 month')::date
+        LEFT JOIN activo act
+          ON act.periodo = pe.periodo
+         AND act.prestador_id = ant.prestador_id
+        GROUP BY pe.periodo_id, pe.anio_mes
+        ORDER BY pe.periodo_id
         """,
-        {"territory_id": territory_id, "end_period": end_period},
+        params,
     )
-    return df
+
+
+@cache.memoize(timeout=300)
+def get_churn_history(
+        territory_id: str,
+        end_period: int,
+        meses: int = 12,
+        opera_estados: list[str] | None = None,
+        isp_nombres: list[str] | None = None,
+) -> pd.DataFrame:
+    """
+    Churn de los últimos `meses` períodos terminando en end_period, para el
+    KPI "Dejaron de reportar este mes" de Evolución y su sparkline (el valor
+    puntual es la última fila de esta misma serie). Ver _churn_por_mes().
+    opera_estados/isp_nombres acotan el universo de prestadores, igual que
+    el resto de los KPI de la página.
+    """
+    clauses_extra, params = _filtros_participacion(opera_estados, isp_nombres)
+    params.update({"territory_id": territory_id, "end_period": end_period})
+    filtros = "".join(f" AND {c}" for c in clauses_extra)
+    territorio_join = (
+        "JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id "
+        "AND b.territorio_id = :territory_id"
+    )
+    return _churn_por_mes(territorio_join, filtros, params, meses)
 
 
 # ============================================================
@@ -1579,7 +1592,7 @@ def opciones_geograficas_facetadas(
 # ============================================================
 # Versiones "multiselect" para Control (14-ago-2026)
 # ============================================================
-# Duplican get_evolution_filtrado/get_provider_count_in_range/
+# Duplican get_provider_count_in_range/
 # get_reporting_summary/get_churn_history para el filtro geográfico
 # multi-select e independiente de Control (Provincia/Cantón/Parroquia,
 # SIN Nivel) -- NO reemplazan a las originales, que Evolución sigue
@@ -1588,14 +1601,9 @@ def opciones_geograficas_facetadas(
 # node_territory_filters.py -- tocar las funciones originales arriesgaría
 # páginas que ya funcionan en producción por evitar unas líneas repetidas.
 #
-# get_churn_history_multiselect() NO puede reusar
-# mart.vw_dashboard_participacion/fact_participacion_mercado como la
-# original -- esa vista materializada está pre-agregada por territorio_id
-# ÚNICO (join contra bridge_geografia_territorio en tiempo de
-# CONSTRUCCIÓN del mart, no de consulta), no es descomponible a una
-# combinación independiente de Provincia/Cantón/Parroquia. Se recalcula
-# "activo" directo desde mart.fact_lineas_geografia_mes, mismo patrón que
-# get_variacion_mensual_anomala.
+# get_evolution_filtrado_multiselect() y get_churn_history_multiselect()
+# comparten la lógica de sus originales (_evolucion_con_cobertura,
+# _churn_por_mes); solo cambia cómo se acota el territorio.
 #
 # get_reporting_summary_multiselect() NO incluye la población "nunca han
 # reportado" (parámetro incluir_nunca_reportaron del original) -- Control
@@ -1612,48 +1620,37 @@ def get_evolution_filtrado_multiselect(
         opera_estados: tuple[str, ...] = (),
         isp_nombres: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """Ver get_evolution_filtrado() -- misma lógica, filtro geográfico multi-select de Control."""
+    """
+    Ver get_evolution_filtrado() -- misma lógica, filtro geográfico
+    multi-select de Control. El panel de obligación está por territorio:
+    con varios territorios elegidos, un prestador se espera (y cuenta como
+    reportado) si lo está en CUALQUIERA de ellos -- se colapsa a una fila
+    por prestador y mes para no contarlo dos veces.
+    """
     territorio_sql, territorio_params = _lines_territory_clauses("f.geografia_id", provincias, cantones, parroquias)
-    territorio_where = f"AND {territorio_sql}" if territorio_sql else ""
+    clauses_extra, params = _filtros_participacion(list(opera_estados), list(isp_nombres))
+    params.update({"start_period": start_period, "end_period": end_period, **territorio_params})
 
-    clauses = ["f.periodo_id BETWEEN :start_period AND :end_period"]
-    params: dict[str, Any] = {"start_period": start_period, "end_period": end_period}
-    params.update(territorio_params)
-    if opera_estados:
-        clauses.append(
-            "EXISTS (SELECT 1 FROM unnest(:opera_estados ::text[]) AS estado "
-            "WHERE p.opera_actual ILIKE '%' || estado || '%')"
-        )
-        params["opera_estados"] = list(opera_estados)
-    if isp_nombres:
-        clauses.append("p.isp_nombre = ANY(:isp_nombres)")
-        params["isp_nombres"] = list(isp_nombres)
-
-    df = _read(
-        f"""
-        SELECT
-            f.periodo_id,
-            f.periodo,
-            SUM(f.total_lineas) AS total_lineas,
-            SUM(COALESCE(f.lineas_reportadas, 0)) AS lineas_reportadas,
-            COUNT(DISTINCT f.prestador_id) FILTER (WHERE f.tiene_reportado) AS numero_prestadores
-        FROM mart.fact_lineas_geografia_mes f
-        JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
-        WHERE {' AND '.join(clauses)}
-          {territorio_where}
-        GROUP BY f.periodo_id, f.periodo
-        ORDER BY f.periodo_id
-        """,
-        params,
+    condiciones = []
+    if provincias:
+        condiciones.append("dt.codigo_provincia = ANY(:territorio_provincias)")
+    if cantones:
+        condiciones.append("dt.codigo_canton = ANY(:territorio_cantones)")
+    if parroquias:
+        condiciones.append("dt.codigo_parroquia = ANY(:territorio_parroquias)")
+    territorios = (
+        f"SELECT dt.territorio_id FROM mart.dim_territorio dt WHERE {' AND '.join(condiciones)}"
+        if condiciones else "SELECT 'NACIONAL|ECUADOR'"
     )
-    if df.empty:
-        return df
-    periods = get_periods()[["periodo_id", "anio_mes"]]
-    df = df.merge(periods, on="periodo_id", how="left")
-    df = df.sort_values("periodo_id").reset_index(drop=True)
-    df["diferencia_mensual_lineas"] = df["lineas_reportadas"].diff()
-    df["variacion_mensual_porcentaje"] = df["lineas_reportadas"].pct_change() * 100
-    return df
+    panel_sql = f"""
+            SELECT periodo_id, periodo, prestador_id, BOOL_OR(reporto) AS reporto
+            FROM mart.panel_reporte_prestador_mes
+            WHERE territorio_id IN ({territorios})
+              AND periodo_id BETWEEN :start_period AND :end_period
+            GROUP BY periodo_id, periodo, prestador_id"""
+    lineas_where = f"AND {territorio_sql}" if territorio_sql else ""
+    filtros = "".join(f" AND {c}" for c in clauses_extra)
+    return _evolucion_con_cobertura(panel_sql, lineas_where, filtros, params)
 
 
 @cache.memoize(timeout=300)
@@ -1674,7 +1671,6 @@ def get_provider_count_in_range_multiselect(
         SELECT COUNT(DISTINCT f.prestador_id) AS cantidad
         FROM mart.fact_lineas_geografia_mes f
         WHERE f.periodo_id BETWEEN :start_period AND :end_period
-          AND f.tiene_reportado = TRUE
           {territorio_where}
         """,
         params,
@@ -1752,7 +1748,6 @@ def get_reporting_summary_multiselect(
             JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
             WHERE {' AND '.join(clauses_registro)}
               {territorio_where}
-              AND f.tiene_reportado = TRUE
         ),
         nunca_reportaron AS (
             {sql_nunca_reportaron}
@@ -1811,7 +1806,6 @@ def get_reporting_summary_multiselect(
             SELECT DISTINCT f.prestador_id, f.periodo_id
             FROM mart.fact_lineas_geografia_mes f
             WHERE f.periodo_id BETWEEN :start_period AND :end_period
-              AND f.tiene_reportado = TRUE
               {territorio_where}
         )
         SELECT
@@ -1851,51 +1845,14 @@ def get_churn_history_multiselect(
         meses: int = 12,
 ) -> pd.DataFrame:
     """
-    Ver get_churn_history() -- NO usa mart.vw_dashboard_participacion (ver
-    docstring de esta sección, esa vista no es descomponible al filtro
-    multi-select de Control). Recalcula "activo" directo desde
-    mart.fact_lineas_geografia_mes, agregado por prestador y mes dentro
-    del territorio elegido, mismo patrón que get_variacion_mensual_anomala.
+    Ver get_churn_history() -- misma definición (_churn_por_mes), con el
+    territorio de Control (selección múltiple, _lines_territory_clauses)
+    en vez de un territorio_id.
     """
-    meses = max(2, int(meses))
     territorio_sql, territorio_params = _lines_territory_clauses("f.geografia_id", provincias, cantones, parroquias)
-    territorio_where = f"AND {territorio_sql}" if territorio_sql else ""
-    params: dict[str, Any] = {"end_period": end_period}
-    params.update(territorio_params)
-
-    df = _read(
-        f"""
-        WITH ancla AS (
-            SELECT periodo FROM mart.dim_periodo WHERE periodo_id = :end_period
-        ),
-        serie AS (
-            SELECT
-                f.periodo_id,
-                f.prestador_id,
-                (BOOL_OR(f.tiene_reportado) AND SUM(COALESCE(f.lineas_reportadas, 0)) > 0) AS activo
-            FROM mart.fact_lineas_geografia_mes f, ancla
-            WHERE f.periodo BETWEEN (ancla.periodo - INTERVAL '{meses} months') AND ancla.periodo
-              {territorio_where}
-            GROUP BY f.periodo_id, f.prestador_id
-        ),
-        con_lag AS (
-            SELECT
-                periodo_id, prestador_id, activo,
-                LAG(activo) OVER (PARTITION BY prestador_id ORDER BY periodo_id) AS activo_anterior
-            FROM serie
-        )
-        SELECT
-            c.periodo_id,
-            d.anio_mes,
-            COUNT(*) FILTER (WHERE c.activo_anterior = TRUE AND c.activo = FALSE) AS churn
-        FROM con_lag c
-        JOIN mart.dim_periodo d ON d.periodo_id = c.periodo_id
-        GROUP BY c.periodo_id, d.anio_mes
-        ORDER BY c.periodo_id
-        """,
-        params,
-    )
-    return df
+    params: dict[str, Any] = {"end_period": end_period, **territorio_params}
+    filtros = f" AND {territorio_sql}" if territorio_sql else ""
+    return _churn_por_mes("", filtros, params, meses)
 
 
 # ============================================================
@@ -2000,7 +1957,7 @@ def get_dependencia_geografica_dominante_ausente(periodo_id: int) -> pd.DataFram
             GROUP BY a.prestador_id
         ),
         huella_ausente AS (
-            SELECT g.pro_nombre AS provincia, SUM(f.lineas_reportadas) AS cuentas_ausente
+            SELECT g.pro_nombre AS provincia, SUM(f.total_lineas) AS cuentas_ausente
             FROM ultimo_periodo_ausente u
             JOIN mart.fact_lineas_geografia_mes f
               ON f.prestador_id = u.prestador_id AND f.periodo_id = u.ultimo_periodo_con_reporte
@@ -2008,10 +1965,10 @@ def get_dependencia_geografica_dominante_ausente(periodo_id: int) -> pd.DataFram
             GROUP BY g.pro_nombre
         ),
         totales_actuales AS (
-            SELECT g.pro_nombre AS provincia, SUM(f.lineas_reportadas) AS cuentas_actuales
+            SELECT g.pro_nombre AS provincia, SUM(f.total_lineas) AS cuentas_actuales
             FROM mart.fact_lineas_geografia_mes f
             JOIN mart.dim_geografia g ON g.geografia_id = f.geografia_id
-            WHERE f.periodo_id = :periodo_id AND f.tiene_reportado = TRUE
+            WHERE f.periodo_id = :periodo_id
             GROUP BY g.pro_nombre
         )
         SELECT
@@ -2066,7 +2023,7 @@ def get_territorios_con_prestador(isp_nombres: tuple[str, ...]) -> pd.DataFrame:
         JOIN mart.bridge_geografia_territorio b ON b.geografia_id = f.geografia_id
         JOIN mart.dim_territorio t ON t.territorio_id = b.territorio_id AND t.nivel_geografico = 'PARROQUIA'
         JOIN mart.dim_prestador p ON p.prestador_id = f.prestador_id
-        WHERE p.isp_nombre = ANY(:isp_nombres) AND f.tiene_reportado = TRUE
+        WHERE p.isp_nombre = ANY(:isp_nombres)
         """,
         {"isp_nombres": list(isp_nombres)},
     )
@@ -2237,28 +2194,23 @@ def get_prestadores_dominantes_historicos() -> set[str]:
 @cache.memoize(timeout=300)
 def get_calendario_reportes(prestador_ids: tuple[str, ...]) -> pd.DataFrame:
     """
-    tiene_reportado por (prestador_id, periodo_id), para el heatmap
-    calendario de dashboard/pages/prioridad_carga.py -- mismo patrón
-    BOOL_OR(tiene_reportado) GROUP BY ya usado en
-    get_churn_history_multiselect/get_variacion_mensual_anomala, aquí SIN
-    agregar a nivel de mercado (una fila por prestador y mes, no una serie
-    única). Acotado a prestador_ids explícitos (el top del heatmap, no
-    todo el universo) -- sin esa lista, cruzaría TODOS los prestadores x
-    TODOS los períodos, muy por encima de lo que esta página necesita.
+    Meses reportados por (prestador_id, periodo_id), para el heatmap
+    calendario de dashboard/pages/prioridad_carga.py. Acotado a
+    prestador_ids explícitos (el top del heatmap, no todo el universo) --
+    sin esa lista, cruzaría TODOS los prestadores x TODOS los períodos,
+    muy por encima de lo que esta página necesita.
 
-    Solo trae meses donde el prestador YA tiene fila en
-    fact_lineas_geografia_mes (reales o imputados por LOCF interior) --
-    los meses posteriores a ultimo_periodo_reportado (la cola de "reporte
-    detenido") simplemente NO aparecen aquí, porque capa2 nunca extrapola
-    hacia adelante. El llamador debe completar esa cola como "no
-    reportado" al armar la grilla completa -- ver prioridad_carga.py.
+    Solo trae los meses que el prestador REPORTÓ (el mart no tiene filas
+    imputadas): todo mes ausente -- huecos intermedios y la cola posterior
+    a ultimo_periodo_reportado -- es "no reportado". El llamador completa
+    la grilla con esos meses -- ver prioridad_carga.py.
     """
     if not prestador_ids:
         return pd.DataFrame(columns=["prestador_id", "periodo_id", "anio_mes", "tiene_reportado"])
     return _read(
         """
         SELECT f.prestador_id, f.periodo_id, d.anio_mes,
-               BOOL_OR(f.tiene_reportado) AS tiene_reportado
+               TRUE AS tiene_reportado
         FROM mart.fact_lineas_geografia_mes f
         JOIN mart.dim_periodo d ON d.periodo_id = f.periodo_id
         WHERE f.prestador_id = ANY(:prestador_ids)
@@ -2292,7 +2244,7 @@ def get_peso_historico_prestadores(peva_codigos: tuple[str, ...]) -> pd.DataFram
     return _read(
         """
         SELECT bp.peva_codigo, bp.prestador_id,
-               SUM(f.lineas_reportadas) AS total_lineas_historico
+               SUM(f.total_lineas) AS total_lineas_historico
         FROM mart.bridge_prestador_peva bp
         JOIN mart.fact_lineas_geografia_mes f ON f.prestador_id = bp.prestador_id
         WHERE bp.peva_codigo = ANY(:peva_codigos)

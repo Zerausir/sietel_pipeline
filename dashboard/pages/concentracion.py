@@ -67,7 +67,7 @@ def layout():
             page_header(
                 "Concentración y participación",
                 "Evolución histórica del IHH, concentración acumulada y posición de cada prestador, "
-                "calculados exclusivamente sobre datos reportados -- sin relleno interior (imputado).",
+                "calculados exclusivamente sobre datos reportados -- sin imputación.",
             ),
             html.Section(
                 className="filter-panel",
@@ -174,9 +174,7 @@ def layout():
                             {"field": "isp_nombre", "headerName": "Prestador", "minWidth": 260, "flex": 2},
                             {"field": "ruc_limpio", "headerName": "RUC", "minWidth": 150},
                             {"field": "cantidad_peva", "headerName": "PEVA", "width": 95},
-                            {"field": "total_lineas_prestador", "headerName": "Cuentas (real + imputado)",
-                             "type": "numericColumn", "minWidth": 170},
-                            {"field": "lineas_reportadas", "headerName": "Cuentas reportadas",
+                            {"field": "total_lineas_prestador", "headerName": "Cuentas reportadas",
                              "type": "numericColumn", "minWidth": 150},
                             {"field": "participacion_porcentaje", "headerName": "Participación %",
                              "type": "numericColumn", "minWidth": 150},
@@ -282,7 +280,7 @@ def update_provider_options(territory_id: str, period_id: int, opera_estados: li
     df = df.copy()
     df["provider_label"] = df["isp_nombre"].fillna(df["nombrecomercial"]).fillna(df["prestador_id"])
     options = [{"label": str(row.provider_label), "value": str(row.prestador_id)} for row in df.itertuples()]
-    positive = df[pd.to_numeric(df["lineas_reportadas"], errors="coerce").fillna(0) > 0]
+    positive = df[pd.to_numeric(df["total_lineas_prestador"], errors="coerce").fillna(0) > 0]
     selected = str(positive.iloc[0]["prestador_id"]) if not positive.empty else str(df.iloc[0]["prestador_id"])
     return options, selected
 
@@ -380,7 +378,7 @@ def update_concentration(
     ihh = ihh.copy()
     ihh["periodo"] = pd.to_datetime(ihh["periodo"])
     for column in [
-        "ihh", "numero_prestadores_reportaron", "numero_prestadores_registrados",
+        "ihh", "numero_prestadores_reportaron", "numero_prestadores_esperados",
         "porcentaje_cobertura_prestadores", "participacion_lider", "cr2", "cr4",
     ]:
         if column in ihh:
@@ -405,7 +403,7 @@ def update_concentration(
     cobertura_value = f"{format_number(cobertura, 1)}%" if pd.notna(cobertura) else "—"
     cobertura_note = (
         f"{format_number(selected_row.get('numero_prestadores_reportaron'))} de "
-        f"{format_number(selected_row.get('numero_prestadores_registrados'))} prestadores registrados "
+        f"{format_number(selected_row.get('numero_prestadores_esperados'))} prestadores esperados "
         f"reportaron este mes -- el IHH de al lado se calculó solo sobre ellos. Una cobertura baja "
         "significa que el índice representa una porción menor del mercado real ese mes."
     )
@@ -557,7 +555,7 @@ def update_concentration(
             participation["isp_nombre"].fillna(participation["nombrecomercial"]).fillna(participation["prestador_id"])
         )
         for column in [
-            "total_lineas_prestador", "lineas_reportadas", "participacion_porcentaje", "aporte_ihh",
+            "total_lineas_prestador", "participacion_porcentaje", "aporte_ihh",
             "ranking_prestador",
         ]:
             participation[column] = pd.to_numeric(participation[column], errors="coerce")
@@ -591,7 +589,7 @@ def update_concentration(
 
         grid_columns = [
             "ranking_prestador", "isp_nombre", "ruc_limpio", "cantidad_peva",
-            "total_lineas_prestador", "lineas_reportadas", "participacion_porcentaje", "aporte_ihh",
+            "total_lineas_prestador", "participacion_porcentaje", "aporte_ihh",
             "estado_lineas",
         ]
         grid_rows = clean_records(participation[grid_columns])

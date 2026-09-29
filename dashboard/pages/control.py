@@ -59,7 +59,7 @@ from services.queries import (
     get_churn_history_multiselect, get_evolution_filtrado_multiselect, get_operation_states, get_periods,
     get_prestadores_nunca_reportaron_detalle, get_prestadores_reporte_detenido_detalle,
     get_provider_count_in_range_multiselect, get_provider_options, get_reporting_summary_multiselect,
-    get_universo_incumplimiento_consolidado, get_variacion_mensual_anomala, resolve_period_id,
+    get_universo_incumplimiento_consolidado, get_variacion_mensual_anomala,
 )
 
 register_page(__name__, path="/sai/control", name="Control", order=4)
@@ -327,10 +327,9 @@ def layout():
                 ],
             ),
             html.P(
-                "Solo compara pares de meses consecutivos donde el prestador reportó de verdad en AMBOS "
-                "extremos -- un salto frente a un mes sin reporte real no es una variación genuina, es "
-                "artefacto del relleno interior (LOCF). Ver 'Prestadores con reporte detenido' arriba para "
-                "ese caso.",
+                "Solo compara pares de meses consecutivos donde el prestador reportó en AMBOS extremos -- "
+                "un salto frente a un mes sin reporte no es una variación genuina del prestador. Ver "
+                "'Prestadores con reporte detenido' arriba para ese caso.",
                 className="chart-subtitle",
             ),
             html.Div(id="ctrl-variacion-message", className="data-message"),
@@ -463,31 +462,38 @@ def update_resumen(seleccion, start_period, end_period, opera_estados, isp_nombr
 
     evolution = evolution.copy()
     evolution["periodo"] = pd.to_datetime(evolution["periodo"])
-    for columna in ["total_lineas", "lineas_reportadas", "numero_prestadores",
-                    "diferencia_mensual_lineas", "variacion_mensual_porcentaje"]:
+    for columna in ["total_lineas", "numero_prestadores", "numero_prestadores_esperados",
+                    "porcentaje_cobertura_prestadores", "diferencia_mensual_lineas", "variacion_mensual_porcentaje"]:
         if columna in evolution:
             evolution[columna] = pd.to_numeric(evolution[columna], errors="coerce")
 
     latest = evolution.sort_values("periodo_id").iloc[-1]
     latest_label = str(latest.get("anio_mes", ""))
 
-    lines_value = format_number(latest.get("lineas_reportadas"))
+    lines_value = format_number(latest.get("total_lineas"))
     lines_note = f"Período {latest_label}"
 
     providers_value = format_number(latest.get("numero_prestadores"))
-    providers_note = f"Con reporte real en {latest_label}"
+    providers_note = (
+        f"De {format_number(latest.get('numero_prestadores_esperados'))} esperados en {latest_label} "
+        f"(cobertura {format_number(latest.get('porcentaje_cobertura_prestadores'), 1)}%)"
+    )
 
+    evolution_por_periodo = evolution.sort_values("periodo_id")
+    cobertura_anterior = (
+        evolution_por_periodo.iloc[-2]["porcentaje_cobertura_prestadores"] if len(evolution_por_periodo) > 1 else None
+    )
     change_value = format_signed(latest.get("diferencia_mensual_lineas"))
     change_note = (
-        f"{format_signed(latest.get('variacion_mensual_porcentaje'), 2, '%')} respecto al mes anterior "
-        "(sobre reportadas)"
+        f"{format_signed(latest.get('variacion_mensual_porcentaje'), 2, '%')} respecto al mes anterior · "
+        f"cobertura {format_number(latest.get('porcentaje_cobertura_prestadores'), 1)}% vs. "
+        f"{format_number(cobertura_anterior, 1)}%"
     )
 
     # "Dejaron de reportar este mes" y su sparkline comparten la MISMA
-    # consulta (get_churn_history_multiselect) -- el valor puntual es
-    # simplemente la última fila de esa misma serie, no una consulta
-    # aparte (ver services/queries.py para por qué no puede reusar
-    # get_participation/get_churn_history originales aquí).
+    # consulta (get_churn_history_multiselect, misma definición que
+    # Evolución) -- el valor puntual y los activos del mes anterior son la
+    # última fila de esa misma serie.
     churn_value, churn_note, churn_spark = "—", "", empty_figure()
     try:
         periodo_actual_id = int(latest["periodo_id"])
@@ -495,16 +501,8 @@ def update_resumen(seleccion, start_period, end_period, opera_estados, isp_nombr
         if not churn_hist.empty:
             fila_actual = churn_hist[churn_hist["periodo_id"] == periodo_actual_id]
             if not fila_actual.empty:
-                churn_actual = int(pd.to_numeric(fila_actual.iloc[0]["churn"], errors="coerce") or 0)
-                fecha_mes_anterior = (latest["periodo"] - pd.DateOffset(months=1)).date().isoformat()
-                periodo_anterior_id = resolve_period_id(fecha_mes_anterior)
-                activos_anterior = (
-                    get_provider_count_in_range_multiselect(
-                        provincias, cantones, parroquias, periodo_anterior_id, periodo_anterior_id,
-                    ) if periodo_anterior_id is not None else 0
-                )
-                churn_value = format_number(churn_actual)
-                churn_note = f"De {format_number(activos_anterior)} activos en el mes anterior"
+                churn_value = format_number(fila_actual.iloc[0]["churn"])
+                churn_note = f"De {format_number(fila_actual.iloc[0]['activos_mes_anterior'])} activos en el mes anterior"
             churn_spark = build_sparkline_figure(
                 pd.to_numeric(churn_hist["churn"], errors="coerce").tolist(), PALETTE["red"],
             )
@@ -513,11 +511,11 @@ def update_resumen(seleccion, start_period, end_period, opera_estados, isp_nombr
 
     evolution_ordenada = evolution.sort_values("periodo")
     lines_variacion_pct = (
-            evolution_ordenada["lineas_reportadas"].pct_change().replace([float("inf"), float("-inf")],
-                                                                         float("nan")) * 100
+            evolution_ordenada["total_lineas"].pct_change().replace([float("inf"), float("-inf")],
+                                                                    float("nan")) * 100
     )
     lines_combined_fig = build_linked_magnitude_variation_figure(
-        evolution_ordenada["periodo"], evolution_ordenada["lineas_reportadas"], lines_variacion_pct,
+        evolution_ordenada["periodo"], evolution_ordenada["total_lineas"], lines_variacion_pct,
         titulo_magnitud="Cuentas reportadas", titulo_variacion="Variación % (escala log, signo preservado)",
         etiqueta_absoluta="cuentas", color=PALETTE["blue"], rellenar_area=True,
     )
@@ -529,6 +527,16 @@ def update_resumen(seleccion, start_period, end_period, opera_estados, isp_nombr
         evolution_ordenada["periodo"], evolution_ordenada["numero_prestadores"], providers_variacion_pct,
         titulo_magnitud="Prestadores", titulo_variacion="Variación % (escala log, signo preservado)",
         etiqueta_absoluta="prestadores", color=PALETTE["blue"], rellenar_area=False,
+    )
+    providers_combined_fig.add_trace(
+        go.Scatter(
+            x=evolution_ordenada["periodo"], y=evolution_ordenada["numero_prestadores_esperados"],
+            mode="lines", name="Esperados", line={"color": PALETTE["muted"], "width": 1.6, "dash": "dash"},
+            customdata=evolution_ordenada["porcentaje_cobertura_prestadores"],
+            hovertemplate="Esperados: %{y:,.0f} · cobertura %{customdata:.1f}%<extra></extra>",
+            showlegend=False,
+        ),
+        row=1, col=1,
     )
 
     filtros_txt = []

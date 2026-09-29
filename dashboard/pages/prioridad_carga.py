@@ -35,14 +35,12 @@ Es la señal más fuerte de "esto rompe Estadísticas de verdad", no solo
 HEATMAP: acotado a los ~25 prestadores de mayor peso (dominantes primero)
 de "reporte detenido" -- un heatmap con los 500+ prestadores completos
 sería ilegible, no es un límite de datos (la tabla de abajo sí trae a
-todos). Fuente: tiene_reportado por (prestador_id, periodo_id) desde
-mart.fact_lineas_geografia_mes, vía get_calendario_reportes() --
-mismo patrón BOOL_OR ya usado en Control/Evolución. Los meses de la
-"cola" (después de ultimo_periodo_reportado) no tienen fila en absoluto
-en fact_lineas_geografia_mes (capa2 nunca extrapola hacia adelante) --
-se completan aquí en Python como "no reportado" al armar la grilla
-completa desde primer_periodo_reportado hasta el último período
-disponible.
+todos). Fuente: meses reportados por (prestador_id, periodo_id) desde
+mart.fact_lineas_geografia_mes, vía get_calendario_reportes(). El mart
+solo tiene meses reportados (sin imputación): los huecos intermedios y la
+"cola" posterior a ultimo_periodo_reportado no tienen fila -- se
+completan aquí en Python como "no reportado" al armar la grilla completa
+desde primer_periodo_reportado hasta el último período disponible.
 
 "Nunca han reportado" NO tiene heatmap -- no hay un solo período de datos
 que marcar (ver arriba). Su "acción requerida" es una frase fija, no un
@@ -132,8 +130,8 @@ def layout():
                         children=[
                             html.H3(f"Calendario de reportes — top {TOP_HEATMAP} por peso", className="chart-title"),
                             html.P(
-                                "Verde = reportó ese mes. Rojo = no reportó (incluye huecos interiores rellenados "
-                                "por LOCF y la cola de meses sin reporte). Dominantes primero, sin importar su "
+                                "Verde = reportó ese mes. Rojo = no reportó (huecos intermedios y la cola de "
+                                "meses sin reporte). Dominantes primero, sin importar su "
                                 "posición por peso puro -- acotado a los de mayor prioridad, la tabla de abajo "
                                 "trae a todos sin excepción.",
                                 className="chart-subtitle",

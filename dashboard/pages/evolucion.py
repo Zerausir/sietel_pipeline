@@ -34,14 +34,11 @@ from components.ui import (
 from services.queries import (
     get_churn_history,
     get_evolution_filtrado,
-    get_participation,
-    get_participation_filtrado,
     get_periods,
     get_prestadores_nunca_reportaron_detalle,
     get_provider_count_in_range,
     get_reporting_summary,
     get_velocities,
-    resolve_period_id,
 )
 
 register_page(__name__, path="/sai/evolucion", name="Evolución", order=1)
@@ -132,19 +129,19 @@ def layout():
                 className="chart-grid two",
                 children=[
                     chart_card("Cuentas reportadas por mes", "evo-lines-combined-chart",
-                               "Arriba: magnitud (solo datos reales). Abajo: variación % respecto al mes "
-                               "anterior, mismo eje de tiempo -- pase el cursor por cualquiera de los dos "
-                               "paneles para ver el mismo punto en ambos."),
+                               "Arriba: magnitud, solo lo reportado (sin imputación). Abajo: variación % "
+                               "respecto al mes anterior, mismo eje de tiempo. Una caída puede ser falta de "
+                               "reporte: compárela con la cobertura del gráfico de prestadores."),
                     chart_card("Prestadores que reportaron", "evo-providers-combined-chart",
-                               "Arriba: cantidad de prestadores con al menos un reporte real cada mes. "
-                               "Abajo: variación % respecto al mes anterior, mismo eje de tiempo."),
+                               "Arriba: prestadores con reporte cada mes; la línea punteada son los "
+                               "esperados (cobertura en el hover). Abajo: variación % respecto al mes anterior."),
                 ],
             ),
             html.Section(
                 className="chart-grid two",
                 children=[
                     chart_card("Composición por velocidad", "evo-speed-composition-chart",
-                               "Distribución mensual por rango de velocidad."),
+                               "Distribución mensual por rango de velocidad, solo cuentas reportadas."),
                     chart_card("Diferencia mensual por velocidad", "evo-speed-difference-chart",
                                "Cambio absoluto frente al mes anterior para el último período visible."),
                 ],
@@ -229,8 +226,8 @@ def update_evolution(
     evolution = evolution.copy()
     evolution["periodo"] = pd.to_datetime(evolution["periodo"])
     numeric_columns = [
-        "total_lineas", "lineas_reportadas", "numero_prestadores",
-        "diferencia_mensual_lineas", "variacion_mensual_porcentaje",
+        "total_lineas", "numero_prestadores", "numero_prestadores_esperados",
+        "porcentaje_cobertura_prestadores", "diferencia_mensual_lineas", "variacion_mensual_porcentaje",
     ]
     for column in numeric_columns:
         if column in evolution:
@@ -239,72 +236,46 @@ def update_evolution(
     latest = evolution.sort_values("periodo_id").iloc[-1]
     latest_label = str(latest.get("anio_mes", ""))
 
-    lines_value = format_number(latest.get("lineas_reportadas"))
+    lines_value = format_number(latest.get("total_lineas"))
     lines_note = f"Período {latest_label}"
 
     providers_value = format_number(latest.get("numero_prestadores"))
-    providers_note = f"Con reporte real en {latest_label}"
+    providers_note = (
+        f"De {format_number(latest.get('numero_prestadores_esperados'))} esperados en {latest_label} "
+        f"(cobertura {format_number(latest.get('porcentaje_cobertura_prestadores'), 1)}%)"
+    )
 
+    # La variación compara dos meses con coberturas posiblemente distintas
+    # -- se muestran ambas para que una caída por falta de reporte no se lea
+    # como caída del mercado.
+    evolution_por_periodo = evolution.sort_values("periodo_id")
+    cobertura_anterior = (
+        evolution_por_periodo.iloc[-2]["porcentaje_cobertura_prestadores"] if len(evolution_por_periodo) > 1 else None
+    )
     change_value = format_signed(latest.get("diferencia_mensual_lineas"))
-    change_note = f"{format_signed(latest.get('variacion_mensual_porcentaje'), 2, '%')} respecto al mes anterior (sobre reportadas)"
+    change_note = (
+        f"{format_signed(latest.get('variacion_mensual_porcentaje'), 2, '%')} respecto al mes anterior · "
+        f"cobertura {format_number(latest.get('porcentaje_cobertura_prestadores'), 1)}% vs. "
+        f"{format_number(cobertura_anterior, 1)}%"
+    )
 
-    # "Dejaron de reportar este mes": prestadores con líneas positivas en el
-    # período anterior que ya NO aparecen en el último. periodo_id se
-    # codifica como anio*100+mes -- se usa aritmética de fecha real
-    # (no periodo_id - 1) para hallar el mes anterior correctamente en
-    # cualquier enero.
-    #
-    # CORRECCIÓN (19-ago-2026, revisión de funcionalidad completa antes
-    # de una presentación): esta tarjeta llamaba a get_participation() sin
-    # Estado/Prestador, mientras las otras 3 tarjetas de la misma fila
-    # ("Cuentas reportadas", "Prestadores que reportaron", "Cambio
-    # mensual") sí respetan esos filtros -- al filtrar por un prestador
-    # específico, este número se quedaba mostrando la cifra nacional, sin
-    # relación visible con el filtro activo. Ahora usa
-    # get_participation_filtrado() cuando hay Estado/Prestador elegido,
-    # igual que el resto de la fila.
-    churn_value, churn_note = "—", ""
+    # "Dejaron de reportar este mes" y su sparkline salen de la MISMA serie
+    # (get_churn_history, misma definición que Control): activos = reportaron
+    # con al menos una cuenta; el valor puntual es la última fila. Respeta
+    # los filtros de Estado/Prestador, igual que el resto de la fila.
+    churn_value, churn_note, churn_spark = "—", "", empty_figure()
     try:
         periodo_actual_id = int(latest["periodo_id"])
-        fecha_mes_anterior = (latest["periodo"] - pd.DateOffset(months=1)).date().isoformat()
-        periodo_anterior_id = resolve_period_id(fecha_mes_anterior)
-        if opera_estados or isp_nombres:
-            actuales = get_participation_filtrado(territory_id, periodo_actual_id, opera_estados, isp_nombres)
-            anteriores = (
-                get_participation_filtrado(territory_id, periodo_anterior_id, opera_estados, isp_nombres)
-                if periodo_anterior_id is not None else pd.DataFrame()
-            )
-        else:
-            actuales = get_participation(territory_id, periodo_actual_id)
-            anteriores = get_participation(territory_id,
-                                           periodo_anterior_id) if periodo_anterior_id is not None else pd.DataFrame()
-        if not actuales.empty and not anteriores.empty:
-            activos_anterior = set(
-                anteriores.loc[
-                    pd.to_numeric(anteriores["total_lineas_prestador"], errors="coerce").fillna(0) > 0, "prestador_id"]
-            )
-            activos_actual = set(
-                actuales.loc[
-                    pd.to_numeric(actuales["total_lineas_prestador"], errors="coerce").fillna(0) > 0, "prestador_id"]
-            )
-            desaparecieron = activos_anterior - activos_actual
-            churn_value = format_number(len(desaparecieron))
-            churn_note = f"De {format_number(len(activos_anterior))} activos en el mes anterior"
-    except Exception:
-        churn_value, churn_note = "—", "No se pudo calcular"
-
-    # Sparkline: "Dejaron de reportar este mes" no tenía ningún gráfico en
-    # la página que mostrara su tendencia -- a diferencia de "Cuentas
-    # reportadas"/"Prestadores", que ya tienen su línea completa debajo.
-    # Últimos 12 meses terminando en el período visible, no el rango
-    # completo Desde-Hasta (ver get_churn_history).
-    try:
-        churn_hist = get_churn_history(territory_id, int(latest["periodo_id"]), meses=12)
+        churn_hist = get_churn_history(territory_id, periodo_actual_id, 12, opera_estados, isp_nombres)
+        fila_actual = churn_hist[churn_hist["periodo_id"] == periodo_actual_id]
+        if not fila_actual.empty:
+            churn_value = format_number(fila_actual.iloc[0]["churn"])
+            churn_note = f"De {format_number(fila_actual.iloc[0]['activos_mes_anterior'])} activos en el mes anterior"
         churn_spark = build_sparkline_figure(
             pd.to_numeric(churn_hist["churn"], errors="coerce").tolist(), PALETTE["red"],
         )
     except Exception:
-        churn_spark = empty_figure()
+        churn_value, churn_note, churn_spark = "—", "No se pudo calcular", empty_figure()
 
     evolution_ordenada = evolution.sort_values("periodo")
 
@@ -312,16 +283,15 @@ def update_evolution(
     # compartido, hover unificado) en vez de dos dcc.Graph sueltos -- a
     # pedido del usuario (14-ago-2026), ver
     # components/ui.py:build_linked_magnitude_variation_figure(). Sin
-    # consulta nueva a PostgreSQL: "evolution" ya trae solo datos reales
-    # (nunca relleno interior, ver subtítulo de la tarjeta), así que
-    # pct_change() directo sobre esa serie ya filtrada es automáticamente
-    # consistente con la metodología del proyecto.
+    # consulta nueva a PostgreSQL: "evolution" solo trae lo reportado (el
+    # mart no tiene imputación), así que pct_change() directo sobre esa
+    # serie es consistente con la metodología del proyecto.
     lines_variacion_pct = (
-            evolution_ordenada["lineas_reportadas"].pct_change().replace([float("inf"), float("-inf")],
-                                                                         float("nan")) * 100
+            evolution_ordenada["total_lineas"].pct_change().replace([float("inf"), float("-inf")],
+                                                                    float("nan")) * 100
     )
     lines_combined_fig = build_linked_magnitude_variation_figure(
-        evolution_ordenada["periodo"], evolution_ordenada["lineas_reportadas"], lines_variacion_pct,
+        evolution_ordenada["periodo"], evolution_ordenada["total_lineas"], lines_variacion_pct,
         titulo_magnitud="Cuentas reportadas", titulo_variacion="Variación % (escala log, signo preservado)",
         etiqueta_absoluta="cuentas", color=PALETTE["blue"], rellenar_area=True,
     )
@@ -334,6 +304,18 @@ def update_evolution(
         evolution_ordenada["periodo"], evolution_ordenada["numero_prestadores"], providers_variacion_pct,
         titulo_magnitud="Prestadores", titulo_variacion="Variación % (escala log, signo preservado)",
         etiqueta_absoluta="prestadores", color=PALETTE["blue"], rellenar_area=False,
+    )
+    # Esperados (panel de obligación) en el mismo panel superior: la
+    # distancia entre las dos líneas es la falta de reporte de ese mes.
+    providers_combined_fig.add_trace(
+        go.Scatter(
+            x=evolution_ordenada["periodo"], y=evolution_ordenada["numero_prestadores_esperados"],
+            mode="lines", name="Esperados", line={"color": PALETTE["muted"], "width": 1.6, "dash": "dash"},
+            customdata=evolution_ordenada["porcentaje_cobertura_prestadores"],
+            hovertemplate="Esperados: %{y:,.0f} · cobertura %{customdata:.1f}%<extra></extra>",
+            showlegend=False,
+        ),
+        row=1, col=1,
     )
 
     if velocities.empty:

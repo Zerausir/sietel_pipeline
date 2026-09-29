@@ -67,7 +67,7 @@ Desarrollado por la **Dirección de Mercados — ARCOTEL**.
 - [Arquitectura general](#arquitectura-general)
 - [Estructura del repositorio](#estructura-del-repositorio)
 - [Las tres capas, en detalle — Líneas Dedicadas](#las-tres-capas-en-detalle--líneas-dedicadas)
-- [Principio metodológico: nunca imputar para medir concentración de mercado](#principio-metodológico-nunca-imputar-para-medir-concentración-de-mercado)
+- [Principio metodológico: nunca imputar](#principio-metodológico-nunca-imputar)
 - [Geografía de nodos ISP](#geografía-de-nodos-isp)
 - [El dashboard, módulo por módulo](#el-dashboard-módulo-por-módulo)
 - [Rendimiento del dashboard](#rendimiento-del-dashboard)
@@ -103,10 +103,11 @@ Desarrollado por la **Dirección de Mercados — ARCOTEL**.
   en cualquier punto del histórico, aunque SIETEL solo exponga su estado *actual*.
 - Detecta y clasifica automáticamente **RUC con múltiples PEVA en conflicto**, con un flujo de revisión humana
   persistente para los casos que no se pueden resolver solos.
-- Reconstruye una **serie mensual completa** para cada PEVA, rellenando huecos **solo hacia el interior** (nunca
-  extrapola hacia adelante) y marcando de forma explícita, fila por fila, qué es un reporte real y qué es relleno.
-- Calcula **IHH, CR2, CR4 y participación de mercado exclusivamente sobre datos reportados** — nunca sobre datos
-  imputados —, publicando siempre un indicador de cobertura junto al índice.
+- **Nunca imputa**: toda cifra de líneas es exactamente lo que el prestador reportó. Quién debía reportar un mes y
+  no lo hizo se lleva en un **panel de obligación sin valores**, que alimenta la **cobertura** publicada junto a cada
+  total y a cada índice.
+- Calcula **IHH, CR2, CR4 y participación de mercado exclusivamente sobre datos reportados**, publicando siempre un
+  indicador de cobertura junto al índice.
 
 **Geografía de nodos ISP** (agregado ago-2026):
 
@@ -192,9 +193,9 @@ de Microsoft sí negocia correctamente.
 por defecto. El fix se aplica solo dentro del contenedor de `docker/Dockerfile` — no debe extenderse nunca a un
 contenedor compartido con otro pipeline.
 
-**Por qué `capa2` son tablas físicas reconstruidas, no vistas:** tanto el relleno LOCF interior de líneas dedicadas como
-el cruce punto-en-polígono de nodos requieren procesamiento (ventanas ordenadas, `shapely`) que sería inviable
-recalcular en cada consulta del dashboard. Se reconstruyen por completo en cada corrida de `sietel_mart_pipeline`.
+**Por qué `capa2` son tablas físicas reconstruidas, no vistas:** tanto la consolidación de líneas dedicadas (exclusión
+de PEVA duplicados, unificación de variantes de la llave) como el cruce punto-en-polígono de nodos (`shapely`) serían
+inviables de recalcular en cada consulta del dashboard. Se reconstruyen por completo en cada corrida de `sietel_mart_pipeline`.
 
 **Por qué el geoprocesamiento de nodos no usa PostGIS:** este proyecto corre sobre una instancia PostgreSQL estándar sin
 extensiones geoespaciales instaladas. El cruce punto-en-polígono se resuelve con `shapely` + `STRtree` en Python, contra
@@ -224,7 +225,7 @@ sietel_pipeline/
 │   └── remediar_versiones_espurias_scd2.py   # Remediación puntual de versiones SCD2 espurias (ver Historial)
 ├── mart/                                     # Capa 2/3
 │   ├── detectar_conflictos_peva.py           # Detecta/clasifica RUC con múltiples PEVA, resuelve Grupo A
-│   ├── construir_capa2.py                    # Reconstruye capa2.lineas_dedicadas_consolidado (LOCF interior)
+│   ├── construir_capa2.py                    # Reconstruye capa2.lineas_dedicadas_consolidado (solo lo reportado)
 │   ├── limpiar_coordenadas_nodo_isp.py       # Parte A geografía de nodos: DMS -> decimal, validación de rango
 │   ├── cargar_parroquias.py                  # Carga shapefile CONALI (idempotente) + geometría precalculada
 │   ├── detectar_discrepancias_geografia_nodo.py # Parte B: cruce punto-en-polígono, discrepancias por cantón
@@ -324,7 +325,8 @@ Seis tareas del DAG **`sietel_mart_pipeline`**:
    sobreescriben** en corridas posteriores.
 
 2. **`construir_capa2`** (`mart/construir_capa2.py`) — reconstruye por completo
-   `capa2.lineas_dedicadas_consolidado`, con relleno **LOCF exclusivamente hacia el interior** de la serie de cada PEVA.
+   `capa2.lineas_dedicadas_consolidado`, **solo con lo reportado** — sin relleno de huecos (ver
+   [Principio metodológico: nunca imputar](#principio-metodológico-nunca-imputar)).
 3. **`limpiar_coordenadas_nodo_isp`** — ver [Geografía de nodos ISP](#geografía-de-nodos-isp).
 4. **`cargar_parroquias`** — ver [Geografía de nodos ISP](#geografía-de-nodos-isp).
 5. **`detectar_discrepancias_geografia_nodo`** — ver [Geografía de nodos ISP](#geografía-de-nodos-isp).
@@ -336,49 +338,79 @@ PostgreSQL, como `mart_user`, vía el **protocolo simple** de Postgres (conexió
 `autocommit=True`) — necesario porque el archivo trae su propio `BEGIN;`/`COMMIT;`.
 
 El archivo, en orden: `DROP SCHEMA mart CASCADE` + `CREATE SCHEMA` (mart es **completamente reconstruible** en cada
-corrida) → dimensiones y puentes → hechos de líneas dedicadas → dimensiones y vistas de geografía de nodos → vistas
+corrida) → dimensiones y puentes → hechos de líneas dedicadas → panel de obligación de reporte → dimensiones y vistas
+de geografía de nodos → vistas
 `vw_dashboard_*` → **re-otorgamiento explícito de permisos** a `dashboard_lector`/`calidad_lector`/`eda_lector` (el
-`DROP SCHEMA CASCADE` inicial borra cualquier `GRANT` previo) → validaciones de integridad (fuera de la transacción).
+`DROP SCHEMA CASCADE` inicial borra cualquier `GRANT` previo) → invariantes bloqueantes (sección 17.0, dentro de la
+transacción: si alguna falla, se revierte todo y el dashboard sigue sirviendo el mart anterior) → validaciones de
+diagnóstico (fuera de la transacción).
 
-**Principio de diseño explícito en todo el archivo**: el cálculo de líneas reportadas, participación de mercado e IHH
-usa **exclusivamente `lineas_reportadas`** — nunca `total_lineas`. Ver la sección siguiente.
+**Principio de diseño explícito en todo el archivo**: no existe ninguna columna reportado/imputado — `total_lineas` es
+siempre lo reportado. Ver la sección siguiente.
 
-## Principio metodológico: nunca imputar para medir concentración de mercado
+## Principio metodológico: nunca imputar
 
 Este es el criterio de diseño más importante de todo el sistema, y vale la pena explicarlo una vez, completo:
 
-**El relleno de huecos (LOCF) es aceptable para continuidad visual de una serie de tiempo, pero nunca para medir la
-estructura competitiva de un mercado en un mes específico.** Un prestador que deja de reportar tiene una probabilidad
-desproporcionadamente alta de estar en crisis, saliendo del mercado, o en incumplimiento — es un caso clásico de dato
-faltante *no aleatorio* (MNAR). Heredar su último valor conocido asume implícitamente "sin cambios", cuando
-estadísticamente es más probable lo contrario.
+**Ninguna cifra del sistema es imputada.** Hasta septiembre de 2026, `capa2` rellenaba los huecos interiores de cada
+serie con el último valor conocido (LOCF) y marcaba cada fila como reportada o imputada. Se eliminó por completo
+(29-sep-2026) porque:
 
-Por eso:
+- Un prestador que deja de reportar tiene una probabilidad desproporcionadamente alta de estar en crisis, saliendo del
+  mercado o en incumplimiento — un dato faltante *no aleatorio* (MNAR). Heredar su último valor supone "sin cambios"
+  cuando lo más probable es lo contrario.
+- Cuando un prestador **sí** entregó su reporte pero omitió una combinación (parroquia, tipo de enlace…), lo más
+  probable es un **cero estructural**, no un faltante: el LOCF inventaba líneas ahí.
+- Mientras existía un total mixto (reportado + imputado), terminaba usándose en cálculos que debían ser solo
+  reportados (composición por velocidad, historial de un prestador, "dejaron de reportar") y los totales históricos
+  cambiaban retroactivamente cada vez que un prestador volvía a reportar.
 
-- **`fact_lineas_geografia_mes.tiene_reportado`** distingue, para cada prestador y mes, si hubo un reporte real ese mes
-  exacto — independientemente de si `capa2` tiene un valor (real o heredado) para ese mes.
-- **`fact_participacion_mercado`** calcula `participacion_porcentaje` / `aporte_ihh` **solo** con
-  `lineas_reportadas` de quienes tienen `tiene_reportado = TRUE` ese mes. Nunca en `0%` ni con su último valor conocido.
-- **`fact_ihh_geografico`** expone columnas de **cobertura** junto al índice, y una alerta adicional de **prestador
-  dominante ausente**: un prestador que en algún período de su historia alcanzó ≥30% de participación real en un
-  territorio, y no reportó ese mes. **Acotada estrictamente a nivel NACIONAL** — se intentó extender a provincia y se
-  descubrió que prestadores chicos superan el 30% en provincias con pocos competidores y quedan marcados "ausentes"
-  para siempre tras salir del mercado.
+Es la práctica recomendada en la literatura de datos faltantes (Rubin; Little & Rubin; NRC 2010 e ICH E9(R1)
+desaconsejan LOCF) y en estadística oficial: publicar lo observado junto con su cobertura, sin rellenar en silencio.
+
+Cómo se resuelve lo que antes dependía del relleno:
+
+- **`mart.panel_reporte_prestador_mes`** — una fila por (período, territorio, prestador) desde el primer hasta el último
+  reporte del prestador en ese territorio, con `reporto` (bool). **No contiene ningún valor de líneas.** Es el
+  denominador de la **cobertura** (`numero_prestadores_esperados`, `porcentaje_cobertura_prestadores`) en
+  `fact_resumen_mercado_mes`, `fact_participacion_mercado` y `fact_ihh_geografico`, y en Evolución/Control. A
+  diferencia del LOCF, la ventana es por prestador y territorio, no por combinación: un prestador que cambió de tipo de
+  enlace entre dos reportes también cuenta como esperado en el mes que no reportó.
+- **`fact_participacion_mercado`** calcula `participacion_porcentaje` / `aporte_ihh` **solo** con lo reportado por
+  quienes reportaron ese mes; los esperados que no reportaron aparecen como `SIN_REPORTE_ESTE_MES`, sin ningún valor —
+  nunca en `0%` ni con su último valor conocido. El denominador es la suma de lo reportado ese mes.
+- **`fact_ihh_geografico`** expone la **cobertura** junto al índice, y una alerta adicional de **prestador dominante
+  ausente**: un prestador que en algún período de su historia alcanzó ≥30% de participación real en un territorio, y no
+  reportó ese mes. **Acotada estrictamente a nivel NACIONAL** — se intentó extender a provincia y se descubrió que
+  prestadores chicos superan el 30% en provincias con pocos competidores y quedan marcados "ausentes" para siempre tras
+  salir del mercado.
+- **Series de totales** (Evolución, Control): una caída del total puede ser falta de reporte, no del mercado — por eso
+  cada punto viaja con su cobertura (línea punteada de esperados en el gráfico de prestadores; cobertura de ambos meses
+  en la tarjeta de cambio mensual).
+- **"Dejaron de reportar este mes"** tiene una sola definición para Evolución (KPI y sparkline) y Control
+  (`services/queries.py:_churn_por_mes`): activos en el mes anterior (reportaron con al menos una cuenta) que no están
+  activos este mes, comparando meses calendario.
+- **`services/queries.py:get_variacion_mensual_anomala`** (Control) compara cuántas cuentas reporta un prestador **solo**
+  entre meses calendario consecutivos en los que reportó en ambos — un salto frente a un mes sin reporte no es una
+  variación genuina.
+- **Guardas contra la reintroducción**: la invariante bloqueante 17.9 de `sql/02_ddl_mart.sql` aborta el refresco si
+  cualquier columna de `capa2`/`mart` (incluidas vistas materializadas) vuelve a llevar datos o marcas de imputación, y
+  `tests/test_sin_imputacion.py` falla si el código de `construir_capa2.py` o del mart vuelve a rellenar huecos.
 - **La obligación de reportar de un prestador empieza un año calendario después de la fecha del título habilitante**, no
   el día del otorgamiento. `get_reporting_summary` (dashboard) y `vw_prestadores_sin_reportar`
   (`fuera_de_gracia`) aplican esta regla.
-- **Límite reconocido explícitamente**: un prestador que **jamás** ha entregado un solo reporte no aparece en
-  `capa2` ni en `fact_lineas_geografia_mes`. Se hace visible aparte vía `mart.vw_prestadores_sin_reportar`
-  (clasificado en `activo_sin_reportar` / `no_operativo` / `zona_gris`), solo a nivel Nacional — **este límite se
-  mantiene igual en Control**: los filtros de Provincia/Cantón/Parroquia no pueden aplicarse a esa tabla, porque la
-  fuente misma no tiene la columna.
-- **`mart.vw_prestadores_reporte_detenido`** — complemento del anterior: prestadores que sí reportaron al menos una vez
-  y luego se detuvieron, usando un período de referencia con margen de 3 meses (no el último período crudo) para no
-  marcar como "detenido" un rezago normal de carga.
-- **`services/queries.py:get_variacion_mensual_anomala`** (Control, dashboard) extiende el mismo principio a un caso
-  nuevo: comparar cuántas cuentas reporta un prestador mes a mes **solo** entre pares de meses donde reportó de verdad
-  en AMBOS extremos — un salto frente a un mes sin reporte real no es una variación genuina, es artefacto del relleno
-  interior (LOCF), y se excluye explícitamente.
+- **Límites reconocidos explícitamente**:
+    - Tras el **último** reporte de un prestador el panel no tiene filas: no puede distinguir "salió del mercado" de
+      "dejó de reportar". Ese caso lo cubren `mart.vw_prestadores_reporte_detenido` (con un margen de 3 meses para no
+      marcar como "detenido" un rezago normal de carga) y la alerta de prestador dominante ausente.
+    - Un prestador que **jamás** ha entregado un reporte no aparece en `capa2` ni en el panel. Se hace visible aparte
+      vía `mart.vw_prestadores_sin_reportar` (clasificado en `activo_sin_reportar` / `no_operativo` / `zona_gris`), solo
+      a nivel Nacional — **este límite se mantiene igual en Control**: los filtros de Provincia/Cantón/Parroquia no
+      pueden aplicarse a esa tabla, porque la fuente misma no tiene la columna.
+    - Los totales de meses con cobertura baja son **menores** que los que mostraba la versión con LOCF (en diciembre de
+      2013, cerca de dos tercios del total anterior era imputado). No es una caída del mercado: es lo que realmente se
+      reportó. Si se necesitara una serie continua, debe ser una estimación explícita, rotulada como tal y separada de
+      los hechos oficiales — nunca de vuelta en el mart.
 
 ## Geografía de nodos ISP
 
@@ -586,7 +618,7 @@ propio servidor de aplicación — implementado, con evidencia medida en cada pu
 las hasta 9 consultas SQL secuenciales dentro de un mismo *callback* de Evolución (5 en Concentración), o los cinco
 *callbacks* independientes de Control que reaccionan a los mismos filtros. Tampoco se agregó un límite de filas a Mapa
 de nodos — decisión de completitud de datos que se prefirió no asumir unilateralmente, dado el principio de
-[nunca imputar/alterar datos](#principio-metodológico-nunca-imputar-para-medir-concentración-de-mercado) que rige el
+[nunca imputar/alterar datos](#principio-metodológico-nunca-imputar) que rige el
 resto del sistema.
 
 ## Requisitos previos
@@ -807,7 +839,7 @@ python gestionar_usuarios.py resetear-password --username jperez
 
 | Tabla                          | Contenido                                                                                                                                           |
 |--------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
-| `lineas_dedicadas_consolidado` | Serie mensual completa por PEVA/geografía/tipoEnlace/tipoCliente/nivelComparticion/portador, LOCF solo interior, flags `es_reportado`/`es_imputado` |
+| `lineas_dedicadas_consolidado` | Lo reportado por PEVA/geografía/tipoEnlace/tipoCliente/nivelComparticion/portador y mes — una fila por llave y mes, sin relleno de huecos    |
 | `nodo_isp_geocodificado`       | Nodos con latitud/longitud convertidas a decimal + validadas (Parte A geografía de nodos)                                                           |
 | `parroquias_geometria`         | Geometría íntegra por parroquia (CONALI, 1.052 filas), sin simplificar — fuente del cruce punto-en-polígono real                                    |
 | `territorio_geometria_nodo`    | Geometría de cantón/provincia, disuelta y simplificada — exclusivamente para el polígono del mapa del dashboard                                     |
@@ -816,7 +848,8 @@ python gestionar_usuarios.py resetear-password --username jperez
 **Esquema `mart`** (Capa 3): dimensiones (`dim_periodo`, `dim_prestador`, `dim_geografia`, `dim_territorio`,
 `dim_territorio_nodo`), tablas puente (`bridge_geografia_territorio`), tablas de hechos de líneas dedicadas
 (`fact_lineas_geografia_mes`, `fact_lineas_velocidad_mes`, `fact_resumen_mercado_mes`, `fact_velocidad_mercado_mes`,
-`fact_participacion_mercado`, `fact_ihh_geografico`), vistas de cumplimiento (`vw_prestadores_sin_reportar`,
+`fact_participacion_mercado`, `fact_ihh_geografico`), el panel de obligación de reporte sin valores
+(`panel_reporte_prestador_mes`), vistas de cumplimiento (`vw_prestadores_sin_reportar`,
 `vw_prestadores_reporte_detenido`), vistas de geografía de nodos (`vw_nodos_isp_mapa`, `vw_geometria_territorio_nodo`,
 `vw_dashboard_filtros_geograficos_nodo`), y las vistas `vw_dashboard_*` que consume directamente el dashboard.
 
@@ -851,13 +884,26 @@ Los años cargados **antes** de este cambio necesitan un backfill puntual —
 completo (JSONB) de la fila anterior cada vez que `hash_contenido` cambia entre una carga y otra.
 
 **Correcciones puntuales aplicadas en producción sobre `mart` sin esperar al próximo refresco completo**
-(`sql/06` a `sql/08`, cada una con su verificación documentada dentro del propio archivo):
+(`sql/06` a `sql/08`, cada una con su verificación documentada dentro del propio archivo). `07` y `08` son
+**obsoletos desde el 29-sep-2026**: referencian columnas de imputación que ya no existen y abortan al inicio si alguien
+los aplica — su contenido vive en `sql/02_ddl_mart.sql`:
 
 | Archivo                                        | Qué corrige                                                                                                                                                                |
 |------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `06_patch_vw_prestadores_sin_reportar.sql`     | Agrega `fuera_de_gracia` y `clasificacion_incumplimiento` sin esperar al próximo refresco completo                                                                         |
 | `07_patch_vw_prestadores_reporte_detenido.sql` | Corrige 13 falsos positivos: usaba el último período crudo como referencia en vez de uno con margen de 3 meses                                                             |
 | `08_patch_fact_ihh_geografico.sql`             | Alerta de *prestador dominante ausente* — tres iteraciones hasta acotarla a NACIONAL (v2 y v3 producían falsos positivos por período de existencia y por nivel geográfico) |
+
+**Eliminación completa de la imputación (29-sep-2026)** — ver
+[Principio metodológico: nunca imputar](#principio-metodológico-nunca-imputar). Además del cambio de metodología, una
+revisión previa encontró cálculos del dashboard que usaban totales mixtos (reportado + imputado): la composición y
+diferencia mensual por velocidad, el gráfico de cuentas del historial de un prestador, y el KPI "Dejaron de reportar
+este mes" de Evolución (contaba como activo a quien solo tenía líneas imputadas, y no coincidía con su propio
+sparkline ni con Control). Todos quedan corregidos por construcción: ya no existe ningún total mixto. Verificado sobre
+un PostgreSQL local con datos sintéticos, antes y después: IHH, CR2/CR4, líder y participación **idénticos**; el total
+nuevo coincide exactamente con el "reportado" anterior. El panel de obligación también corrige dos defectos de la
+versión con LOCF: la cobertura no contaba como esperado a un prestador que cambiaba de combinación entre dos reportes,
+y el churn por `LAG()` nunca contaba a quien dejaba de reportar para siempre.
 
 **Bug crítico corregido en `_cambio_relevante()`** (`cargar_dimensiones.py` y `cargar_nodo_isp.py`, 07-ago-2026):
 comparaba claves de diccionario con el *case* exacto de SQL Server (`tipoNodo`, `Resolucion`, `nombreComercial`)
@@ -928,9 +974,11 @@ lo almacenado en PostgreSQL. Chequeos adicionales: dimensiones SCD sin versiones
 sin filas duplicadas por el `JOIN` de vigencia temporal (llave natural completa de 8 columnas). El resultado se imprime
 como reporte consolidado (✅/❌) y se registra en `staging.control_cargas`.
 
-`sql/02_ddl_mart.sql` incluye su propio bloque de validaciones (sección 17, fuera de la transacción principal),
-incluyendo invariantes de la metodología de datos reales: ningún prestador sin reporte real ese mes debe tener
-`participacion_porcentaje`/`aporte_ihh` distinto de `NULL`, cobertura siempre entre 0 y 100, `CR2 ≤ CR4 ≤ 100`.
+`sql/02_ddl_mart.sql` incluye su propio bloque de invariantes **bloqueantes** (sección 17.0, dentro de la transacción
+— si alguna falla se revierte el refresco completo), incluyendo las de la metodología: ninguna columna de imputación en
+`capa2`/`mart` (17.9), panel de obligación coherente con los hechos (17.10), ningún prestador sin reporte ese mes con
+`participacion_porcentaje`/`aporte_ihh` distinto de `NULL`, cobertura siempre entre 0 y 100, `CR2 ≤ CR4 ≤ 100`. La
+sección 17 repite las mismas consultas como `SELECT` de diagnóstico, fuera de la transacción.
 
 La geografía de nodos se verifica manualmente contra Postgres real en cada cambio de esquema. Las consultas y callbacks
 del dashboard se prueban con datos simulados que cubren casos límite reales (rangos extremos observados en producción,
