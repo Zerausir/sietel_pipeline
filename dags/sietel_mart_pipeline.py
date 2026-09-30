@@ -68,6 +68,8 @@ default_args = {
     schedule=None,
     start_date=datetime(2026, 7, 1),
     catchup=False,
+    # Disparos encadenados del detector (30-sep-2026) quedan en cola, no en paralelo.
+    max_active_runs=1,
     tags=["sietel", "mart", "dashboard"],
 )
 def sietel_mart_pipeline():

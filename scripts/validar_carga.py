@@ -59,7 +59,21 @@ class ValidacionFallida(Exception):
     pass
 
 
-def _contar_sqlserver_por_anio(anio: int) -> int:
+def _meses_parciales(meses: list[int] | None) -> list[int] | None:
+    """
+    CAMBIO (30-sep-2026): la carga puede cubrir solo algunos meses de un
+    año (sietel_detector_cambios) y la validación se acota a esos mismos
+    meses -- validar el año completo daría un falso fallo si otro mes
+    cambió en SIETEL durante la carga (el detector lo recoge en su próxima
+    corrida). Devuelve None cuando son los 12 meses: sin filtro extra,
+    exactamente el comportamiento anterior.
+    """
+    if not meses or sorted(set(meses)) == MESES_DEL_ANIO:
+        return None
+    return sorted(set(meses))
+
+
+def _contar_sqlserver_por_anio(anio: int, meses: list[int] | None = None) -> int:
     """
     Cuenta el número de filas del agregado (no del detalle crudo)
     que SQL Server produciría para el año dado. Equivale a contar
@@ -69,28 +83,32 @@ def _contar_sqlserver_por_anio(anio: int) -> int:
     propio texto SQL con WHERE anio = ? solamente) -- no se ve afectada
     por el cambio de firma a (anio, mes) del punto anterior.
     """
+    meses = _meses_parciales(meses)
+    filtro_meses = f"AND periodoNumero IN ({', '.join('?' * len(meses))})" if meses else ""
     with sqlserver_cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT COUNT(*) AS n FROM (
                 SELECT peva_codigo, par_codigo, periodoNumero, anio,
                        tipoEnlace, tipoCliente, nivelComparticion, portador
                 FROM dbo.VALineasDedicadas
-                WHERE anio = ?
+                WHERE anio = ? {filtro_meses}
                 GROUP BY peva_codigo, par_codigo, periodoNumero, anio,
                          tipoEnlace, tipoCliente, nivelComparticion, portador
             ) AS agg
             """,
-            (anio,),
+            (anio, *(meses or [])),
         )
         return cur.fetchone()["n"]
 
 
-def _contar_postgres_por_anio(anio: int) -> int:
+def _contar_postgres_por_anio(anio: int, meses: list[int] | None = None) -> int:
+    meses = _meses_parciales(meses)
     with postgres_cursor(commit=False) as cur:
         cur.execute(
-            "SELECT COUNT(*) AS n FROM staging.va_lineas_dedicadas_resumen WHERE anio = %s",
-            (anio,),
+            "SELECT COUNT(*) AS n FROM staging.va_lineas_dedicadas_resumen "
+            "WHERE anio = %s AND (%s::int[] IS NULL OR periodoNumero = ANY(%s::int[]))",
+            (anio, meses, meses),
         )
         return cur.fetchone()["n"]
 
@@ -113,7 +131,7 @@ def _make_key(fila: dict) -> tuple:
     )
 
 
-def _certificar_contenido_por_anio(anio: int) -> dict:
+def _certificar_contenido_por_anio(anio: int, meses: list[int] | None = None) -> dict:
     """
     Recalcula el hash del agregado desde SQL Server -- mes a mes, igual
     que la carga en cargar_hechos_anio.py -- y compara contra los hashes
@@ -127,9 +145,10 @@ def _certificar_contenido_por_anio(anio: int) -> dict:
       (no debería ocurrir si el conteo ya coincidió, pero se verifica
       explícitamente para no asumir)
     """
+    meses = _meses_parciales(meses)
     hashes_origen = {}
     with sqlserver_cursor() as cur:
-        for mes in MESES_DEL_ANIO:
+        for mes in meses or MESES_DEL_ANIO:
             cur.execute(SQL_EXTRAER_HECHOS_ANIO, (anio, mes))
             for f in cur.fetchall():
                 hashes_origen[_make_key(f)] = calcular_hash_fila(f)
@@ -149,9 +168,9 @@ def _certificar_contenido_por_anio(anio: int) -> dict:
             f"""
             SELECT {columnas_pg}, hash_contenido
             FROM staging.va_lineas_dedicadas_resumen
-            WHERE anio = %s
+            WHERE anio = %s AND (%s::int[] IS NULL OR periodoNumero = ANY(%s::int[]))
             """,
-            (anio,),
+            (anio, meses, meses),
         )
         for r in cur.fetchall():
             valores = {c: r[c.lower()] for c in COLUMNAS_HASH}
@@ -296,7 +315,7 @@ def _verificar_unicidad_vigencia():
     return problemas
 
 
-def _verificar_vista_sin_duplicados(anio: int):
+def _verificar_vista_sin_duplicados(anio: int, meses: list[int] | None = None):
     """
     Verifica que la vista de consumo no duplique combinaciones por el JOIN
     de vigencia temporal con las dimensiones SCD Tipo 2.
@@ -314,18 +333,19 @@ def _verificar_vista_sin_duplicados(anio: int):
     22-jul-2026 en el docstring del módulo) antes de aplicar esta
     corrección.
     """
+    meses = _meses_parciales(meses)
     with postgres_cursor(commit=False) as cur:
         cur.execute(
             """
             SELECT peva_codigo, par_codigo, periodoNumero,
                    tipoEnlace, tipoCliente, nivelComparticion, portador, COUNT(*) AS n
             FROM analitico.v_lineas_dedicadas_resumen
-            WHERE anio = %s
+            WHERE anio = %s AND (%s::int[] IS NULL OR periodoNumero = ANY(%s::int[]))
             GROUP BY peva_codigo, par_codigo, periodoNumero,
                      tipoEnlace, tipoCliente, nivelComparticion, portador
             HAVING COUNT(*) > 1
             """,
-            (anio,),
+            (anio, meses, meses),
         )
         return cur.fetchall()
 
@@ -375,7 +395,8 @@ def _imprimir_reporte(resultados_por_anio: dict, problemas_vigencia: list,
                         and not r["sobrantes"] and not r["hash_inconsistente"])
         vista_ok = not r["duplicados_vista"]
 
-        print(f"  ── Año {anio} " + "─" * (58 - len(str(anio))))
+        etiqueta = f"{anio}" + (f" (meses {', '.join(map(str, r['meses']))})" if r.get("meses") else "")
+        print(f"  ── Año {etiqueta} " + "─" * max(58 - len(etiqueta), 3))
         print(
             f"    Conteo filas agregadas: {r['filas_origen']:,} (SQL Server) / "
             f"{r['filas_destino']:,} (PostgreSQL)"
@@ -422,9 +443,10 @@ def _imprimir_reporte(resultados_por_anio: dict, problemas_vigencia: list,
     print(f"{'=' * 70}\n")
 
 
-def validar_anios(anios: list[int]):
+def validar_anios(anios: list[int], meses_por_anio: dict[int, list[int]] | None = None):
     """
-    Valida, para cada año recién cargado:
+    Valida, para cada año recién cargado (o solo los meses de
+    meses_por_anio[anio] cuando la carga fue parcial -- ver _meses_parciales):
       1. Conteo de filas agregadas idéntico entre SQL Server y PostgreSQL.
       2. Hash MD5 de contenido idéntico fila a fila (certificación real de
          valores, no solo de cantidad), recalculado mes a mes en origen y
@@ -451,10 +473,11 @@ def validar_anios(anios: list[int]):
     errores.extend(problemas_completitud)
 
     for anio in anios:
-        print(f"\nValidando año {anio}...")
+        meses = _meses_parciales((meses_por_anio or {}).get(anio))
+        print(f"\nValidando año {anio}" + (f" (meses {', '.join(map(str, meses))})" if meses else "") + "...")
 
-        filas_origen = _contar_sqlserver_por_anio(anio)
-        filas_destino = _contar_postgres_por_anio(anio)
+        filas_origen = _contar_sqlserver_por_anio(anio, meses)
+        filas_destino = _contar_postgres_por_anio(anio, meses)
 
         if filas_origen != filas_destino:
             errores.append(
@@ -465,8 +488,8 @@ def validar_anios(anios: list[int]):
         else:
             logger.info("Año %s: %s filas agregadas en ambos lados, OK.", anio, filas_origen)
 
-        print(f"  Certificando contenido mes a mes (12 consultas a SQL Server)...")
-        cert = _certificar_contenido_por_anio(anio)
+        print(f"  Certificando contenido mes a mes ({len(meses or MESES_DEL_ANIO)} consultas a SQL Server)...")
+        cert = _certificar_contenido_por_anio(anio, meses)
         logger.info(
             "Año %s: %s filas certificadas con contenido idéntico al origen.",
             anio, cert["filas_certificadas"],
@@ -500,7 +523,7 @@ def validar_anios(anios: list[int]):
                 f"ej. {cert['filas_hash_guardado_inconsistente'][0]})."
             )
 
-        duplicados_vista = _verificar_vista_sin_duplicados(anio)
+        duplicados_vista = _verificar_vista_sin_duplicados(anio, meses)
         if duplicados_vista:
             errores.append(
                 f"Año {anio}: la vista analitico.v_lineas_dedicadas_resumen "
@@ -509,6 +532,7 @@ def validar_anios(anios: list[int]):
             )
 
         resultados_por_anio[anio] = {
+            "meses": meses,
             "filas_origen": filas_origen,
             "filas_destino": filas_destino,
             "certificadas": cert["filas_certificadas"],

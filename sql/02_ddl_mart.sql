@@ -2495,6 +2495,19 @@ COMMENT ON VIEW mart.vw_geometria_territorio_nodo IS
 'Geometría GeoJSON precomputada por nivel geográfico (parroquia/cantón/provincia), para el polígono del mapa de nodos. Cantón y provincia ya vienen disueltas desde mart/cargar_parroquias.py (gdf.dissolve) -- el dashboard solo hace SELECT, nunca une polígonos en tiempo de consulta.';
 
 -- ============================================================
+-- 17b. VERSIÓN DEL MART (30-sep-2026)
+-- ============================================================
+-- Marca de la reconstrucción, dentro de la misma transacción: solo cambia
+-- si el refresco completo hizo COMMIT. El dashboard la consulta para
+-- vaciar su caché cuando hay un mart nuevo (dashboard/services/cache_mart.py),
+-- en vez de servir resultados viejos hasta que expire (hasta 1 h).
+CREATE TABLE mart.control_version AS
+SELECT now() AS fecha_reconstruccion;
+
+COMMENT ON TABLE mart.control_version IS
+'Una fila: fecha de la última reconstrucción de mart (now() de la transacción de 02_ddl_mart.sql). El dashboard vacía su caché cuando cambia.';
+
+-- ============================================================
 -- 18. RE-OTORGAR ACCESO A dashboard_lector Y eda_lector -- sobrevive a la reconstrucción
 -- ============================================================
 -- CRÍTICO: el DROP SCHEMA mart CASCADE del inicio de este archivo borra
