@@ -381,9 +381,11 @@ def _eliminar_combinaciones_obsoletas(pg_cur, anio: int, mes: int, filas: list) 
     return pg_cur.rowcount
 
 
-def cargar_hechos_anio(anio: int):
+def cargar_hechos_anio(anio: int, meses: list[int] | None = None):
     """
-    Carga el año completo iterando mes a mes (periodoNumero 1..12).
+    Carga el año completo iterando mes a mes (periodoNumero 1..12), o solo
+    los meses indicados (30-sep-2026: sietel_detector_cambios dispara la
+    carga únicamente de los meses donde SIETEL cambió).
 
     Por qué mes a mes y no el año de una sola vez:
       1. Aprovecha el prefijo (anio, periodoNumero) del índice
@@ -401,24 +403,28 @@ def cargar_hechos_anio(anio: int):
     """
     inicio = datetime.now()
     filas_procesadas = 0
+    meses = sorted(set(meses)) if meses else MESES_DEL_ANIO
+    anio_completo = meses == MESES_DEL_ANIO
+    tipo_carga = "hechos_anual" if anio_completo else "hechos_meses"
+    alcance = "particionado por mes" if anio_completo else f"meses {', '.join(map(str, meses))}"
     print(f"\n{'=' * 60}")
-    print(f"CARGA DE HECHOS — AÑO {anio} (particionado por mes)")
+    print(f"CARGA DE HECHOS — AÑO {anio} ({alcance})")
     print(f"{'=' * 60}")
     try:
         with sqlserver_cursor() as ms_cur, postgres_cursor() as pg_cur:
-            for mes in MESES_DEL_ANIO:
+            for mes in meses:
                 filas_procesadas += _cargar_mes(ms_cur, pg_cur, anio, mes)
 
         duracion = (datetime.now() - inicio).total_seconds()
         print(f"{'-' * 60}")
-        print(f"✅ Año {anio} completo: {filas_procesadas:,} filas agregadas en {duracion:.1f}s")
+        print(f"✅ Año {anio} ({alcance}): {filas_procesadas:,} filas agregadas en {duracion:.1f}s")
         print(f"{'=' * 60}\n")
-        _registrar_carga("hechos_anual", anio, filas_procesadas, 0, "EXITOSO", None, inicio)
-        logger.info("Año %s: %s filas agregadas procesadas (12 meses).", anio, filas_procesadas)
+        _registrar_carga(tipo_carga, anio, filas_procesadas, 0, "EXITOSO", None, inicio)
+        logger.info("Año %s: %s filas agregadas procesadas (meses %s).", anio, filas_procesadas, meses)
 
     except Exception as exc:
         print(f"❌ Año {anio} FALLÓ tras {filas_procesadas:,} filas procesadas: {exc}")
-        _registrar_carga("hechos_anual", anio, filas_procesadas, 0, "FALLIDO", str(exc), inicio)
+        _registrar_carga(tipo_carga, anio, filas_procesadas, 0, "FALLIDO", str(exc), inicio)
         logger.exception("Error cargando hechos del año %s", anio)
         raise
 

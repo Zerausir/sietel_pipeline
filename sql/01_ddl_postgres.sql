@@ -213,6 +213,24 @@ CREATE TABLE IF NOT EXISTS staging.control_cargas (
 );
 CREATE INDEX IF NOT EXISTS ix_control_cargas_tipo_anio ON staging.control_cargas (tipo_carga, anio);
 
+-- 4b. HUELLA DE LA FUENTE (30-sep-2026) -- detección automática de cambios
+-- Una fila por fuente y (anio, periodoNumero) de SIETEL, con lo que se
+-- cargó y certificó por última vez. scripts/detectar_cambios.py la compara
+-- contra la huella actual de SQL Server para decidir qué años recargar.
+-- Solo se escribe después de una validación cruzada exitosa: si la carga
+-- falla, la diferencia sigue ahí y el siguiente chequeo la vuelve a ver.
+CREATE TABLE IF NOT EXISTS staging.huella_fuente (
+    fuente          VARCHAR(20)  NOT NULL,   -- 'lineas' | 'formularios'
+    anio            INTEGER      NOT NULL,
+    periodo_numero  INTEGER      NOT NULL,
+    filas           BIGINT       NOT NULL,
+    suma            BIGINT,
+    checksum        INTEGER,
+    max_fecha       TIMESTAMP,
+    fecha_registro  TIMESTAMP    NOT NULL DEFAULT now(),
+    PRIMARY KEY (fuente, anio, periodo_numero)
+);
+
 -- 5. VISTA DE CONSUMO — analitico.v_lineas_dedicadas_resumen
 DROP VIEW IF EXISTS analitico.v_lineas_dedicadas_resumen;
 

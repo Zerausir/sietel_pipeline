@@ -212,6 +212,7 @@ agregación con ventana (`LAG()`) sobre `fact_lineas_geografia_mes`, calculada a
 ```
 sietel_pipeline/
 ├── dags/
+│   ├── sietel_detector_cambios.py            # Diario: detecta datos nuevos en SIETEL y dispara la carga
 │   ├── sietel_usuarios_cuentas_pipeline.py   # Capa 1: SQL Server → staging/analitico
 │   └── sietel_mart_pipeline.py               # Capa 2/3: conflictos PEVA → capa2 → geografía nodos → mart
 ├── scripts/                                  # Capa 1
@@ -222,6 +223,7 @@ sietel_pipeline/
 │   ├── cargar_hechos_anio.py                 # Extracción agregada mes a mes + upsert certificado por hash
 │   ├── sincronizar_codigos_administrativos.py# Backfill idempotente de códigos INEC, standalone (fuera del DAG)
 │   ├── validar_carga.py                      # Certificación cruzada SQL Server vs PostgreSQL
+│   ├── detectar_cambios.py                   # Huella de SIETEL por (anio, mes) vs staging.huella_fuente
 │   └── remediar_versiones_espurias_scd2.py   # Remediación puntual de versiones SCD2 espurias (ver Historial)
 ├── mart/                                     # Capa 2/3
 │   ├── detectar_conflictos_peva.py           # Detecta/clasifica RUC con múltiples PEVA, resuelve Grupo A
@@ -778,6 +780,38 @@ Luego, **DAGs** → `sietel_usuarios_cuentas_pipeline` → *Trigger DAG*.
 
 **Capa 2/3** — **DAGs** → `sietel_mart_pipeline` → *Trigger DAG*, después de cada actualización relevante de Capa 1, o
 cuando se necesite refrescar el dashboard.
+
+### Detección automática de información nueva (`sietel_detector_cambios`)
+
+El DAG `sietel_detector_cambios` corre todos los días a las 06:00. Compara una huella de SIETEL por `(anio,
+periodoNumero)` contra `staging.huella_fuente`: número de filas, suma de usuarios y `CHECKSUM_AGG` de
+`dbo.VALineasDedicadas`, más lo mismo y la fecha más reciente de carga o modificación de
+`dbo.VAFormularioLineasDedicadas`. Solo si algún mes es nuevo, cambió o desapareció, dispara
+`sietel_usuarios_cuentas_pipeline` con `conf={"periodos": [[anio, mes], ...]}`:
+
+- **Staging**: se recargan y certifican **solo los meses afectados**, no el año completo. `_cargar_mes` reemplaza un
+  mes de forma exacta e idempotente y cada cambio queda auditado en `historial_correcciones`. Las correcciones tardías
+  de años anteriores también se detectan, porque la huella cubre todos los años.
+- **Formularios**: si solo cambiaron formularios, `periodos` va vacío. La corrida recarga el snapshot de formularios,
+  no carga hechos y reconstruye el mart.
+- **capa2 y mart**: se reconstruyen siempre completos, porque dependen de toda la historia.
+- **Huella**: la toma la carga antes de extraer y se guarda solo si `validar_carga` pasa. Si la carga falla o el origen
+  cambia mientras corre, el siguiente chequeo lo vuelve a detectar.
+- **Dashboard**: vacía su caché en menos de un minuto cuando cambia `mart.control_version`, sin reiniciar el contenedor
+  (`dashboard/services/cache_mart.py`).
+
+Puesta en marcha:
+
+1. Aplicar el esquema (crea `staging.huella_fuente`). Con PostgreSQL al día, sembrar la huella:
+   `python scripts/detectar_cambios.py --sembrar`. Con la tabla vacía, el detector falla a propósito en vez de
+   recargar toda la historia.
+2. Medir cuánto tarda `python scripts/detectar_cambios.py` (solo informa, no carga) contra el servidor de producción.
+   Depende del índice `IX_VALineasDedicadas_Analitico`.
+3. Despausar `sietel_detector_cambios`, `sietel_usuarios_cuentas_pipeline` y `sietel_mart_pipeline`.
+
+La carga manual con la variable `sietel_anios_a_cargar` sigue funcionando igual (años completos), y también actualiza
+la huella de los meses que carga. Para recargar meses puntuales a mano: *Trigger DAG w/ config* con
+`{"periodos": [[2025, 12]]}`.
 
 ### Vía CLI (pruebas puntuales / smoke tests)
 

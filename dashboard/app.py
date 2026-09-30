@@ -8,6 +8,7 @@ from flask_login import current_user
 from config import settings
 from extensions import cache
 from auth import init_auth
+from services.cache_mart import vaciar_cache_si_mart_cambio
 
 # Debe fijarse ANTES de instanciar Dash() -- dash-mantine-components 2.x
 # (ver dashboard/requirements.txt) requiere React 18.2.0 explícitamente;
@@ -60,6 +61,9 @@ cache.init_app(
         "CACHE_THRESHOLD": 5000,
     },
 )
+# Vacía la caché cuando sietel_mart_pipeline publica un mart nuevo, en vez
+# de esperar a que expire (ver services/cache_mart.py).
+server.before_request(vaciar_cache_si_mart_cambio)
 
 
 def navigation() -> html.Header:
