@@ -69,3 +69,94 @@ def test_verificar_permisos_usa_prueba_real_por_columna():
     with pytest.raises(PermisoDenegado, match="THPAGINA"):
         verificar_permisos(cur, "dbo.T", ["THSECUENCIAL", "THPAGINA"])
     verificar_permisos(_CursorSimulado(set()), "dbo.T", ["THSECUENCIAL", "THACTA"])
+
+
+# ── Fase 2: reglas de datos (§3) ─────────────────────────────────────────────
+
+from datetime import datetime  # noqa: E402
+
+import pytest  # noqa: E402
+
+from cargar_siger import TABLAS, _transformador, resumir_balance  # noqa: E402
+from hash_siger import digest_fila, valor_para_hash  # noqa: E402
+from reglas import contrato_key, resolver_ruc, thsecuencial_a_bigint, tipo_enlace  # noqa: E402
+
+
+def test_contrato_key_texto_y_vacios():
+    assert contrato_key("010", "13708A") == "010-13708A"       # ceros y sufijos se conservan
+    assert contrato_key(" 95 ", "9579  ") == "95-9579"          # LTRIM/RTRIM
+    assert contrato_key("", "") == "-"                          # sin tomo-foja
+    assert contrato_key(None, None) == "-"                      # supuesto: NULL = vacío
+    assert contrato_key("08", "08f02v") == "08-08f02v"
+    assert contrato_key("\t1", "2") == "\t1-2"                  # solo espacios, como LTRIM
+
+
+def test_resolver_ruc_cuatro_ramas():
+    assert resolver_ruc("1790012345001", "1712345678") == ("1790012345001", "ruc")
+    assert resolver_ruc("1790012345001", None) == ("1790012345001", "ruc")
+    assert resolver_ruc("             ", "0990012345001") == ("0990012345001", "ci_ruc_13")  # char con relleno
+    assert resolver_ruc(None, " 1712345678 ") == ("1712345678001", "cedula_001")
+    assert resolver_ruc("ABC", "12345") == (None, "sin_ruc")
+    assert resolver_ruc(None, None) == (None, "sin_ruc")
+
+
+def test_tipo_enlace_orden():
+    claves = {"95-9579", "010-08F02V"}
+    assert tipo_enlace(None, claves) == "SIN_CONTRATO"
+    assert tipo_enlace("   ", claves) == "SIN_CONTRATO"
+    assert tipo_enlace(" 95-9579 ", claves) == "TOMO_FOJA"
+    assert tipo_enlace("010-08f02v", claves) == "TOMO_FOJA"     # sin distinguir mayúsculas
+    assert tipo_enlace("ARCOTEL-2024-0001", claves) == "TRAMITE"
+    assert tipo_enlace("99-1", claves) == "SIN_MATCH"
+
+
+def test_thsecuencial_entero_o_falla():
+    assert thsecuencial_a_bigint(123.0) == 123
+    with pytest.raises(ValueError):
+        thsecuencial_a_bigint(1.5)
+    with pytest.raises(ValueError):
+        thsecuencial_a_bigint(None)
+
+
+def test_hash_estable_por_tipo():
+    assert valor_para_hash(True) == "1" and valor_para_hash(False) == "0"
+    assert valor_para_hash(5) == "5" and valor_para_hash(None) == "NULL"
+    assert valor_para_hash(0.1) == "0.1"
+    assert valor_para_hash(datetime(2026, 10, 5, 8, 30, 0, 3000)) == "2026-10-05T08:30:00.003000"
+    assert digest_fila([1, "a ", None]) == digest_fila([1, "a ", None])
+    assert digest_fila([1, "a ", None]) != digest_fila([1, "a", None])  # el relleno cuenta: copia fiel
+    with pytest.raises(TypeError):
+        valor_para_hash(object())
+
+
+def test_transformador_titulos_convierte_antes_del_hash():
+    t = TABLAS["titulos"]
+    fila = [None] * len(t.columnas)
+    pos = {c: i for i, c in enumerate(t.columnas)}
+    fila[pos["THSECUENCIAL"]], fila[pos["THTOMO"]], fila[pos["THFOJA"]] = 42.0, "010 ", "7"
+    assert _transformador(t)(fila) == ("010-7",)
+    assert fila[pos["THSECUENCIAL"]] == 42 and isinstance(fila[pos["THSECUENCIAL"]], int)
+    assert len(t.columnas_destino) == len(t.columnas) + 1
+
+
+def test_transformador_rechaza_nul():
+    t = TABLAS["servicios"]
+    with pytest.raises(ValueError, match="NUL"):
+        _transformador(t)([1, "AB\x00", "desc"])
+
+
+def test_transformador_facturacion_exige_claves():
+    with pytest.raises(ValueError):
+        _transformador(TABLAS["facturacion"], None, derivar=True)
+    assert _transformador(TABLAS["facturacion"], None, derivar=False)([None] * 99) == ()
+
+
+def test_resumir_balance_ambas_direcciones():
+    assert resumir_balance({}) == (0, 0)
+    assert resumir_balance({b"a": 2, b"b": -1, b"c": -3}) == (2, 4)
+
+
+def test_cruce_usa_la_misma_normalizacion_de_ruc():
+    from construir_cruce_obtel import SQL_UPSERT_HALLAZGOS
+    assert SQL_RUC_LIMPIO.format(col="v.isp_ruc") in SQL_UPSERT_HALLAZGOS
+    assert SQL_RUC_LIMPIO.format(col="p.ruc_resuelto") in SQL_UPSERT_HALLAZGOS

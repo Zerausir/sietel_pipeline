@@ -18,6 +18,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 
+from config import get_postgres_connection as _get_postgres_connection  # noqa: E402
+from config import get_sqlserver_connection as _get_sqlserver_connection  # noqa: E402
 from config import postgres_cursor as _postgres_cursor  # noqa: E402
 from config import sqlserver_cursor as _sqlserver_cursor  # noqa: E402
 
@@ -118,9 +120,23 @@ def sqlserver_cursor(timeout_consulta: int | None = TIMEOUT_CONSULTA_S):
     return _sqlserver_cursor(prefijo="SIGER", timeout_consulta=timeout_consulta)
 
 
+def sqlserver_conexion(timeout_consulta: int | None = TIMEOUT_CONSULTA_S):
+    """
+    Conexión pyodbc cruda a SIGER_V3 (filas como tuplas, no dicts): para la
+    extracción masiva por lotes, donde crear un dict por fila (99 columnas
+    x 2,5 M filas en facturación) es costo puro.
+    """
+    return _get_sqlserver_connection(prefijo="SIGER", timeout_consulta=timeout_consulta)
+
+
 def postgres_cursor(commit: bool = True):
     """Cursor de PostgreSQL analítico conectado como siger_user."""
     return _postgres_cursor(commit=commit, env_usuario="SIGER_PG_USER", env_password="SIGER_PG_PASSWORD")
+
+
+def postgres_conexion():
+    """Conexión psycopg2 cruda como siger_user (para cursores con nombre / server-side)."""
+    return _get_postgres_connection(env_usuario="SIGER_PG_USER", env_password="SIGER_PG_PASSWORD")
 
 
 def columnas_de_origen(cur, objeto: str) -> list[dict]:
