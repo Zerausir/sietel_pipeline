@@ -171,3 +171,5 @@ mart/data/**/*.sbn
 mart/data/**/*.sbx
 mart/data/**/*.shp.xml
 mart/data/**/*.lyr
+
+instruccion_claude_code_siger.md
