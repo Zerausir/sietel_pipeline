@@ -35,10 +35,19 @@ def _require_env(name: str) -> str:
     return value
 
 
-def get_sqlserver_connection():
+def get_sqlserver_connection(prefijo: str = "SIETEL", timeout_consulta: int | None = None):
     """
     Abre una conexión a SQL Server (SIETEL) usando pyodbc + el driver ODBC 18
     de Microsoft.
+
+    CAMBIO (05-oct-2026): parametrizada para reutilizarla con SIGER_V3 (otro
+    servidor, otras credenciales -- ver siger/config_siger.py). `prefijo`
+    elige el juego de variables {prefijo}_SQLSERVER_HOST/PORT/DATABASE/USER/
+    PASSWORD; el driver y las opciones TLS son los mismos para ambos. Con los
+    valores por defecto el comportamiento para SIETEL no cambia.
+    `timeout_consulta` (segundos) fija conn.timeout: tiempo límite de CADA
+    consulta en pyodbc, distinto del timeout=30 de login de abajo. None =
+    sin límite (comportamiento anterior).
 
     Se eligió pyodbc sobre pymssql porque el servidor SIETEL exige una
     negociación TLS que FreeTDS (usado internamente por pymssql) rechaza
@@ -59,18 +68,21 @@ def get_sqlserver_connection():
     servidor dentro de la red interna.
     """
     driver = os.environ.get("SIETEL_SQLSERVER_ODBC_DRIVER", "ODBC Driver 18 for SQL Server")
-    host = _require_env("SIETEL_SQLSERVER_HOST")
-    port = os.environ.get("SIETEL_SQLSERVER_PORT", "1433")
+    host = _require_env(f"{prefijo}_SQLSERVER_HOST")
+    port = os.environ.get(f"{prefijo}_SQLSERVER_PORT", "1433")
     conn_str = (
         f"DRIVER={{{driver}}};"
         f"SERVER={host},{port};"
-        f"DATABASE={_require_env('SIETEL_SQLSERVER_DATABASE')};"
-        f"UID={_require_env('SIETEL_SQLSERVER_USER')};"
-        f"PWD={_require_env('SIETEL_SQLSERVER_PASSWORD')};"
+        f"DATABASE={_require_env(f'{prefijo}_SQLSERVER_DATABASE')};"
+        f"UID={_require_env(f'{prefijo}_SQLSERVER_USER')};"
+        f"PWD={_require_env(f'{prefijo}_SQLSERVER_PASSWORD')};"
         f"TrustServerCertificate=yes;"
         f"Encrypt=yes;"
     )
-    return pyodbc.connect(conn_str, timeout=30)
+    conn = pyodbc.connect(conn_str, timeout=30)
+    if timeout_consulta is not None:
+        conn.timeout = timeout_consulta
+    return conn
 
 
 class _DictCursorWrapper:
@@ -98,24 +110,37 @@ class _DictCursorWrapper:
     def fetchone(self):
         return self._row_to_dict(self._cursor.fetchone())
 
+    def fetchmany(self, size: int):
+        """Lote de filas como dicts -- para extracciones grandes sin fetchall() (SIGER)."""
+        return [self._row_to_dict(r) for r in self._cursor.fetchmany(size)]
+
     def __getattr__(self, name):
         return getattr(self._cursor, name)
 
 
-def get_postgres_connection():
-    """Abre una conexión a PostgreSQL (servidor analítico destino)."""
+def get_postgres_connection(env_usuario: str = "ANALITICO_PG_USER",
+                            env_password: str = "ANALITICO_PG_PASSWORD"):
+    """
+    Abre una conexión a PostgreSQL (servidor analítico destino).
+
+    CAMBIO (05-oct-2026): env_usuario/env_password eligen qué variables de
+    entorno aportan las credenciales (SIGER usa SIGER_PG_USER/PASSWORD, rol
+    siger_user); host/puerto/base siempre son ANALITICO_PG_*. Por defecto,
+    sietel_user como antes.
+    """
     return psycopg2.connect(
         host=_require_env("ANALITICO_PG_HOST"),
         port=os.environ.get("ANALITICO_PG_PORT", "5432"),
-        user=_require_env("ANALITICO_PG_USER"),
-        password=_require_env("ANALITICO_PG_PASSWORD"),
+        user=_require_env(env_usuario),
+        password=_require_env(env_password),
         dbname=_require_env("ANALITICO_PG_DATABASE"),
     )
 
 
 @contextmanager
-def postgres_cursor(commit: bool = True):
-    conn = get_postgres_connection()
+def postgres_cursor(commit: bool = True, env_usuario: str = "ANALITICO_PG_USER",
+                    env_password: str = "ANALITICO_PG_PASSWORD"):
+    conn = get_postgres_connection(env_usuario, env_password)
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         yield cur
@@ -129,9 +154,9 @@ def postgres_cursor(commit: bool = True):
 
 
 @contextmanager
-def sqlserver_cursor():
+def sqlserver_cursor(prefijo: str = "SIETEL", timeout_consulta: int | None = None):
     """Context manager que entrega un cursor de SQL Server (filas como dict) y cierra la conexión."""
-    conn = get_sqlserver_connection()
+    conn = get_sqlserver_connection(prefijo, timeout_consulta)
     try:
         cur = _DictCursorWrapper(conn.cursor())
         yield cur

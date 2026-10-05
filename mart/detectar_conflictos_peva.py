@@ -69,6 +69,12 @@ def _engine():
     return create_engine(url, connect_args={"connect_timeout": 10})
 
 
+# Normalización de RUC: solo dígitos, NULL si queda vacío. Plantilla SQL con
+# {col} = expresión de la columna. Extraída a constante (05-oct-2026) para
+# que siger/construir_cruce_obtel.py compare RUC de SIGER contra OBTEL con
+# EXACTAMENTE la misma regla, sin copiarla -- un solo lugar que mantener.
+SQL_RUC_LIMPIO = "NULLIF(REGEXP_REPLACE(COALESCE({col}::text, ''), '[^0-9]', '', 'g'), '')"
+
 SQL_PARES_CANDIDATOS = """
 WITH pevas_por_ruc AS (
     -- Una fila por peva_codigo -- v_ultimo_periodo_reportado_detalle tiene
@@ -76,7 +82,7 @@ WITH pevas_por_ruc AS (
     -- último período), hay que colapsar antes de comparar. Ver el bug
     -- encontrado y corregido en el diagnóstico manual del 28-jul-2026.
     SELECT DISTINCT ON (v.peva_codigo)
-        NULLIF(REGEXP_REPLACE(COALESCE(v.isp_ruc::text, ''), '[^0-9]', '', 'g'), '') AS ruc_limpio,
+        """ + SQL_RUC_LIMPIO.format(col="v.isp_ruc") + """ AS ruc_limpio,
         v.peva_codigo,
         v.isp_nombre,
         v.opera,

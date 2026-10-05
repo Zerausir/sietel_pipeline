@@ -67,6 +67,9 @@ Capacidades principales del módulo SAI:
   coincide con su coordenada (cruce contra la cartografía oficial de CONALI).
 - **Control regulatorio.** Prestadores que nunca reportaron, que dejaron de reportar o con variaciones anómalas, y
   priorización de a quién exigir la carga.
+- **Títulos habilitantes (SIGER_V3).** Réplica certificada de los títulos habilitantes, concesionarios y facturación
+  de espectro de SIGER, y cruce de los titulares SAI vigentes con los prestadores de OBTEL (ver
+  [5.4](#54-siger_v3--siger_pipeline)).
 
 ## 2. Motivación
 
@@ -124,6 +127,7 @@ Los reportes existentes de Power BI siguen leyendo `analitico` con su propio rol
 | Componente            | Ubicación                        | Detalle                                                                                  |
 |-----------------------|----------------------------------|------------------------------------------------------------------------------------------|
 | SIETEL                | SQL Server `172.20.1.38:1433`    | Base `SIETEL`. Fuente de verdad; OBTEL solo lee                                          |
+| SIGER_V3              | SQL Server `192.168.129.40`      | Base `SIGER_V3` (SQL Server 2012 SP2). Títulos habilitantes y facturación de espectro; solo lectura, permisos por columna |
 | PostgreSQL            | VM1 `192.168.129.50:5432`        | Bases `sietel_analitico` (este proyecto), `samm_db` (SMA) y la metadata de Airflow       |
 | Airflow               | VM2, `docker/docker-compose.yml` | LocalExecutor; interfaz web en el puerto `8081` (el `8080` lo usa `samm_pipeline`)        |
 | Dashboard             | VM2, `dashboard/docker/`         | Contenedor `sietel_dashboard`, puerto `8050`                                              |
@@ -148,7 +152,8 @@ sietel_pipeline/
 ├── dags/                                       # Orquestación (Airflow)
 │   ├── sietel_detector_cambios.py              # Diario: detecta meses nuevos o corregidos y dispara la carga
 │   ├── sietel_usuarios_cuentas_pipeline.py     # Capa 1: SIETEL → staging / analitico
-│   └── sietel_mart_pipeline.py                 # Capas 2 y 3: calidad → capa2 → geografía de nodos → mart
+│   ├── sietel_mart_pipeline.py                 # Capas 2 y 3: calidad → capa2 → geografía de nodos → mart
+│   └── siger_pipeline.py                       # SIGER_V3 → siger, validación y cruce con OBTEL (manual)
 ├── scripts/                                    # Capa 1
 │   ├── config.py                               # Conexiones y ANIO_INICIO_HISTORICO / ANIO_FIN_HISTORICO
 │   ├── aplicar_esquema.py                      # Aplica sql/01_ddl_postgres.sql (idempotente)
@@ -169,6 +174,15 @@ sietel_pipeline/
 │   ├── detectar_discrepancias_geografia_nodo.py# Cruce punto-en-polígono, discrepancias por cantón
 │   ├── data/shapefiles/parroquial/             # Shapefile CONALI (fuera de Git, ver su README)
 │   └── requirements.txt
+├── siger/                                      # SIGER_V3 (ver sección 5.4)
+│   ├── config_siger.py                         # Conexiones SIGER_*, columnas permitidas, universo SAI, umbrales
+│   ├── probar_conexion.py                      # Prueba de conectividad y permisos (solo lectura)
+│   ├── aplicar_esquema_siger.py                # Aplica sql/12_ddl_siger.sql como siger_user
+│   ├── cargar_siger.py                         # Snapshot por reemplazo, certificado antes del COMMIT
+│   ├── validar_siger.py                        # Certificación cruzada en ambas direcciones + accesos LOPDP
+│   ├── construir_cruce_obtel.py                # calidad.hallazgos_siger_obtel (como mart_user)
+│   ├── reglas.py                               # contrato_key, RUC resuelto, tipo_enlace
+│   └── hash_siger.py                           # Hash MD5 por fila, igual en pyodbc y psycopg2
 ├── sql/
 │   ├── 00_roles_mart.sql                       # Permisos de mart_user
 │   ├── 01_ddl_postgres.sql                     # DDL Capa 1: staging y analitico
@@ -176,7 +190,10 @@ sietel_pipeline/
 │   ├── 03_ddl_auth.sql                         # Esquema auth (login del dashboard)
 │   ├── 04_ddl_calidad.sql                      # Esquema calidad (conflictos y discrepancias)
 │   ├── 05_roles_eda.sql                        # Rol de solo lectura eda_lector
-│   └── 06…10_patch_*.sql                       # Parches puntuales ya incorporados (ver sección 17)
+│   ├── 06…10_patch_*.sql                       # Parches puntuales ya incorporados (ver sección 17)
+│   ├── 11_roles_siger.sql                      # Rol siger_user y esquema siger (solo documentación, no re-ejecutar)
+│   ├── 12_ddl_siger.sql                        # DDL siger: réplica cruda, vistas SAI, permisos LOPDP
+│   └── 13_ddl_calidad_siger.sql                # calidad.hallazgos_siger_obtel
 ├── dashboard/                                  # Aplicación web OBTEL
 │   ├── app.py                                  # Layout raíz, stores compartidos, caché, navegación
 │   ├── auth.py                                 # Flask-Login + bcrypt, /login y /logout
@@ -269,6 +286,153 @@ aplicar_ddl_calidad >> detectar_conflictos_peva >> construir_capa2 >> limpiar_co
 `sql/02_ddl_mart.sql` corre en **una sola transacción**: `DROP SCHEMA mart CASCADE` y recreación completa, invariantes
 bloqueantes (sección 17.0) y re-otorgamiento de permisos. Si una invariante falla, todo se revierte y el dashboard sigue
 sirviendo el mart anterior. Al final escribe `mart.control_version`, que el dashboard usa para vaciar su caché.
+
+### 5.4 SIGER_V3 — `siger_pipeline`
+
+Réplica certificada de **SIGER_V3**, el sistema de ARCOTEL con el **estado jurídico de los títulos habilitantes** de
+todos los prestadores y la **facturación por uso del espectro** (sin radiodifusión ni TV). Sobre la copia se construyen
+las vistas SAI a nivel de RUC y un cruce con los prestadores de OBTEL como hallazgos de calidad revisables. El análisis
+exploratorio de estos datos es un trabajo posterior: aquí solo se replica fielmente y se certifica.
+
+```
+aplicar_esquema_siger >> [cargar_servicios, cargar_concesionarios, cargar_titulos]
+    >> cargar_facturacion >> validar_siger >> construir_cruce_obtel
+```
+
+DAG **independiente** de los de SIETEL: otro servidor, otras credenciales y otra cadencia. Un fallo de SIGER no bloquea
+SIETEL, y este DAG no dispara ni modifica los de SIETEL. Es manual (`schedule=None`) y tiene `max_active_runs=1`.
+
+#### Fuente
+
+SQL Server 2012 SP2 (11.0.5058), `192.168.129.40`, base `SIGER_V3`, esquema `dbo`. Conexión con la misma lógica de
+`scripts/config.py` (driver ODBC 18 y opciones TLS de SIETEL), parametrizada con las variables `SIGER_SQLSERVER_*`.
+El handshake TLS con este servidor funciona sin ajustes en el contenedor (verificado el 05-oct-2026).
+
+#### Permisos por columna
+
+El usuario de lectura tiene permisos **por columna**: una sola columna denegada hace fallar toda la consulta (error
+230). Por eso el código **nunca usa `SELECT *`** y replica solo las columnas que SQL Server deja consultar de verdad,
+comprobadas con un `SELECT TOP 0` columna por columna (`siger/probar_conexion.py`, 05-oct-2026):
+
+| Objeto                          | Se replican                                                                                           | Bloqueadas (no se traen)                                                                                                                                                                  |
+|---------------------------------|-------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `dbo.TITULO_HABILITANTE`        | `THSECUENCIAL`, `IDSTH`, `THTOMO`, `THFOJA`, `UCP_CONCNUM`, `THFECHASUS`, `THFECHAVIG`, `THESTADO`    | `THPAGINA`, `THACTA`, `THUSUARIO`, `TTHSECUENCIAL`, `STHSECUENCIAL`, `THRESOLUCION`, `THFECHARES`, `THTITULO`, `THCUERPO`, `THCOBERTURA`, `THUSUARIOREG`, `THFECHAREG`, `THNUMERO_TRAMITE`, `THCONTRATO_RENOVADO` |
+| `dbo.SERVICIO_TH`               | `IDSTH`, `ABREVIATURA`, `DESCRIPCION`                                                                 | `IDTSV`, `ELIMINACION`                                                                                                                                                                    |
+| `dbo.VISTA_CONCESIONARIOS`      | `ucp_concnum`, `nombres`, `ci_ruc`, `ruc`                                                             | Las otras 18: ubicación (`prvnnombre`, `cantnombre`, `parrnombre`…), contacto (teléfonos, correo, dirección) y tipo (`ucp_tipoconc`, `ucpj_tipo`)                                          |
+| `dbo.NR_PARAMETROS_FACTURACION` | Las 99 columnas                                                                                       | —                                                                                                                                                                                         |
+
+Los permisos cambian con el tiempo (`THUSUARIO` estaba permitida y ya no; `THFECHASUS` figuraba denegada y hoy no lo
+está). Cada carga los vuelve a verificar y **falla nombrando la columna** que se haya perdido, y avisa en el log si SIGER
+empieza a exponer una columna accesible que todavía no se replica. Las listas viven en `siger/config_siger.py`
+(`COLUMNAS_PERMITIDAS`) y en `sql/12_ddl_siger.sql`.
+
+#### Reglas de datos
+
+| Regla                    | Detalle                                                                                                                                                                                                                         |
+|--------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Texto                    | `LTRIM(RTRIM(...))` (solo espacios) antes de comparar o construir llaves. En las tablas crudas el texto se guarda **sin recortar** (`ruc` es `char(13)` y conserva su relleno)                                                      |
+| Tomo y foja              | Siempre texto: hay ceros a la izquierda (`010`) y sufijos (`13708A`, `08f02v`). Nunca se convierten a número                                                                                                                      |
+| `contrato_key` (título)  | `tomo + '-' + foja`, recortados. Sin tomo ni foja → `'-'` (unos 7.100 títulos que no se enlazan con facturación)                                                                                                                  |
+| Contrato ≠ título        | Un tomo-foja puede agrupar títulos de varios servicios (ej. `95-9579`: telefonía fija, portador y valor agregado de internet). La facturación se enlaza por **contrato**; el análisis SAI se hace por **título** filtrado por IDSTH. Nunca se mezclan en una misma tabla |
+| `THSECUENCIAL`           | Es `float` en SIGER: se convierte a `bigint` y la carga falla si algún valor no es entero                                                                                                                                         |
+| Universo SAI             | `IDSTH IN (9, 33, 31)`, **solo en vistas**. Se excluye el 8 (VALOR AGREGADO: SMS, contenido móvil, rastreo vehicular). Constante `IDSTH_UNIVERSO_SAI` en `siger/config_siger.py`, sincronizada a `siger.parametro_universo_sai` |
+| RUC resuelto             | `ruc` de 13 dígitos → `ruc`; si no, `ci_ruc` de 13 → `ci_ruc_13`; si no, `ci_ruc` de 10 + `'001'` → `cedula_001` (97,4 % de coincidencia donde hay ambos datos); si no → `sin_ruc`. Se guarda el valor y su origen    |
+| Unidad de análisis       | Concesionario/RUC. "SAI vigente" = al menos un título SAI con `THESTADO = 'VIGENTE'`. Vigencia = `MAX(THFECHAVIG)`; título de referencia = el vigente con tomo-foja                                                                 |
+| Anomalías                | Se **marcan**, no se corrigen: vigencias distintas entre títulos vigentes, solo títulos sin tomo-foja, más de un título con tomo-foja                                                                                              |
+| Facturación activa       | `ELIMINADO` es `bit` con NULL/0/1: activo = `COALESCE(eliminado, false) = false`, **nunca** `eliminado = false`. Las filas eliminadas se replican; el filtro va en las vistas                                                        |
+| `COD_SERVICIO`           | No es único por `NOM_SERVICIO` (variantes "(r)" = uso reservado, una sin tilde). Se conservan tal cual, sin fusionar                                                                                                              |
+| `tipo_enlace`            | `SIN_CONTRATO` (NULL o vacío, ej. TCS) → `TOMO_FOJA` (coincide con un `contrato_key`, sin distinguir mayúsculas, como SIGER) → `TRAMITE` (`ARCOTEL-...`; requeriría `THNUMERO_TRAMITE`, denegada) → `SIN_MATCH`                    |
+| `cliente_coincide`       | Solo para `TOMO_FOJA`: `CLIENT_CODE` = `UCP_CONCNUM` de algún título del contrato. `false` puede ser una cesión o un error; no se filtra                                                                                           |
+
+#### Patrón de carga
+
+Lección del incidente del 25-sep-2026: el UPSERT sin borrado dejó en `staging` filas huérfanas del backup de SIETEL, y
+`validar_carga.py` no las vio porque solo buscaba faltantes. En SIGER cada tabla se carga como **snapshot completo por
+reemplazo en una sola transacción** (`siger/cargar_siger.py`):
+
+1. **Origen**: verificación de permisos de las columnas exactas y conteo.
+2. **Protecciones antes de tocar el destino**: 0 filas en origen → aborta; caída de más del **20 %** frente al
+   snapshot anterior → aborta y pide revisión (`UMBRAL_CAIDA_MAXIMA`, configurable). Tras revisar una caída real, relanzar
+   con *Trigger DAG w/ config* `{"permitir_caida": ["siger_facturacion"]}` (o `true` para todas).
+3. **Transacción**: `TRUNCATE` + `INSERT` por lotes (`fetchmany`, nunca `fetchall`) y, **antes del `COMMIT`**,
+   certificación de lo insertado: conteo, multiconjunto de hashes MD5 en **ambas direcciones** (faltantes y sobrantes)
+   recalculado desde lo que quedó en PostgreSQL, y `hash_contenido` coherente con cada fila. Cualquier discrepancia →
+   `ROLLBACK` y el snapshot anterior queda intacto.
+4. **`validar_siger`**, después de las cargas: vuelve a leer SIGER completo y repite la certificación contra lo ya
+   confirmado. Detecta cambios en SIGER durante la carga y cualquier edición posterior del destino. Si SIGER cambió en
+   ese lapso (es una base viva), puede quedar en rojo sin que la carga esté mal: relanzar el DAG.
+5. Todo queda en `staging.control_cargas` con `tipo_carga` = `siger_servicios`, `siger_concesionarios`,
+   `siger_titulos`, `siger_facturacion` y `siger_validacion`.
+
+Las consultas a SQL Server tienen tiempo límite propio (`conn.timeout` de pyodbc, `TIMEOUT_CONSULTA_S`), y cada tarea
+del DAG tiene `execution_timeout` explícito (`AIRFLOW__CORE__TASK_TIMEOUT` no es una opción válida de Airflow).
+
+#### Datos personales (LOPDP)
+
+`VISTA_CONCESIONARIOS` incluye personas naturales identificadas solo por cédula (unas 10.700). La tabla cruda
+`siger.concesionario` es la copia fiel, pero con **acceso restringido**, según la Ley Orgánica de Protección de Datos
+Personales:
+
+- `mart_user` recibe `SELECT` automático sobre toda tabla nueva de `siger` (`ALTER DEFAULT PRIVILEGES`), pero sobre
+  `siger.concesionario` se **revoca** en cada aplicación del DDL. `mart_user` solo ve `siger.v_concesionario_basico`:
+  código, nombre, RUC resuelto y su origen, sin cédula ni RUC crudos. La ubicación y el tipo de concesionario no se
+  pueden incluir porque SIGER los deniega.
+- **Ningún rol del dashboard** (`dashboard_lector`, `dashboard_auth`, `calidad_lector`, `calidad_revisor`,
+  `eda_lector`) tiene acceso a `siger`. `validar_siger` lo comprueba en cada corrida y falla si no se cumple.
+- `NR_PARAMETROS_FACTURACION` no tiene datos personales (solo `CLIENT_CODE` y datos técnicos de estaciones).
+- `calidad.hallazgos_siger_obtel` guarda solo RUC, nombre y códigos (lo ven `calidad_lector` y `eda_lector`).
+
+#### Cruce con OBTEL
+
+`construir_cruce_obtel` (como `mart_user`) recalcula `calidad.hallazgos_siger_obtel` comparando por `ruc_limpio`, la
+**misma** normalización de `mart/detectar_conflictos_peva.py` (`SQL_RUC_LIMPIO`, importada, no copiada). El lado OBTEL
+sale de `analitico.v_ultimo_periodo_reportado_detalle.isp_ruc`, con el mismo filtro de "prueba" que el detector.
+
+| `tipo_hallazgo`         | `detalle`                                                       | Significado                                                                 |
+|-------------------------|-----------------------------------------------------------------|-----------------------------------------------------------------------------|
+| `SIGER_SAI_SIN_OBTEL`   | `SIN_PEVA_EN_OBTEL`                                             | Titular SAI vigente en SIGER sin ningún PEVA vigente en OBTEL               |
+| `OBTEL_SIN_SAI_VIGENTE` | `RUC_NO_EXISTE_EN_SIGER`, `SIN_TITULO_SAI`, `SAI_NO_VIGENTE`    | Prestador que reporta en OBTEL sin título SAI vigente en SIGER              |
+
+`ruc_por_cedula_001` marca los RUC deducidos de la cédula. Es una tabla con **flujo de revisión** como
+`calidad.conflictos_ruc_peva`: las columnas de revisión nunca se sobrescriben, nada se corrige automáticamente, y lo que
+deja de detectarse se conserva con `sigue_detectado = false`. Si alguno de los dos lados está vacío, la tarea aborta en
+vez de marcar todo como hallazgo.
+
+#### Puesta en marcha
+
+1. **Rol y esquema en VM1** (ya ejecutados el 05-oct-2026; referencia en `sql/11_roles_siger.sql`, que **no** se
+   vuelve a ejecutar), como `postgres`:
+   ```sql
+   CREATE ROLE siger_user LOGIN PASSWORD '<contraseña>';
+   GRANT CONNECT ON DATABASE sietel_analitico TO siger_user;
+   CREATE SCHEMA siger AUTHORIZATION siger_user;
+   GRANT USAGE ON SCHEMA staging TO siger_user;
+   GRANT SELECT, INSERT ON staging.control_cargas TO siger_user;
+   GRANT USAGE ON SEQUENCE staging.control_cargas_id_seq TO siger_user;
+   GRANT USAGE ON SCHEMA siger TO mart_user;
+   ALTER DEFAULT PRIVILEGES FOR ROLE siger_user IN SCHEMA siger GRANT SELECT ON TABLES TO mart_user;
+   ```
+   En `pg_hba.conf`, `siger_user` desde `192.168.129.51` (VM2) y `192.168.137.50`. `siger_user` **no** tiene `CREATE`
+   sobre la base: `sql/12_ddl_siger.sql` no crea el esquema y falla con un mensaje claro si falta.
+2. **Variables** `SIGER_*` en el `.env` de la raíz **y** en el bloque `environment` de `docker/docker-compose.yml`, que
+   ya las incluye: el compose las pasa una por una y sin ellas no llegan al contenedor (ver [12.1](#121-airflow-y-capa-1-env-en-la-raíz)).
+3. **Prueba de conectividad** (solo lectura), desde `docker/`:
+   ```bash
+   docker compose --env-file ../.env exec airflow-scheduler python /opt/airflow/siger/probar_conexion.py --pg
+   ```
+4. **Despausar y disparar** `siger_pipeline` en la interfaz de Airflow.
+
+#### Supuestos no verificables en el código
+
+- Un `THTOMO`/`THFOJA` NULL (no vacío) se trata como cadena vacía al construir `contrato_key`.
+- `CLIENT_CODE` y `UCP_CONCNUM` se comparan como texto recortado; los contratos, sin distinguir mayúsculas (como la
+  intercalación de SIGER, con la que se midieron los 2.729 contratos enlazados).
+- OBTEL no aplica la regla `cedula_001`: un `isp_ruc` de 10 dígitos en SIETEL aparece como hallazgo en ambos sentidos.
+  `longitud_ruc_obtel` y `ruc_por_cedula_001` permiten identificarlos.
+- Las anomalías se cuentan por RUC: un RUC con varios concesionarios suma los títulos de todos.
+- `PostgreSQL` no admite el carácter NUL en texto. Si SIGER llegara a tenerlo, la carga falla con un mensaje explícito
+  en vez de limpiarlo en silencio.
+- La certificación de facturación mantiene en memoria un digest por fila (unos 2,5 M, del orden de 300 MB en el worker).
 
 ## 6. Principio metodológico: nunca imputar
 
@@ -452,6 +616,7 @@ Todas las tablas tienen descarga a Excel del contenido en pantalla.
 | `calidad.conflictos_ruc_peva`            | RUC con varios PEVA, clasificados A/B/C, con flujo de revisión persistente                    |
 | `calidad.vw_pevas_excluidos`             | PEVA del grupo A que `construir_capa2` excluye                                                  |
 | `calidad.discrepancias_geografia_nodo`   | Nodos con cantón reportado distinto al de su coordenada, con flujo de revisión                  |
+| `calidad.hallazgos_siger_obtel`          | Cruce SIGER ↔ OBTEL por RUC, con flujo de revisión (ver [5.4](#54-siger_v3--siger_pipeline))    |
 | `capa2.lineas_dedicadas_consolidado`     | Lo reportado por PEVA, geografía, características y mes, sin relleno                            |
 | `capa2.nodo_isp_geocodificado`           | Nodos con coordenadas decimales validadas                                                       |
 | `capa2.parroquias_geometria`             | Geometría íntegra por parroquia (CONALI)                                                        |
@@ -486,6 +651,23 @@ Las columnas `lineas_dl_*` (bajada) y `lineas_ul_*` (subida) cuentan **líneas**
 
 `codigo_provincia`, `codigo_ciudad` y `codigo_parroquia` son `VARCHAR` para conservar ceros a la izquierda. No forman
 parte del hash ni de las columnas versionables: son metadatos derivados de `par_codigo`.
+
+### 9.6 `siger` (SIGER_V3, dueño `siger_user`)
+
+| Objeto                          | Tipo   | Contenido                                                                                                                       |
+|---------------------------------|--------|---------------------------------------------------------------------------------------------------------------------------------|
+| `servicio_th`                   | Tabla  | Copia fiel de `dbo.SERVICIO_TH` (40 tipos de servicio, incluida radiodifusión y TV)                                               |
+| `titulo_habilitante`            | Tabla  | Copia fiel de `dbo.TITULO_HABILITANTE`, todos los servicios y estados, más `contrato_key`                                         |
+| `concesionario`                 | Tabla  | Copia fiel de `dbo.VISTA_CONCESIONARIOS`, más `ruc_resuelto` y `ruc_origen`. **Datos personales: sin acceso para `mart_user`**    |
+| `facturacion_espectro`          | Tabla  | Copia fiel de `dbo.NR_PARAMETROS_FACTURACION` (99 columnas, incluidas las eliminadas), más `contrato_key` y `tipo_enlace`         |
+| `parametro_universo_sai`        | Tabla  | IDSTH del universo SAI, sincronizado desde `siger/config_siger.py`                                                                 |
+| `v_titulo_sai`                  | Vista  | Títulos del universo SAI, con `es_vigente` y `con_tomo_foja`                                                                      |
+| `v_prestador_sai`               | Vista  | Una fila por RUC con título SAI: vigencia, título de referencia, origen del RUC y banderas de anomalía                            |
+| `v_facturacion_contrato`        | Vista  | Facturación con `activo` y `cliente_coincide`, una fila por fila de origen                                                        |
+| `v_concesionario_basico`        | Vista  | Código, nombre, RUC resuelto y origen: lo único de los concesionarios que ve `mart_user`                                          |
+
+Todas las tablas crudas llevan `hash_contenido` (MD5 de las columnas de origen) y `fecha_carga`. Ningún filtro de
+servicio, estado o eliminación se aplica en las tablas: solo en las vistas.
 
 ## 10. Requisitos
 
@@ -560,7 +742,8 @@ Ninguno se versiona (`.gitignore`).
 |--------------------|-----------------------------------------------------------------------------------------|--------------------------------------------------|
 | `sietel_user`      | Dueño de `staging` y `analitico`                                                        | Capa 1 y metadata de Airflow                      |
 | `mgonzalez`        | Lectura de `analitico`                                                                  | Power BI                                          |
-| `mart_user`        | Dueño de `capa2`, `mart` y `calidad`                                                    | Capas 2 y 3                                       |
+| `mart_user`        | Dueño de `capa2`, `mart` y `calidad`; lectura de las vistas de `siger` (no de `siger.concesionario`) | Capas 2 y 3, cruce SIGER ↔ OBTEL |
+| `siger_user`       | Dueño de `siger`; `SELECT`/`INSERT` en `staging.control_cargas`; sin `CREATE` en la base | `siger_pipeline` (ver [5.4](#54-siger_v3--siger_pipeline)) |
 | `dashboard_lector` | `SELECT` sobre `mart.*`                                                                 | Dashboard (datos)                                 |
 | `dashboard_auth`   | `SELECT`/`INSERT`/`UPDATE` sobre `auth.usuarios_dashboard`                               | Dashboard (login)                                 |
 | `calidad_lector`   | `SELECT` sobre `calidad.*`                                                               | Consulta de calidad                               |
@@ -589,11 +772,18 @@ Ninguno se versiona (`.gitignore`).
 | `ANALITICO_PG_USER` / `ANALITICO_PG_PASSWORD`               | Sí        | `sietel_user`                                          |
 | `ANALITICO_PG_PORT`                                         | No        | Por defecto `5432`                                     |
 | `MART_USER_USER` / `MART_USER_PASSWORD`                     | Sí        | Credenciales de `mart_user` (tareas de capas 2 y 3)    |
+| `SIGER_SQLSERVER_HOST` / `SIGER_SQLSERVER_DATABASE`         | Sí        | SIGER_V3: `192.168.129.40`, `SIGER_V3`                 |
+| `SIGER_SQLSERVER_USER` / `SIGER_SQLSERVER_PASSWORD`         | Sí        | Usuario de lectura de SIGER (permisos por columna)     |
+| `SIGER_SQLSERVER_PORT`                                      | No        | Por defecto `1433`                                     |
+| `SIGER_PG_USER` / `SIGER_PG_PASSWORD`                       | Sí        | `siger_user`; host, puerto y base son los de `ANALITICO_PG_*` |
 | `AIRFLOW_METADATA_PG_HOST` / `_PORT` / `_DATABASE` / `_USER` / `_PASSWORD` | Sí | Base de metadata de Airflow                  |
 | `AIRFLOW__CORE__FERNET_KEY` / `AIRFLOW__API_AUTH__JWT_SECRET` | Sí      | Secretos de Airflow                                    |
 | `_AIRFLOW_WWW_USER_USERNAME`                                | Sí        | Usuario administrador de la interfaz                   |
 | `AIRFLOW_WEBSERVER_PORT`                                    | No        | Por defecto `8081`                                     |
 | `LOG_LEVEL`                                                 | No        | Por defecto `INFO`                                     |
+
+Las variables `SIGER_*` deben estar **en el `.env` y en el bloque `environment` del compose** (ya incluidas): el compose
+pasa las variables una por una, y una que no figure ahí no llega al contenedor.
 
 `AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG=1` (fijo en el compose) limita la concurrencia para no saturar SIETEL.
 `ANIO_INICIO_HISTORICO` (2011) y `ANIO_FIN_HISTORICO` (2025) se definen solo en `scripts/config.py`.
@@ -672,6 +862,16 @@ python limpiar_coordenadas_nodo_isp.py
 python cargar_parroquias.py                      # --forzar para recargar el shapefile
 python detectar_discrepancias_geografia_nodo.py
 python aplicar_capa3.py
+
+# SIGER_V3, en orden
+cd ../siger
+python probar_conexion.py --pg                       # solo lectura
+python aplicar_esquema_siger.py
+python cargar_siger.py --tabla todas                 # o servicios | concesionarios | titulos | facturacion
+python cargar_siger.py --tabla facturacion --permitir-caida   # solo tras revisar una caída real
+python validar_siger.py
+python construir_cruce_obtel.py --dry-run            # recalcula y reporta sin escribir hallazgos
+python construir_cruce_obtel.py
 ```
 
 ### 13.4 Usuarios del dashboard
@@ -761,6 +961,7 @@ python -m pytest tests/
 | `test_sin_imputacion.py`         | Que `capa2` y el mart no vuelvan a rellenar huecos ni marcar imputación                    |
 | `test_limpiar_coordenadas.py`    | Parser DMS e inferencia de hemisferio                                                     |
 | `test_detectar_cambios.py`       | Comparación de huellas por mes y agrupación en lotes                                      |
+| `test_siger_reglas.py`           | SIGER: columnas permitidas, verificación de permisos, `contrato_key`, RUC resuelto, `tipo_enlace`, hash por tipo, misma normalización de RUC que el detector |
 
 **Integración** contra el entorno real (Capa 1):
 
@@ -835,6 +1036,7 @@ comentarios de cada archivo.
 
 | Fecha        | Cambio                                                                                                                                                                                                                         |
 |--------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 05-oct-2026  | **SIGER_V3**: DAG `siger_pipeline`, esquema `siger` (réplica certificada por snapshot, vistas SAI por RUC, acceso restringido por LOPDP) y `calidad.hallazgos_siger_obtel`. `scripts/config.py` parametrizado por prefijo de variables, con tiempo límite de consulta; `SQL_RUC_LIMPIO` extraído en `mart/detectar_conflictos_peva.py` (SQL idéntico) |
 | 30-sep-2026  | **Detección automática y recarga por mes**: DAG `sietel_detector_cambios`, `staging.huella_fuente`, carga y validación por meses, `max_active_runs=1` e invalidación de caché con `mart.control_version`                         |
 | 29-sep-2026  | **Filtro territorial sin "Nivel geográfico"** en Evolución y Concentración, y nueva sección "Cuentas por territorio"                                                                                                             |
 | 29-sep-2026  | **Dominante ausente con una serie por prestador** en IHH y participación; el gráfico usa el mismo período que las tarjetas y distingue un error de "sin huella"                                                                |

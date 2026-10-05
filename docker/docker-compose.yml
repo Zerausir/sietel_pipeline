@@ -61,11 +61,23 @@ x-airflow-common:
     # dos pipelines, dos roles, sin compartir credenciales.
     MART_USER_USER: ${MART_USER_USER}
     MART_USER_PASSWORD: ${MART_USER_PASSWORD}
+    # SIGER_V3 (05-oct-2026) -- dags/siger_pipeline.py y siger/*.py. Otro
+    # SQL Server (192.168.129.40) con su propio usuario de lectura, y el rol
+    # siger_user (dueño del esquema siger) en el mismo PostgreSQL analítico
+    # (host/puerto/base de ANALITICO_PG_*). Deben existir también en el .env.
+    SIGER_SQLSERVER_HOST: ${SIGER_SQLSERVER_HOST}
+    SIGER_SQLSERVER_PORT: ${SIGER_SQLSERVER_PORT:-1433}
+    SIGER_SQLSERVER_DATABASE: ${SIGER_SQLSERVER_DATABASE}
+    SIGER_SQLSERVER_USER: ${SIGER_SQLSERVER_USER}
+    SIGER_SQLSERVER_PASSWORD: ${SIGER_SQLSERVER_PASSWORD}
+    SIGER_PG_USER: ${SIGER_PG_USER}
+    SIGER_PG_PASSWORD: ${SIGER_PG_PASSWORD}
   volumes:
     - ../dags:/opt/airflow/dags
     - ../scripts:/opt/airflow/scripts
     - ../sql:/opt/airflow/sql
     - ../mart:/opt/airflow/mart
+    - ../siger:/opt/airflow/siger
     - airflow_logs:/opt/airflow/logs
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
