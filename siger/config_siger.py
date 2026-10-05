@@ -26,29 +26,58 @@ from config import sqlserver_cursor as _sqlserver_cursor  # noqa: E402
 # NR_PARAMETROS_FACTURACION (~2,48 M filas); ajustar con lo medido.
 TIMEOUT_CONSULTA_S = 3600
 
-# Columnas permitidas por objeto (§2 de la instrucción, verificadas
-# 05-oct-2026 con el usuario de lectura). Denegadas -- NO agregar aquí:
-#   TITULO_HABILITANTE: THUSUARIO, TTHSECUENCIAL, STHSECUENCIAL, THFECHASUS,
-#     THRESOLUCION, THFECHARES, THTITULO, THCUERPO, THCOBERTURA,
-#     THUSUARIOREG, THFECHAREG, THNUMERO_TRAMITE, THCONTRATO_RENOVADO
+# Columnas permitidas por objeto: las que SQL Server deja consultar de
+# verdad (SELECT TOP 0 por columna, probar_conexion.py en VM2,
+# 05-oct-2026). Decisión: se replican TODAS las accesibles y NINGUNA
+# bloqueada. Los permisos cambian con el tiempo (THUSUARIO estaba permitida
+# y ya no; THFECHASUS figuraba denegada y hoy está permitida), por eso cada
+# carga vuelve a verificarlos y falla con el nombre de la columna si alguno
+# se pierde. Bloqueadas al 05-oct-2026 -- NO agregar aquí:
+#   TITULO_HABILITANTE: THPAGINA, THACTA, THUSUARIO, TTHSECUENCIAL,
+#     STHSECUENCIAL, THRESOLUCION, THFECHARES, THTITULO, THCUERPO,
+#     THCOBERTURA, THUSUARIOREG, THFECHAREG, THNUMERO_TRAMITE,
+#     THCONTRATO_RENOVADO
 #   SERVICIO_TH: IDTSV, ELIMINACION
+#   VISTA_CONCESIONARIOS: prvnnombre, cantnombre, parrnombre, ucci_ciudad,
+#     direccion, telefono1, telefono2, ucpn_telefocasa, telefono3, ucp_fax,
+#     ucp_email, ucp_direccorre, ucpn_certivota, parrcodi, ucp_usafrec,
+#     ucp_tipoconc, ucpj_tipo, prvnregional (sin ubicación ni tipo de
+#     concesionario: solo código, nombre, cédula/RUC)
 COLUMNAS_PERMITIDAS = {
     "dbo.TITULO_HABILITANTE": [
-        "THSECUENCIAL", "IDSTH", "THTOMO", "THFOJA", "THPAGINA", "THACTA",
-        "UCP_CONCNUM", "THESTADO", "THFECHAVIG",
+        "THSECUENCIAL", "IDSTH", "THTOMO", "THFOJA", "UCP_CONCNUM",
+        "THFECHASUS", "THFECHAVIG", "THESTADO",
     ],
     "dbo.SERVICIO_TH": ["IDSTH", "ABREVIATURA", "DESCRIPCION"],
-    "dbo.VISTA_CONCESIONARIOS": [
-        "ucp_concnum", "nombres", "ci_ruc", "ruc", "prvnnombre", "cantnombre",
-        "parrnombre", "ucci_ciudad", "direccion", "telefono1", "telefono2",
-        "ucpn_telefocasa", "telefono3", "ucp_fax", "ucp_email", "ucp_direccorre",
-        "ucpn_certivota", "parrcodi", "ucp_usafrec", "ucp_tipoconc", "ucpj_tipo",
-        "prvnregional",
+    "dbo.VISTA_CONCESIONARIOS": ["ucp_concnum", "nombres", "ci_ruc", "ruc"],
+    # Las 99 columnas, todas permitidas, en el orden de INFORMATION_SCHEMA.
+    # Sin datos personales (no hay nombres, RUC, teléfonos ni correos: solo
+    # CLIENT_CODE y datos técnicos de estaciones).
+    "dbo.NR_PARAMETROS_FACTURACION": [
+        "CLIENT_CODE", "NT_ID", "COD_SERVICIO", "NOM_SERVICIO", "TIPO_USO",
+        "CONTRATO", "FECHA_CONTRATO", "TIPO_SOLICITUD",
+        "ST_ID1", "ESTACION_A", "PROVINCIA_A", "CANTON_A", "PARROQUIA_A",
+        "COD_PARROQ_A", "UBICACION_A", "IVAP_A", "ZONA_PRIORIZA_A", "BETA_A",
+        "VALOR_EST_A",
+        "ST_ID2", "ESTACION_B", "PROVINCIA_B", "CANTON_B", "PARROQUIA_B",
+        "COD_PARROQ_B", "UBICACION_B", "IVAP_B", "ZONA_PRIORIZA_B", "BETA_B",
+        "VALOR_EST_B",
+        "FREC_TX", "FREC_RX", "ALFA_TX", "ALFA_RX", "BW_ASIGNADO", "BETA",
+        "POTENCIA", "GANANCIA", "ALTURA_EFECTIVA", "IVAP", "DISTANCIA",
+        "LATITUD", "LONGITUD", "LAT_G", "LAT_MIN", "LAT_SEG", "LAT_N_S",
+        "LON_G", "LON_MIN", "LON_SEG", "LON_W",
+        "TIPO_ESTACION", "TEC_SMA", "DESCUENTO_RB", "DENSIDAD_POB",
+        "FAC_PROPAGACION", "ZONA_PRIORIZA", "TIPO_USO_SITIO", "CATEGORIA",
+        "MODULACION", "VAL_MODULACION", "FEC", "VELOCIDAD_TX", "SATELITE",
+        "COB_SATELITAL", "FCS",
+        "NO_HORAS_OP", "NO_FREC", "NO_OPERADORES", "NO_CONSTELACIONES",
+        "NO_ESTACIONES", "FACTOR_RED_SM",
+        "SERV_ASOCIADO", "COD_SERV_ASO", "DESC_SERV_ASO", "COD_ENLACE",
+        "PER", "X", "FACTOR_P", "FACTOR_K", "FVE", "TIPO_EQUIPO",
+        "NA", "ND", "NV", "FACTOR_A", "FACTOR_U", "TIPO_SISTEMA", "COD_SEG",
+        "NO_REG_MDBA", "FECHA_OPERACION", "VAL_UDBL", "SBU", "COD_SIRATV",
+        "COEF_TCS", "VALOR_EC", "FECHA_FACTURACION", "ECUACION", "ELIMINADO",
     ],
-    # Todas las columnas están permitidas (~100). La lista fija se cierra en
-    # la fase 2 con el volcado de INFORMATION_SCHEMA de probar_conexion.py;
-    # hasta entonces None = "tomar la lista de INFORMATION_SCHEMA.COLUMNS".
-    "dbo.NR_PARAMETROS_FACTURACION": None,
 }
 
 # Columna NOT NULL de cada objeto usada para contar sin referenciar columnas
@@ -57,7 +86,7 @@ COLUMNA_CONTEO = {
     "dbo.TITULO_HABILITANTE": "THSECUENCIAL",
     "dbo.SERVICIO_TH": "IDSTH",
     "dbo.VISTA_CONCESIONARIOS": "ucp_concnum",
-    "dbo.NR_PARAMETROS_FACTURACION": None,  # cualquiera: todas permitidas
+    "dbo.NR_PARAMETROS_FACTURACION": "FECHA_FACTURACION",
 }
 
 # Universo SAI -- SOLO para las vistas derivadas (siger.v_titulo_sai,

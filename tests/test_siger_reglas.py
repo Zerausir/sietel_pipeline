@@ -31,14 +31,19 @@ def test_universo_sai_excluye_valor_agregado():
 
 
 def test_columnas_denegadas_no_se_usan():
+    # Bloqueadas según la prueba real en VM2 (05-oct-2026).
     denegadas_titulo = {
-        "THUSUARIO", "TTHSECUENCIAL", "STHSECUENCIAL", "THFECHASUS", "THRESOLUCION",
-        "THFECHARES", "THTITULO", "THCUERPO", "THCOBERTURA", "THUSUARIOREG",
-        "THFECHAREG", "THNUMERO_TRAMITE", "THCONTRATO_RENOVADO",
+        "THPAGINA", "THACTA", "THUSUARIO", "TTHSECUENCIAL", "STHSECUENCIAL",
+        "THRESOLUCION", "THFECHARES", "THTITULO", "THCUERPO", "THCOBERTURA",
+        "THUSUARIOREG", "THFECHAREG", "THNUMERO_TRAMITE", "THCONTRATO_RENOVADO",
     }
-    assert not denegadas_titulo & {c.upper() for c in COLUMNAS_PERMITIDAS["dbo.TITULO_HABILITANTE"]}
+    titulo = {c.upper() for c in COLUMNAS_PERMITIDAS["dbo.TITULO_HABILITANTE"]}
+    assert not denegadas_titulo & titulo
+    assert "THFECHASUS" in titulo  # accesible hoy: se replica
     assert not {"IDTSV", "ELIMINACION"} & {c.upper() for c in COLUMNAS_PERMITIDAS["dbo.SERVICIO_TH"]}
-    assert len(COLUMNAS_PERMITIDAS["dbo.VISTA_CONCESIONARIOS"]) == 22
+    assert COLUMNAS_PERMITIDAS["dbo.VISTA_CONCESIONARIOS"] == ["ucp_concnum", "nombres", "ci_ruc", "ruc"]
+    facturacion = COLUMNAS_PERMITIDAS["dbo.NR_PARAMETROS_FACTURACION"]
+    assert len(facturacion) == 99 and len(set(facturacion)) == 99
 
 
 class _CursorSimulado:
