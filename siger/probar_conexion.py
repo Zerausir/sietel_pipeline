@@ -9,8 +9,10 @@ Desde el contenedor de Airflow (VM2):
 Pasos:
   a. Conecta a SIGER_V3 con el driver ODBC 18 (mismas opciones TLS que SIETEL).
   b. Imprime @@VERSION, login, usuario de base y base actual.
-  c. Verifica los permisos de las columnas permitidas (§2) -- fn_my_permissions
-     por columna + SELECT TOP 0 de las columnas exactas.
+  c. Verifica los permisos de las columnas permitidas (§2) con una prueba
+     real: SELECT TOP 0 columna por columna y luego de todas juntas. Imprime
+     además el mapa de permisos de todas las columnas visibles (real vs.
+     fn_my_permissions, que es solo diagnóstico -- ver config_siger.py).
   d. Cuenta las filas de cada objeto (sin SELECT * ni COUNT(*) sobre columnas
      denegadas) y vuelca INFORMATION_SCHEMA.COLUMNS de los 4 objetos -- con
      ese volcado se cierran los tipos del DDL de la fase 2.
@@ -30,7 +32,9 @@ from config_siger import (
     COLUMNA_CONTEO,
     COLUMNAS_PERMITIDAS,
     PermisoDenegado,
+    columnas_con_select_segun_catalogo,
     columnas_de_origen,
+    columnas_denegadas,
     postgres_cursor,
     sqlserver_cursor,
     verificar_permisos,
@@ -119,14 +123,27 @@ def _probar_sqlserver() -> bool:
                 print(f"  ❌ Conteo falló: {exc}")
                 ok = False
 
+            # Mapa de permisos de TODAS las columnas visibles: prueba real
+            # (SELECT TOP 0) vs. fn_my_permissions (solo diagnóstico; en la
+            # primera corrida del 05-oct-2026 no coincidían).
+            denegadas_reales = set(columnas_denegadas(cur, objeto, [m["COLUMN_NAME"] for m in meta]))
+            segun_catalogo = columnas_con_select_segun_catalogo(cur, objeto)
+            usadas = {c.lower() for c in columnas}
+
             print(f"  Columnas visibles en INFORMATION_SCHEMA ({len(meta)}):")
-            print(f"    {'#':>3}  {'columna':<32} {'tipo':<16} {'long':>6} {'prec':>5} {'esc':>4} {'dtp':>4} nulo")
+            print(f"    {'#':>3}  {'columna':<32} {'tipo':<16} {'long':>6} {'prec':>5} {'esc':>4} {'dtp':>4} "
+                  f"nulo  real  fn_my_perm  uso")
             for m in meta:
-                print(f"    {m['ORDINAL_POSITION']:>3}  {m['COLUMN_NAME']:<32} {m['DATA_TYPE']:<16} "
+                nombre = m["COLUMN_NAME"]
+                real = "NO" if nombre in denegadas_reales else "SI"
+                catalogo = "SI" if nombre.lower() in segun_catalogo else "NO"
+                marca = "  ⚠️ difiere" if real != catalogo else ""
+                print(f"    {m['ORDINAL_POSITION']:>3}  {nombre:<32} {m['DATA_TYPE']:<16} "
                       f"{str(m['CHARACTER_MAXIMUM_LENGTH'] or ''):>6} {str(m['NUMERIC_PRECISION'] or ''):>5} "
                       f"{str(m['NUMERIC_SCALE'] if m['NUMERIC_SCALE'] is not None else ''):>4} "
                       f"{str(m['DATETIME_PRECISION'] if m['DATETIME_PRECISION'] is not None else ''):>4} "
-                      f"{m['IS_NULLABLE']}")
+                      f"{m['IS_NULLABLE']:<4}  {real:<4}  {catalogo:<10}  "
+                      f"{'usada' if nombre.lower() in usadas else '-'}{marca}")
 
         _titulo("e. Integridad de llaves")
         try:

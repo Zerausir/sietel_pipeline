@@ -39,3 +39,28 @@ def test_columnas_denegadas_no_se_usan():
     assert not denegadas_titulo & {c.upper() for c in COLUMNAS_PERMITIDAS["dbo.TITULO_HABILITANTE"]}
     assert not {"IDTSV", "ELIMINACION"} & {c.upper() for c in COLUMNAS_PERMITIDAS["dbo.SERVICIO_TH"]}
     assert len(COLUMNAS_PERMITIDAS["dbo.VISTA_CONCESIONARIOS"]) == 22
+
+
+class _CursorSimulado:
+    """Simula pyodbc: falla (error 230) si la consulta menciona una columna denegada."""
+
+    def __init__(self, denegadas):
+        self.denegadas = denegadas
+
+    def execute(self, sql, *args):
+        if any(f"[{c}]" in sql for c in self.denegadas):
+            raise Exception("(230) The SELECT permission was denied on the column")
+
+    def fetchall(self):
+        return []
+
+
+def test_verificar_permisos_usa_prueba_real_por_columna():
+    import pytest
+    from config_siger import PermisoDenegado, columnas_denegadas, verificar_permisos
+
+    cur = _CursorSimulado({"THPAGINA"})
+    assert columnas_denegadas(cur, "dbo.T", ["THSECUENCIAL", "THPAGINA", "THACTA"]) == ["THPAGINA"]
+    with pytest.raises(PermisoDenegado, match="THPAGINA"):
+        verificar_permisos(cur, "dbo.T", ["THSECUENCIAL", "THPAGINA"])
+    verificar_permisos(_CursorSimulado(set()), "dbo.T", ["THSECUENCIAL", "THACTA"])

@@ -114,25 +114,53 @@ def columnas_de_origen(cur, objeto: str) -> list[dict]:
     return cur.fetchall()
 
 
-def verificar_permisos(cur, objeto: str, columnas: list[str]) -> None:
+def columnas_con_select_segun_catalogo(cur, objeto: str) -> set[str]:
     """
-    Verifica que el usuario tenga SELECT efectivo sobre CADA columna de la
-    lista (fn_my_permissions por columna) y luego lo confirma con un
-    SELECT TOP 0 de las columnas exactas. Falla con PermisoDenegado
-    indicando qué columna(s) están denegadas -- en vez del error 230
-    genérico de SQL Server a mitad de una extracción.
+    Columnas (en minúscula) con SELECT según fn_my_permissions. SOLO
+    DIAGNÓSTICO: la primera corrida de probar_conexion.py (05-oct-2026)
+    mostró que en SIGER_V3 puede no coincidir con lo que SQL Server
+    realmente permite consultar -- la prueba que manda es el SELECT real de
+    verificar_permisos().
     """
     cur.execute(
         "SELECT subentity_name FROM fn_my_permissions(?, 'OBJECT') "
         "WHERE permission_name = 'SELECT' AND subentity_name <> ''",
         (objeto,),
     )
-    con_select = {r["subentity_name"].lower() for r in cur.fetchall()}
-    denegadas = [c for c in columnas if c.lower() not in con_select]
+    return {r["subentity_name"].lower() for r in cur.fetchall()}
+
+
+def columnas_denegadas(cur, objeto: str, columnas: list[str]) -> list[str]:
+    """
+    Prueba EMPÍRICA columna por columna: SELECT TOP 0 [col] FROM objeto. SQL
+    Server verifica permisos al compilar la consulta aunque no devuelva
+    filas, así que una columna denegada falla aquí con el mismo error 230 que
+    haría fallar la extracción. Devuelve las columnas que fallan.
+    """
+    denegadas = []
+    for c in columnas:
+        try:
+            cur.execute(f"SELECT TOP 0 [{c}] FROM {objeto}")
+            cur.fetchall()
+        except Exception:
+            denegadas.append(c)
+    return denegadas
+
+
+def verificar_permisos(cur, objeto: str, columnas: list[str]) -> None:
+    """
+    Verifica que se pueda consultar CADA columna de la lista (prueba
+    empírica, ver columnas_denegadas) y luego todas juntas con un SELECT
+    TOP 0 de las columnas exactas. Falla con PermisoDenegado indicando qué
+    columna(s) están denegadas -- en vez del error 230 genérico de SQL
+    Server a mitad de una extracción.
+    """
+    denegadas = columnas_denegadas(cur, objeto, columnas)
     if denegadas:
         raise PermisoDenegado(
-            f"{objeto}: sin permiso SELECT sobre la(s) columna(s) {', '.join(denegadas)}. "
-            f"Revisar los permisos por columna en SIGER_V3 con Informática antes de cargar."
+            f"{objeto}: SQL Server deniega SELECT sobre la(s) columna(s) {', '.join(denegadas)} "
+            f"(SELECT TOP 0 falla). Revisar los permisos por columna en SIGER_V3 con Informática "
+            f"antes de cargar."
         )
     lista = ", ".join(f"[{c}]" for c in columnas)
     try:
@@ -140,6 +168,6 @@ def verificar_permisos(cur, objeto: str, columnas: list[str]) -> None:
         cur.fetchall()
     except Exception as exc:
         raise PermisoDenegado(
-            f"{objeto}: fn_my_permissions reporta SELECT en todas las columnas, pero "
-            f"SELECT TOP 0 de las columnas exactas falló: {exc}"
+            f"{objeto}: cada columna se puede consultar por separado, pero el SELECT TOP 0 "
+            f"conjunto falló: {exc}"
         ) from exc
