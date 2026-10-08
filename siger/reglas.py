@@ -7,6 +7,8 @@ tabuladores ni saltos de línea, que str.strip() sin argumentos sí quitaría).
 """
 import math
 import re
+import unicodedata
+from difflib import SequenceMatcher
 
 _TRECE_DIGITOS = re.compile(r"\d{13}")
 _DIEZ_DIGITOS = re.compile(r"\d{10}")
@@ -86,3 +88,77 @@ def thsecuencial_a_bigint(valor) -> int:
     if not math.isfinite(v) or not v.is_integer():
         raise ValueError(f"THSECUENCIAL no es entero: {valor!r} -- se aborta la carga.")
     return int(v)
+
+
+# ── Conciliación SIGER ↔ OBTEL (08-oct-2026) ─────────────────────────────────
+
+# Estado administrativo 'opera' de SIETEL -> clase. MISMO mapeo que
+# mart.vw_prestadores_sin_reportar (sql/02_ddl_mart.sql, clasificacion_
+# incumplimiento): si cambia allí, cambiarlo aquí.
+OPERA_ACTIVO = {"Nuevo", "Opera Normalmente", "SI"}
+OPERA_NO_OPERATIVO = {"Cancelación", "NO", "Opera Irregularmente"}
+
+
+def clasificar_opera(opera) -> str:
+    """'activo', 'no_operativo' o 'zona_gris' (cualquier otro valor, incluido NULL)."""
+    if opera in OPERA_ACTIVO:
+        return "activo"
+    if opera in OPERA_NO_OPERATIVO:
+        return "no_operativo"
+    return "zona_gris"
+
+
+# Formas societarias y palabras vacías que no distinguen a un prestador.
+# Se comparan DESPUÉS de juntar letras sueltas ("S. A." -> "SA").
+_PALABRAS_IGNORADAS = {
+    "SA", "SAS", "CA", "CIA", "COMPANIA", "LTDA", "LIMITADA", "EP", "CLTDA",
+    "DE", "DEL", "LA", "LAS", "EL", "LOS", "Y",
+}
+
+
+def normalizar_nombre(nombre) -> str:
+    """
+    Nombre comparable: sin tildes ni Ñ (NFKD), en mayúsculas, sin puntuación,
+    con las letras sueltas consecutivas juntadas ("S. A." -> "SA",
+    "C. LTDA." -> "C LTDA" -> se ignora) y sin formas societarias ni
+    palabras vacías. '' si no queda nada.
+    """
+    if not nombre:
+        return ""
+    texto = unicodedata.normalize("NFKD", str(nombre))
+    texto = "".join(ch for ch in texto if not unicodedata.combining(ch)).upper()
+    tokens = re.sub(r"[^A-Z0-9]+", " ", texto).split()
+    juntados, letras = [], ""
+    for t in tokens:
+        if len(t) == 1 and t.isalpha():
+            letras += t
+            continue
+        if letras:
+            juntados.append(letras)
+            letras = ""
+        juntados.append(t)
+    if letras:
+        juntados.append(letras)
+    return " ".join(t for t in juntados if t not in _PALABRAS_IGNORADAS)
+
+
+def _similitud_simple(a: str, b: str) -> float:
+    ta, tb = a.split(), b.split()
+    if not ta or not tb:
+        return 0.0
+    orden = SequenceMatcher(None, " ".join(sorted(ta)), " ".join(sorted(tb))).ratio()
+    jaccard = len(set(ta) & set(tb)) / len(set(ta) | set(tb))
+    return max(orden, jaccard)
+
+
+def similitud_nombre(nombres_a, nombres_b, separador: str = " | ") -> float:
+    """
+    Similitud 0..1 entre dos nombres (o listas de nombres unidas por
+    `separador`, como las agrega el cruce): el máximo entre cada par, sobre
+    nombres normalizados. Por par, el mayor entre la razón de SequenceMatcher
+    con las palabras ordenadas (tolera "PEREZ JUAN" vs "JUAN PEREZ") y el
+    índice de Jaccard de palabras.
+    """
+    la = [normalizar_nombre(x) for x in str(nombres_a or "").split(separador)]
+    lb = [normalizar_nombre(x) for x in str(nombres_b or "").split(separador)]
+    return round(max((_similitud_simple(a, b) for a in la for b in lb), default=0.0), 3)

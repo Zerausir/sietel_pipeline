@@ -191,3 +191,27 @@ def test_huella_solo_usa_columnas_permitidas():
     assert "SELECT [ucp_concnum], [nombres], [ci_ruc], [ruc] FROM dbo.VISTA_CONCESIONARIOS" in sql
     assert "*)" in sql and "SELECT *" not in sql
     assert firma_columnas("dbo.SERVICIO_TH") != firma_columnas("dbo.TITULO_HABILITANTE")
+
+
+# ── Conciliación: nombre y estado ────────────────────────────────────────────
+
+from reglas import clasificar_opera, normalizar_nombre, similitud_nombre  # noqa: E402
+
+
+def test_normalizar_nombre_quita_forma_societaria_y_tildes():
+    assert normalizar_nombre("Telecomunicaciones Núñez Cía. Ltda.") == "TELECOMUNICACIONES NUNEZ"
+    assert normalizar_nombre("NETLIFE S.A.") == "NETLIFE"
+    assert normalizar_nombre("  ") == "" and normalizar_nombre(None) == ""
+
+
+def test_similitud_nombre():
+    assert similitud_nombre("PEREZ LOPEZ JUAN", "Juan Pérez López") == 1.0
+    assert similitud_nombre("NETLIFE S.A.", "OTRA | Netlife SA") == 1.0
+    assert similitud_nombre("ALFA TELECOM", "OMEGA RADIO") < 0.5
+    assert similitud_nombre(None, "X") == 0.0
+
+
+def test_clasificar_opera_igual_que_mart():
+    assert clasificar_opera("Opera Normalmente") == "activo"
+    assert clasificar_opera("Cancelación") == "no_operativo"
+    assert clasificar_opera(None) == "zona_gris" and clasificar_opera("Suspendido") == "zona_gris"
