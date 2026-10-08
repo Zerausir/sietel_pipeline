@@ -1,3 +1,8 @@
+# Nombre fijo del proyecto (08-oct-2026): sin él, Compose usaba el nombre de
+# la carpeta ("docker"), el mismo que el Airflow viejo levantado sin
+# --env-file, y los mezclaba como contenedores huérfanos del mismo proyecto.
+name: sietel_dashboard
+
 services:
   dashboard:
     build:
