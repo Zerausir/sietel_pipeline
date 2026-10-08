@@ -1,3 +1,11 @@
+# Nombre FIJO del proyecto (08-oct-2026). Antes solo venía de
+# COMPOSE_PROJECT_NAME en ../.env: un `docker compose up` sin --env-file
+# tomaba el nombre de la carpeta ("docker") y levantaba un SEGUNDO Airflow
+# (docker-airflow-*, restart: always) contra la misma metadata -- pasó el
+# 06-ago-2026 y ese scheduler viejo, sin el volumen ../siger, tomó tareas
+# de siger_pipeline (ModuleNotFoundError del 08-oct-2026).
+name: sietel_pipeline
+
 x-airflow-common:
   &airflow-common
   build:
