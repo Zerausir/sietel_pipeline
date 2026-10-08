@@ -25,12 +25,18 @@ La carga ya certificó lo mismo ANTES del COMMIT contra lo que extrajo; esta
 validación además detecta cambios en SIGER entre la carga y ahora, y
 cualquier alteración posterior del destino. Si SIGER cambió en ese lapso
 (es una base viva), puede fallar sin que la carga esté mal: relanzar el DAG.
+
+Desde el 08-oct-2026 el DAG solo la corre si alguna tabla se recargó, y solo
+sobre esas tablas (las demás no cambiaron: misma huella). Si una tabla no
+certifica, se borra su huella (siger.huella_fuente) para que la próxima
+corrida la recargue aunque SIGER no cambie.
 """
 import logging
 from datetime import datetime
 
 from cargar_siger import TABLAS, iterar_origen, restar_destino, resumir_balance
 from config_siger import postgres_conexion, postgres_cursor
+from huella_siger import invalidar_huellas
 
 logger = logging.getLogger(__name__)
 
@@ -136,15 +142,20 @@ def _registrar_resultado(estado, mensaje_error, fecha_inicio):
         )
 
 
-def validar_siger():
+def validar_siger(claves: list[str] | None = None):
+    """Certifica las tablas indicadas (todas si claves=None) y los accesos."""
     inicio = datetime.now()
     errores = []
     resultados = []
+    sin_certificar = []
 
-    for clave in TABLAS:
+    for clave in (claves if claves is not None else TABLAS):
         print(f"Certificando {TABLAS[clave].destino} contra {TABLAS[clave].objeto}...")
         r = _certificar_tabla(clave)
         resultados.append(r)
+        if (r["origen"] != r["destino"] or r["faltantes"] or r["sobrantes"]
+                or r["inconsistentes"]):
+            sin_certificar.append(TABLAS[clave].tipo_carga)
         if r["origen"] != r["destino"]:
             errores.append(f"{r['tabla']}: {r['origen']:,} filas en SIGER vs {r['destino']:,} en PostgreSQL")
         if r["faltantes"]:
@@ -181,6 +192,11 @@ def validar_siger():
     for nombre, referencia, valor in metricas:
         print(f"    {nombre}: {valor}   [ref. {referencia}]")
     print(f"{'=' * 78}")
+
+    if sin_certificar:
+        with postgres_cursor() as cur:
+            invalidar_huellas(cur, sin_certificar)
+        print(f"  Huella borrada de {', '.join(sin_certificar)}: se recargarán en la próxima corrida.")
 
     if errores:
         mensaje = "; ".join(errores)

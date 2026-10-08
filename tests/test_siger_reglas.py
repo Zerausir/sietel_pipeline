@@ -160,3 +160,34 @@ def test_cruce_usa_la_misma_normalizacion_de_ruc():
     from construir_cruce_obtel import SQL_UPSERT_HALLAZGOS
     assert SQL_RUC_LIMPIO.format(col="v.isp_ruc") in SQL_UPSERT_HALLAZGOS
     assert SQL_RUC_LIMPIO.format(col="p.ruc_resuelto") in SQL_UPSERT_HALLAZGOS
+
+
+# ── Detección de cambios (huella_siger) ──────────────────────────────────────
+
+from huella_siger import decidir_recarga, firma_columnas, sql_huella  # noqa: E402
+
+_HUELLA = {"filas": 100, "checksum": 12345, "columnas": "abc"}
+
+
+def test_sin_cambios_no_recarga():
+    assert decidir_recarga(dict(_HUELLA), dict(_HUELLA), n_destino=100) is None
+
+
+@pytest.mark.parametrize("actual, guardada, n_destino, kwargs, esperado", [
+    (_HUELLA, None, 100, {}, "sin huella"),
+    (_HUELLA, _HUELLA, 100, {"forzar": True}, "forzada"),
+    ({**_HUELLA, "columnas": "xyz"}, _HUELLA, 100, {}, "columnas"),
+    ({**_HUELLA, "filas": 101}, _HUELLA, 100, {}, "conteo"),
+    ({**_HUELLA, "checksum": 999}, _HUELLA, 100, {}, "checksum"),
+    (_HUELLA, _HUELLA, 0, {}, "destino"),
+    (_HUELLA, _HUELLA, 100, {"dependencia_recargada": True}, "depende"),
+])
+def test_motivos_de_recarga(actual, guardada, n_destino, kwargs, esperado):
+    assert esperado in decidir_recarga(actual, guardada, n_destino, **kwargs)
+
+
+def test_huella_solo_usa_columnas_permitidas():
+    sql = sql_huella("dbo.VISTA_CONCESIONARIOS")
+    assert "SELECT [ucp_concnum], [nombres], [ci_ruc], [ruc] FROM dbo.VISTA_CONCESIONARIOS" in sql
+    assert "*)" in sql and "SELECT *" not in sql
+    assert firma_columnas("dbo.SERVICIO_TH") != firma_columnas("dbo.TITULO_HABILITANTE")
