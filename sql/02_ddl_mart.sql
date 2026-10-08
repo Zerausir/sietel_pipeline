@@ -2127,6 +2127,20 @@ FROM calidad.conflictos_ruc_peva;
 COMMENT ON VIEW mart.vw_conflictos_ruc_peva IS
 'Puente de solo lectura hacia calidad.conflictos_ruc_peva (categorías A/B/C de conflicto RUC/PEVA, ver mart/detectar_conflictos_peva.py). estado_revision/revisado_por/notas_revision/fecha_revision reflejan el workflow humano tal cual está en calidad -- esta vista NO permite editarlos, la edición real ocurre fuera de OBTEL con el rol calidad_revisor. Sin columnas de geografía ni territorio: un conflicto RUC/PEVA no tiene ubicación física propia.';
 
+-- Puente hacia calidad.conciliacion_siger_obtel (conciliación SIGER <->
+-- SIETEL, 08-oct-2026). La tabla la crea sql/13_ddl_calidad_siger.sql
+-- (siger_pipeline), que también crea esta vista; aquí solo se recrea tras el
+-- DROP SCHEMA mart CASCADE, y SOLO si la tabla ya existe -- así mart no
+-- depende de que siger_pipeline haya corrido alguna vez. Mismo SELECT que en
+-- 13: si cambia uno, cambiar el otro.
+DO $$
+BEGIN
+    IF to_regclass('calidad.conciliacion_siger_obtel') IS NOT NULL THEN
+        EXECUTE 'CREATE VIEW mart.vw_conciliacion_siger_obtel AS SELECT * FROM calidad.conciliacion_siger_obtel';
+        EXECUTE 'COMMENT ON VIEW mart.vw_conciliacion_siger_obtel IS ''Puente de solo lectura hacia calidad.conciliacion_siger_obtel (ver sql/13_ddl_calidad_siger.sql).''';
+    END IF;
+END $$;
+
 -- ============================================================
 -- 16. ESTADISTICAS
 -- ============================================================

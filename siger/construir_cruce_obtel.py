@@ -24,6 +24,11 @@ Hallazgos:
 No corrige nada. UPSERT que preserva el workflow humano; lo que deja de
 detectarse queda con sigue_detectado = false.
 
+En la misma transacción reemplaza calidad.conciliacion_siger_obtel (08-oct-
+2026): una fila por RUC con lo que COINCIDE y lo que no en nombre, estado y
+reporte (siger/conciliacion.py). La lee el dashboard vía
+mart.vw_conciliacion_siger_obtel.
+
 Uso:
     python construir_cruce_obtel.py            # recalcula y escribe
     python construir_cruce_obtel.py --dry-run  # recalcula, reporta y hace ROLLBACK
@@ -32,6 +37,7 @@ import argparse
 import logging
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "mart"))
@@ -39,6 +45,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from sqlalchemy import text  # noqa: E402
 
 from aplicar_capa3 import _aplicar_archivo  # noqa: E402
+from conciliacion import SQL_OBTEL, SQL_SIGER_CONC, SQL_SIGER_TITULOS, construir_filas  # noqa: E402
 from detectar_conflictos_peva import SQL_RUC_LIMPIO, _engine  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -167,6 +174,32 @@ ORDER BY tipo_hallazgo, detalle
 """
 
 
+COLUMNAS_CONCILIACION = [
+    "ruc_limpio", "categoria", "en_sietel", "en_siger", "nombre_sietel", "nombre_siger",
+    "similitud_nombre", "nivel_nombre", "pevas_sietel", "opera_sietel", "estado_sietel",
+    "reporta_sietel", "ultimo_periodo_sietel", "ucp_concnums", "ruc_por_cedula_001",
+    "estado_siger", "estados_siger", "idsth_siger", "vigencia_siger", "titulos_sai",
+    "coincide_estado", "coincide_reporte",
+]
+
+SQL_INSERT_CONCILIACION = (
+    f"INSERT INTO calidad.conciliacion_siger_obtel ({', '.join(COLUMNAS_CONCILIACION)}) "
+    f"VALUES ({', '.join(':' + c for c in COLUMNAS_CONCILIACION)})"
+)
+
+
+def _reemplazar_conciliacion(conn) -> Counter:
+    """Recalcula la conciliación completa y reemplaza la tabla (sin COMMIT)."""
+    def leer(sql):
+        return [dict(r) for r in conn.execute(text(sql)).mappings().all()]
+
+    filas = construir_filas(leer(SQL_OBTEL), leer(SQL_SIGER_CONC), leer(SQL_SIGER_TITULOS))
+    conn.execute(text("DELETE FROM calidad.conciliacion_siger_obtel"))
+    if filas:
+        conn.execute(text(SQL_INSERT_CONCILIACION), filas)
+    return Counter(f["categoria"] for f in filas)
+
+
 def construir_cruce_obtel(dry_run: bool = False) -> list[dict]:
     """
     Aplica el DDL (idempotente) y recalcula los hallazgos en una sola
@@ -189,6 +222,7 @@ def construir_cruce_obtel(dry_run: bool = False) -> list[dict]:
         conn.execute(text(SQL_MARCAR_NO_DETECTADOS))
         conn.execute(text(SQL_UPSERT_HALLAZGOS))
         resumen = [dict(r) for r in conn.execute(text(SQL_RESUMEN)).mappings().all()]
+        categorias = _reemplazar_conciliacion(conn)
         if dry_run:
             conn.rollback()
         else:
@@ -200,7 +234,11 @@ def construir_cruce_obtel(dry_run: bool = False) -> list[dict]:
     for r in resumen:
         print(f"  {r['tipo_hallazgo']:<24} {r['detalle']:<24} {r['n']:>6,}  "
               f"(cédula+001: {r['por_cedula_001']}, ya revisados: {r['revisados']})")
-    logger.info("Cruce SIGER-OBTEL %s: %s", "simulado" if dry_run else "actualizado", resumen)
+    print(f"\n  Conciliación por RUC ({sum(categorias.values()):,} RUC):")
+    for categoria, n in categorias.most_common():
+        print(f"    {categoria:<26} {n:>6,}")
+    logger.info("Cruce SIGER-OBTEL %s: %s; conciliación %s", "simulado" if dry_run else "actualizado",
+                resumen, dict(categorias))
     return resumen
 
 

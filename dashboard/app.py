@@ -130,7 +130,8 @@ def navigation() -> html.Header:
 # - Control e Infraestructura: Control (síntomas de reporte) + Mapa de
 #   nodos (exploración de infraestructura física) -- vuelven a ir
 #   juntos, como estaban antes de esta sesión.
-# - Calidad de datos: Discrepancias de geografía + Conflictos RUC/PEVA --
+# - Calidad de datos: Discrepancias de geografía + Conflictos RUC/PEVA
+#   (+ Conciliación SIGER, 08-oct-2026: SIETEL vs títulos habilitantes) --
 #   SOLO causas raíz accionables (colas con estado_revision), en palabras
 #   del usuario: "para decirle qué debe resolver en los datos con
 #   prioridad para mejorar lo que se observa en Control y en
@@ -148,6 +149,7 @@ GRUPOS_NAV_SAI: list[tuple[str, list[tuple[str, str]]]] = [
     ("Calidad de datos", [
         ("Discrepancias de geografía", "/sai/discrepancias-geografia"),
         ("Conflictos RUC/PEVA", "/sai/conflictos-ruc-peva"),
+        ("Conciliación SIGER", "/sai/conciliacion-siger"),
         ("Prioridad de carga", "/sai/prioridad-carga"),
     ]),
 ]

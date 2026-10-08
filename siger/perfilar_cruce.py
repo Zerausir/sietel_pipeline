@@ -13,8 +13,9 @@ decidirlas, sin escribir nada en la base:
   3. Estado: tabla cruzada por PEVA entre 'opera' de SIETEL (y si reporta) y
              el estado SAI del RUC en SIGER; THESTADO por servicio SAI.
 
-Mismos lados que construir_cruce_obtel.py (misma vista de OBTEL, mismo
-filtro de "prueba", una fila por PEVA, SQL_RUC_LIMPIO).
+Mismos lados que la conciliación (SQL_OBTEL y SQL_SIGER_CONC de
+conciliacion.py: misma vista de OBTEL, mismo filtro de "prueba", una fila
+por PEVA, SQL_RUC_LIMPIO).
 
 Uso:
     python perfilar_cruce.py                       # informe Markdown por pantalla
@@ -34,6 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from sqlalchemy import text  # noqa: E402
 
+from conciliacion import SQL_OBTEL, SQL_SIGER_CONC  # noqa: E402
 from detectar_conflictos_peva import SQL_RUC_LIMPIO, _engine  # noqa: E402
 from reglas import clasificar_opera, similitud_nombre  # noqa: E402
 
@@ -41,23 +43,6 @@ from reglas import clasificar_opera, similitud_nombre  # noqa: E402
 def _rl(col: str) -> str:
     return SQL_RUC_LIMPIO.format(col=col)
 
-
-SQL_OBTEL = f"""
-SELECT DISTINCT ON (v.peva_codigo)
-    v.peva_codigo, v.isp_ruc::text AS isp_ruc, {_rl("v.isp_ruc")} AS ruc_limpio,
-    v.isp_nombre, v.isp_tipopersona, v.opera, v.tiene_reportes,
-    v.ultimo_anio, v.ultimo_periodo_numero
-FROM analitico.v_ultimo_periodo_reportado_detalle v
-WHERE v.peva_codigo IS NOT NULL
-  AND COALESCE(v.isp_nombre::text, '') NOT ILIKE '%prueba%'
-  AND COALESCE(v.nombreComercial::text, '') NOT ILIKE '%prueba%'
-ORDER BY v.peva_codigo, v.ultimo_anio DESC NULLS LAST, v.ultimo_periodo_numero DESC NULLS LAST
-"""
-
-SQL_SIGER_CONC = f"""
-SELECT {_rl("c.ruc_resuelto")} AS ruc_limpio, c.ucp_concnum, c.nombres, c.ruc_origen
-FROM siger.v_concesionario_basico c
-"""
 
 SQL_SIGER_SAI = f"""
 SELECT {_rl("p.ruc_resuelto")} AS ruc_limpio, p.clave_prestador, p.tiene_sai_vigente,

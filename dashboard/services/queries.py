@@ -2325,6 +2325,52 @@ def get_conflictos_ruc_peva_estados() -> list[dict[str, str]]:
 
 
 # ============================================================================
+# Conciliación SIGER <-> SIETEL (08-oct-2026) -- calidad.conciliacion_siger_obtel
+# vía el puente mart.vw_conciliacion_siger_obtel (sql/13_ddl_calidad_siger.sql),
+# para dashboard/pages/conciliacion_siger.py.
+# ============================================================================
+
+@cache.memoize(timeout=900)
+def get_conciliacion_siger(categorias: tuple[str, ...] = ()) -> pd.DataFrame:
+    """
+    Una fila por RUC con la coincidencia de nombre, estado y reporte entre
+    SIGER y SIETEL. Cache de 15 min: la tabla se recalcula una vez al día
+    (siger_pipeline, 02:00). Los demás filtros de la página (estados,
+    búsqueda) se aplican en pandas sobre este resultado.
+    """
+    condiciones = ["1=1"]
+    params: dict[str, Any] = {}
+    if categorias:
+        condiciones.append("categoria = ANY(:categorias)")
+        params["categorias"] = list(categorias)
+    return _read(
+        f"""
+        SELECT
+            ruc_limpio, categoria, en_sietel, en_siger,
+            nombre_sietel, nombre_siger, similitud_nombre, nivel_nombre,
+            pevas_sietel, opera_sietel, estado_sietel, reporta_sietel, ultimo_periodo_sietel,
+            ucp_concnums, ruc_por_cedula_001, estado_siger, estados_siger,
+            idsth_siger, vigencia_siger, titulos_sai,
+            coincide_estado, coincide_reporte, fecha_calculo
+        FROM mart.vw_conciliacion_siger_obtel
+        WHERE {" AND ".join(condiciones)}
+        ORDER BY categoria, ruc_limpio
+        """,
+        params,
+    )
+
+
+@cache.memoize(timeout=900)
+def get_conciliacion_estados_siger() -> list[dict[str, str]]:
+    """THESTADO reales presentes en la conciliación, para el filtro."""
+    df = _read(
+        "SELECT DISTINCT estado_siger FROM mart.vw_conciliacion_siger_obtel "
+        "WHERE estado_siger IS NOT NULL ORDER BY 1"
+    )
+    return [{"label": e, "value": e} for e in df["estado_siger"]]
+
+
+# ============================================================================
 # Prioridad de carga (23-sep-2026) -- Calidad de datos, priorización de
 # "a quién perseguir primero" por PESO en Estadísticas/Control, no por
 # antigüedad ni por correlación con causas de calidad (esa hipótesis se
