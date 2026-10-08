@@ -215,3 +215,90 @@ def test_clasificar_opera_igual_que_mart():
     assert clasificar_opera("Opera Normalmente") == "activo"
     assert clasificar_opera("Cancelación") == "no_operativo"
     assert clasificar_opera(None) == "zona_gris" and clasificar_opera("Suspendido") == "zona_gris"
+
+
+# ── Conciliación (fase 2) ────────────────────────────────────────────────────
+
+from conciliacion import construir_filas  # noqa: E402
+from reglas import (  # noqa: E402
+    categoria_conciliacion, coincide_estado, estado_operacion_prestador, estado_operacion_sietel, nivel_nombre,
+)
+
+
+def test_casos_reales_del_perfilamiento():
+    # Contenido completo -> coincide; variantes J/X -> parecido; otro prestador -> difiere.
+    assert nivel_nombre(similitud_nombre("TELEACCESS S.A.", "TELEACCESS JR S.A.")) == "COINCIDE"
+    assert nivel_nombre(similitud_nombre("BIONET’S S.A.S.", "BIONETS S.A.S.")) == "COINCIDE"
+    assert nivel_nombre(similitud_nombre("OPTINET S.A.S. B.I.C.", "OPTINET S.A.S BIC")) == "COINCIDE"
+    assert nivel_nombre(similitud_nombre("DAVILA SANCHEZ DARWIN WALDIMIR", "DAVILA SANCHEZ DARWIN WLADIMIR")) \
+        == "COINCIDE"
+    assert nivel_nombre(similitud_nombre("MACIAS ZAMBRANO FERNANDO JAVIER", "MACIAS ZAMBRANO FERNANDO XAVIER")) \
+        == "PARECIDO"
+    assert nivel_nombre(similitud_nombre("LOOR RAMOS JEFFERSON JOEL", "LOOR ZAMBRANO JEFFERSON JOEL")) == "PARECIDO"
+    assert nivel_nombre(similitud_nombre("NETWORKING AMBATELNET S.A.S.", "MOVALNET MACHALA S.A.S.")) == "DIFIERE"
+    assert nivel_nombre(None) is None
+
+
+def test_estado_sietel_opera_irregularmente_opera():
+    assert estado_operacion_sietel("Opera Irregularmente") == "OPERANDO"
+    assert estado_operacion_sietel("Cancelación") == "NO_OPERA"
+    assert estado_operacion_sietel("Otro Estado") == "INDETERMINADO"
+    assert estado_operacion_prestador(["Otro Estado", "Cancelación"]) == "NO_OPERA"
+    assert estado_operacion_prestador(["Cancelación", "Nuevo"]) == "OPERANDO"
+    assert estado_operacion_prestador([]) == "INDETERMINADO"
+
+
+def test_coincide_estado_usa_thestado_real():
+    assert coincide_estado("OPERANDO", "VIGENTE") is True
+    assert coincide_estado("OPERANDO", "PRORROGADO POR RENOVACION") is False
+    assert coincide_estado("NO_OPERA", "CANCELADO") is True
+    assert coincide_estado("INDETERMINADO", "VIGENTE") is None
+    assert coincide_estado("OPERANDO", None) is None
+
+
+def test_categoria_conciliacion():
+    assert categoria_conciliacion(True, False, None, None) == "SOLO_SIETEL"
+    assert categoria_conciliacion(False, True, None, None) == "SOLO_SIGER"
+    assert categoria_conciliacion(True, True, "DIFIERE", False) == "DIFIERE_NOMBRE_Y_ESTADO"
+    assert categoria_conciliacion(True, True, "PARECIDO", False) == "DIFIERE_ESTADO"
+    assert categoria_conciliacion(True, True, "PARECIDO", True) == "REVISAR_NOMBRE"
+    assert categoria_conciliacion(True, True, "COINCIDE", None) == "ESTADO_INDETERMINADO"
+    assert categoria_conciliacion(True, True, "COINCIDE", True) == "COINCIDE"
+
+
+def _peva(ruc, peva, nombre, opera, reporta=True, anio=2026, mes=8):
+    return {"ruc_limpio": ruc, "peva_codigo": peva, "isp_nombre": nombre, "opera": opera,
+            "tiene_reportes": reporta, "ultimo_anio": anio, "ultimo_periodo_numero": mes}
+
+
+def _titulo(ruc, sec, estado, fecha):
+    return {"ruc_limpio": ruc, "thsecuencial": sec, "idsth": 9, "thestado": estado, "thfechavig": fecha}
+
+
+def test_construir_filas():
+    obtel = [_peva("1", "P1", "NETLIFE S.A.", "Opera Normalmente"),
+             _peva("2", "P2", "ALFA", "Opera Normalmente", anio=2025, mes=3),
+             _peva("2", "P3", "ALFA", "Cancelación", reporta=False, anio=None, mes=None),
+             _peva("3", "P4", "SIN SIGER", "Nuevo")]
+    conc = [{"ruc_limpio": "1", "ucp_concnum": "C1", "nombres": "NETLIFE SA", "ruc_origen": "ruc"},
+            {"ruc_limpio": "2", "ucp_concnum": "C2", "nombres": "ALFA", "ruc_origen": "cedula_001"},
+            {"ruc_limpio": "4", "ucp_concnum": "C4", "nombres": "SOLO SIGER", "ruc_origen": "ruc"},
+            {"ruc_limpio": "5", "ucp_concnum": "C5", "nombres": "HISTORIA", "ruc_origen": "ruc"}]
+    titulos = [_titulo("1", 10, "CANCELADO", datetime(2030, 1, 1)),
+               _titulo("1", 11, "VIGENTE", datetime(2020, 1, 1)),
+               _titulo("2", 20, "VENCIDO", datetime(2024, 1, 1)),
+               _titulo("2", 21, "PRORROGADO POR RENOVACION", datetime(2025, 1, 1)),
+               _titulo("4", 40, "VIGENTE", datetime(2027, 1, 1)),
+               _titulo("5", 50, "CANCELADO", datetime(2019, 1, 1))]
+    filas = {f["ruc_limpio"]: f for f in construir_filas(obtel, conc, titulos)}
+
+    assert set(filas) == {"1", "2", "3", "4"}  # el 5 (sin vigente ni PEVA) no entra
+    assert filas["1"]["categoria"] == "COINCIDE" and filas["1"]["estado_siger"] == "VIGENTE"
+    assert filas["1"]["estados_siger"] in ("CANCELADO (1), VIGENTE (1)", "VIGENTE (1), CANCELADO (1)")
+    # Varios PEVA: opera uno -> OPERANDO; título de referencia = el más reciente (prorrogado).
+    assert filas["2"]["estado_sietel"] == "OPERANDO"
+    assert filas["2"]["estado_siger"] == "PRORROGADO POR RENOVACION"
+    assert filas["2"]["categoria"] == "DIFIERE_ESTADO" and filas["2"]["coincide_reporte"] is False
+    assert filas["2"]["ultimo_periodo_sietel"] == "2025-03" and filas["2"]["ruc_por_cedula_001"] is True
+    assert filas["3"]["categoria"] == "SOLO_SIETEL" and filas["3"]["estado_siger"] is None
+    assert filas["4"]["categoria"] == "SOLO_SIGER" and filas["4"]["similitud_nombre"] is None

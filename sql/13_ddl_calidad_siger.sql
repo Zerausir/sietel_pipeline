@@ -101,3 +101,90 @@ CREATE INDEX IF NOT EXISTS ix_hallazgos_siger_obtel_tipo
 -- por default privileges: se otorga explícito (igual que en 04).
 GRANT UPDATE (estado_revision, revisado_por, notas_revision, fecha_revision)
     ON calidad.hallazgos_siger_obtel TO calidad_revisor;
+
+-- ============================================================================
+-- Conciliación SIGER <-> SIETEL/OBTEL (08-oct-2026) -- qué COINCIDE, no solo
+-- las discrepancias: una fila por RUC del universo OBTEL ∪ SIGER con título
+-- SAI VIGENTE, con el nivel de coincidencia de nombre y estado. Reglas en
+-- siger/reglas.py y siger/conciliacion.py, fijadas con el perfilamiento
+-- (siger/perfilar_cruce.py).
+--
+-- Snapshot SIN workflow humano: construir_cruce_obtel.py la reemplaza
+-- completa (DELETE + INSERT) en cada corrida, en la misma transacción que
+-- calidad.hallazgos_siger_obtel, que sigue siendo la cola de revisión.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS calidad.conciliacion_siger_obtel (
+    ruc_limpio              VARCHAR(20) PRIMARY KEY,
+    categoria               VARCHAR(30) NOT NULL
+        CHECK (categoria IN (
+            'COINCIDE',                -- nombre COINCIDE y estado coincide
+            'ESTADO_INDETERMINADO',    -- nombre coincide; 'opera' de SIETEL no se puede clasificar
+            'REVISAR_NOMBRE',          -- nombre PARECIDO (0,50-0,89), estado no difiere
+            'DIFIERE_ESTADO',          -- SIETEL opera y SIGER no está VIGENTE, o al revés
+            'DIFIERE_NOMBRE',          -- nombre DIFIERE (< 0,50)
+            'DIFIERE_NOMBRE_Y_ESTADO',
+            'SOLO_SIETEL',             -- el RUC de OBTEL no existe en SIGER
+            'SOLO_SIGER'               -- título SAI VIGENTE sin PEVA en OBTEL
+        )),
+    en_sietel               BOOLEAN NOT NULL,
+    en_siger                BOOLEAN NOT NULL,
+
+    -- Nombre
+    nombre_sietel           TEXT,
+    nombre_siger            TEXT,            -- incluye personas naturales (decisión del usuario, LOPDP)
+    similitud_nombre        NUMERIC(4,3),
+    nivel_nombre            VARCHAR(10) CHECK (nivel_nombre IN ('COINCIDE', 'PARECIDO', 'DIFIERE')),
+
+    -- SIETEL / OBTEL
+    pevas_sietel            TEXT,
+    opera_sietel            TEXT,            -- valores crudos de 'opera' de sus PEVA
+    estado_sietel           VARCHAR(15) CHECK (estado_sietel IN ('OPERANDO', 'NO_OPERA', 'INDETERMINADO')),
+    reporta_sietel          BOOLEAN,
+    ultimo_periodo_sietel   VARCHAR(7),      -- 'AAAA-MM'
+
+    -- SIGER
+    ucp_concnums            TEXT,
+    ruc_por_cedula_001      BOOLEAN NOT NULL DEFAULT false,
+    estado_siger            TEXT,            -- THESTADO real del título SAI de referencia, o SIN_TITULO_SAI
+    estados_siger           TEXT,            -- todos sus títulos SAI: 'VIGENTE (2), CANCELADO (1)'
+    idsth_siger             INTEGER,
+    vigencia_siger          TIMESTAMP,
+    titulos_sai             INTEGER NOT NULL DEFAULT 0,
+
+    -- Comparación de estado (NULL = no comparable)
+    coincide_estado         BOOLEAN,         -- SIETEL OPERANDO <-> SIGER VIGENTE
+    coincide_reporte        BOOLEAN,         -- reporta en SIETEL <-> SIGER VIGENTE
+
+    fecha_calculo           TIMESTAMP NOT NULL DEFAULT now()
+);
+
+ALTER TABLE calidad.conciliacion_siger_obtel OWNER TO mart_user;
+
+COMMENT ON TABLE calidad.conciliacion_siger_obtel IS
+'Conciliación por RUC entre SIGER (títulos SAI, THESTADO real) y SIETEL/OBTEL (PEVA vigentes): coincidencia de nombre (similitud normalizada, COINCIDE >= 0,90 / PARECIDO >= 0,50 / DIFIERE), de estado (SIETEL OPERANDO, que incluye Opera Irregularmente, <-> SIGER VIGENTE; Otro Estado = indeterminado) y de reporte. Snapshot sin workflow, reemplazado en cada corrida de siger_pipeline (siger/construir_cruce_obtel.py).';
+
+CREATE INDEX IF NOT EXISTS ix_conciliacion_siger_obtel_categoria
+    ON calidad.conciliacion_siger_obtel (categoria);
+
+-- Puente de solo lectura para el dashboard (dashboard_lector solo lee mart),
+-- mismo patrón que mart.vw_conflictos_ruc_peva. También se crea en
+-- sql/02_ddl_mart.sql para que sobreviva al DROP SCHEMA mart CASCADE de cada
+-- reconstrucción de mart. Muestra los nombres de SIGER de personas naturales
+-- (decisión del usuario, 08-oct-2026, igual que OBTEL ya muestra
+-- isp_nombre); nunca la cédula ni el RUC crudo de SIGER, solo ruc_limpio.
+CREATE OR REPLACE VIEW mart.vw_conciliacion_siger_obtel AS
+SELECT * FROM calidad.conciliacion_siger_obtel;
+
+COMMENT ON VIEW mart.vw_conciliacion_siger_obtel IS
+'Puente de solo lectura hacia calidad.conciliacion_siger_obtel (conciliación SIGER <-> SIETEL por RUC: nombre, estado y reporte). Incluye nombres de SIGER de personas naturales (decisión del 08-oct-2026); sin cédula ni RUC crudo.';
+
+DO $$
+DECLARE
+    rol TEXT;
+BEGIN
+    FOREACH rol IN ARRAY ARRAY['dashboard_lector', 'eda_lector', 'calidad_lector'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = rol) THEN
+            EXECUTE format('GRANT SELECT ON mart.vw_conciliacion_siger_obtel TO %I', rol);
+        END IF;
+    END LOOP;
+END $$;

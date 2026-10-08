@@ -181,7 +181,9 @@ sietel_pipeline/
 │   ├── cargar_siger.py                         # Snapshot por reemplazo, certificado antes del COMMIT
 │   ├── huella_siger.py                         # Huella por tabla vs siger.huella_fuente: recarga solo si cambió
 │   ├── validar_siger.py                        # Certificación cruzada en ambas direcciones + accesos LOPDP
-│   ├── construir_cruce_obtel.py                # calidad.hallazgos_siger_obtel (como mart_user)
+│   ├── construir_cruce_obtel.py                # calidad.hallazgos_siger_obtel y la conciliación (como mart_user)
+│   ├── conciliacion.py                         # Conciliación por RUC: nombre, estado y reporte SIGER ↔ SIETEL
+│   ├── perfilar_cruce.py                       # Perfilamiento de las llaves del cruce (solo lectura)
 │   ├── reglas.py                               # contrato_key, RUC resuelto, tipo_enlace
 │   └── hash_siger.py                           # Hash MD5 por fila, igual en pyodbc y psycopg2
 ├── sql/
@@ -194,7 +196,7 @@ sietel_pipeline/
 │   ├── 06…10_patch_*.sql                       # Parches puntuales ya incorporados (ver sección 17)
 │   ├── 11_roles_siger.sql                      # Rol siger_user y esquema siger (solo documentación, no re-ejecutar)
 │   ├── 12_ddl_siger.sql                        # DDL siger: réplica cruda, vistas SAI, permisos LOPDP
-│   └── 13_ddl_calidad_siger.sql                # calidad.hallazgos_siger_obtel
+│   └── 13_ddl_calidad_siger.sql                # calidad.hallazgos_siger_obtel, conciliación y su puente en mart
 ├── dashboard/                                  # Aplicación web OBTEL
 │   ├── app.py                                  # Layout raíz, stores compartidos, caché, navegación
 │   ├── auth.py                                 # Flask-Login + bcrypt, /login y /logout
@@ -402,6 +404,8 @@ Personales:
   `eda_lector`) tiene acceso a `siger`. `validar_siger` lo comprueba en cada corrida y falla si no se cumple.
 - `NR_PARAMETROS_FACTURACION` no tiene datos personales (solo `CLIENT_CODE` y datos técnicos de estaciones).
 - `calidad.hallazgos_siger_obtel` guarda solo RUC, nombre y códigos (lo ven `calidad_lector` y `eda_lector`).
+- `mart.vw_conciliacion_siger_obtel` publica al dashboard los **nombres de SIGER, incluidas personas naturales**
+  (decisión del 08-oct-2026, igual que OBTEL ya muestra `isp_nombre`), nunca la cédula ni el RUC crudo.
 
 #### Cruce con OBTEL
 
@@ -418,6 +422,25 @@ sale de `analitico.v_ultimo_periodo_reportado_detalle.isp_ruc`, con el mismo fil
 `calidad.conflictos_ruc_peva`: las columnas de revisión nunca se sobrescriben, nada se corrige automáticamente, y lo que
 deja de detectarse se conserva con `sigue_detectado = false`. Si alguno de los dos lados está vacío, la tarea aborta en
 vez de marcar todo como hallazgo.
+
+#### Conciliación SIGER ↔ SIETEL
+
+Además de las discrepancias, la misma tarea reemplaza `calidad.conciliacion_siger_obtel`, que guarda **lo que coincide
+y lo que no**. Tiene una fila por RUC: todos los de OBTEL y los de SIGER con título SAI VIGENTE (`siger/conciliacion.py`).
+La lee la página **Calidad de datos → Conciliación SIGER** (`/sai/conciliacion-siger`), a través del puente
+`mart.vw_conciliacion_siger_obtel`. Las reglas se fijaron con `siger/perfilar_cruce.py` (08-oct-2026) y viven en
+`siger/reglas.py`:
+
+| Dimensión | Regla |
+|-----------|-------|
+| RUC       | Solo dígitos en ambos lados. Todos los RUC de OBTEL tienen 13 dígitos, así que no hace falta la regla cédula + 001 |
+| Nombre    | Similitud normalizada (sin tildes, puntuación ni formas societarias): **COINCIDE** ≥ 0,90 (incluye un nombre contenido en el otro), **PARECIDO** ≥ 0,50, **DIFIERE** |
+| Estado    | SIETEL **opera** (Nuevo, Opera Normalmente, SI, Opera Irregularmente) / **no opera** (Cancelación, NO) / **indeterminado** (Otro Estado), frente al **THESTADO real** del título SAI de referencia en SIGER. Solo `VIGENTE` cuenta como habilitado |
+| Reporte   | Reporta en SIETEL ↔ título VIGENTE (columna aparte, no entra en la categoría) |
+
+Categorías, de la más grave a la más leve: `SOLO_SIETEL`, `SOLO_SIGER`, `DIFIERE_NOMBRE_Y_ESTADO`, `DIFIERE_NOMBRE`,
+`DIFIERE_ESTADO`, `REVISAR_NOMBRE`, `ESTADO_INDETERMINADO`, `COINCIDE`. Es un snapshot sin flujo de revisión. La cola
+de revisión sigue siendo `calidad.hallazgos_siger_obtel`.
 
 #### Puesta en marcha
 
@@ -1058,6 +1081,7 @@ comentarios de cada archivo.
 
 | Fecha        | Cambio                                                                                                                                                                                                                         |
 |--------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 08-oct-2026  | **Conciliación SIGER ↔ SIETEL**: `calidad.conciliacion_siger_obtel` (nombre, estado y reporte por RUC) y página *Conciliación SIGER* en Calidad de datos; reglas fijadas con `siger/perfilar_cruce.py` |
 | 08-oct-2026  | **SIGER diario con detección de cambios**: `siger_pipeline` corre a las 02:00 y recarga solo las tablas cuya huella cambió (`siger.huella_fuente`); recarga y certificación completas los domingos |
 | 05-oct-2026  | **SIGER_V3**: DAG `siger_pipeline`, esquema `siger` (réplica certificada por snapshot, vistas SAI por RUC, acceso restringido por LOPDP) y `calidad.hallazgos_siger_obtel`. `scripts/config.py` parametrizado por prefijo de variables, con tiempo límite de consulta; `SQL_RUC_LIMPIO` extraído en `mart/detectar_conflictos_peva.py` (SQL idéntico) |
 | 30-sep-2026  | **Detección automática y recarga por mes**: DAG `sietel_detector_cambios`, `staging.huella_fuente`, carga y validación por meses, `max_active_runs=1` e invalidación de caché con `mart.control_version`                         |
