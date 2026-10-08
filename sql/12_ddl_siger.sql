@@ -236,6 +236,23 @@ COMMENT ON TABLE siger.parametro_universo_sai IS
 'IDSTH que forman el universo SAI de las vistas derivadas (9, 33, 31; se EXCLUYE 8 VALOR AGREGADO: agregadores de SMS, contenido móvil y rastreo vehicular). Se sincroniza desde siger/config_siger.py IDSTH_UNIVERSO_SAI en cada corrida -- editar allí, no aquí.';
 
 -- ----------------------------------------------------------------------------
+-- 5b. Huella de la fuente (08-oct-2026) -- detección de cambios
+--     Una fila por tabla (tipo_carga) con la huella de SIGER tomada antes de
+--     extraer el último snapshot confirmado. La escribe siger/cargar_siger.py
+--     en la MISMA transacción del snapshot; validar_siger.py borra la de una
+--     tabla que no certifica, para que se recargue. Ver siger/huella_siger.py.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS siger.huella_fuente (
+    tabla           TEXT        PRIMARY KEY,   -- tipo_carga: siger_servicios, siger_titulos...
+    filas           BIGINT      NOT NULL,      -- COUNT_BIG(*) en SIGER
+    checksum        INTEGER,                   -- CHECKSUM_AGG(BINARY_CHECKSUM(columnas)); NULL si 0 filas
+    columnas        TEXT        NOT NULL,      -- MD5 de la lista de columnas replicadas
+    fecha_registro  TIMESTAMP   NOT NULL DEFAULT now()
+);
+COMMENT ON TABLE siger.huella_fuente IS
+'Huella (conteo + CHECKSUM_AGG) de cada tabla de SIGER_V3 en su último snapshot confirmado. Si la huella actual coincide, siger_pipeline no recarga la tabla. Borrar una fila fuerza su recarga en la próxima corrida.';
+
+-- ----------------------------------------------------------------------------
 -- 6. Vistas derivadas
 -- ----------------------------------------------------------------------------
 

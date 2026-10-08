@@ -20,6 +20,12 @@ Patrón común para las 4 tablas (cargar_tabla):
      Cualquier discrepancia -> ROLLBACK: el snapshot anterior queda intacto.
   4. Registro en staging.control_cargas (tipo_carga siger_*).
 
+Detección de cambios (08-oct-2026, siger/huella_siger.py): antes de extraer
+se toma la huella de la tabla en SIGER; si coincide con la del último
+snapshot confirmado (siger.huella_fuente), la tabla NO se recarga (estado
+SIN_CAMBIOS en control_cargas). Si se recarga, la huella nueva se guarda en
+la misma transacción del snapshot.
+
 Sin filtros de servicio, estado ni ELIMINADO: la tabla cruda es copia fiel.
 Las reglas de §3 (contrato_key, RUC resuelto, tipo_enlace) se calculan como
 columnas derivadas, fuera del hash.
@@ -28,6 +34,7 @@ Uso:
     python cargar_siger.py --tabla titulos
     python cargar_siger.py --tabla todas
     python cargar_siger.py --tabla facturacion --permitir-caida
+    python cargar_siger.py --tabla todas --forzar     # recarga aunque no haya cambios
 """
 import argparse
 import logging
@@ -50,6 +57,7 @@ from config_siger import (
     verificar_permisos,
 )
 from hash_siger import digest_fila
+from huella_siger import decidir_recarga, guardar_huella, leer_huella, tomar_huella
 from reglas import contrato_facturacion, contrato_key, resolver_ruc, thsecuencial_a_bigint, tipo_enlace
 
 logger = logging.getLogger(__name__)
@@ -262,8 +270,13 @@ def _claves_titulos(pg_cur) -> set[str]:
     return claves
 
 
-def cargar_tabla(clave: str, permitir_caida: bool = False) -> dict:
-    """Snapshot completo por reemplazo de una tabla de SIGER (ver docstring del módulo)."""
+def cargar_tabla(clave: str, permitir_caida: bool = False, forzar: bool = False,
+                 dependencia_recargada: bool = False) -> dict:
+    """
+    Snapshot completo por reemplazo de una tabla de SIGER (ver docstring del
+    módulo), solo si la huella cambió (o forzar / dependencia_recargada, ver
+    huella_siger.decidir_recarga). Devuelve un dict con "recargada".
+    """
     tabla = TABLAS[clave]
     inicio = datetime.now()
     n = 0
@@ -271,12 +284,26 @@ def cargar_tabla(clave: str, permitir_caida: bool = False) -> dict:
     try:
         n_origen, nuevas = verificar_origen(tabla)
         print(f"  Permisos OK en {len(tabla.columnas)} columnas; {n_origen:,} filas en origen.")
+        # Huella ANTES de extraer: si SIGER cambia durante la extracción, la
+        # guardada queda vieja y la próxima corrida recarga.
+        huella = tomar_huella(tabla.objeto)
 
         conn = postgres_conexion()
         try:
             cur = conn.cursor()
             cur.execute(f"SELECT COUNT(*) FROM {tabla.destino}")
             n_previo = cur.fetchone()[0]
+            motivo = decidir_recarga(huella, leer_huella(cur, tabla.tipo_carga), n_previo,
+                                     forzar, dependencia_recargada)
+            if motivo is None:
+                conn.rollback()
+                print(f"⏭️  {tabla.destino}: sin cambios en SIGER desde el último snapshot "
+                      f"({n_previo:,} filas) -- no se recarga.")
+                _registrar_carga(tabla.tipo_carga, 0, "SIN_CAMBIOS", None, inicio)
+                return {"clave": clave, "tabla": tabla.destino, "recargada": False, "motivo": None,
+                        "filas": n_previo, "filas_previas": n_previo,
+                        "columnas_nuevas_no_replicadas": nuevas}
+            print(f"  Se recarga: {motivo}.")
             verificar_caida(tabla, n_origen, n_previo, permitir_caida)
             claves = _claves_titulos(cur) if clave == "facturacion" else None
 
@@ -317,6 +344,7 @@ def cargar_tabla(clave: str, permitir_caida: bool = False) -> dict:
                     f"{faltantes} faltantes, {sobrantes} sobrantes, {inconsistentes} con hash inconsistente "
                     f"-- ROLLBACK, el snapshot anterior queda intacto."
                 )
+            guardar_huella(cur, tabla.tipo_carga, huella)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -328,8 +356,8 @@ def cargar_tabla(clave: str, permitir_caida: bool = False) -> dict:
         print(f"✅ {tabla.destino}: {n:,} filas (antes {n_previo:,}) en {duracion:.1f}s")
         _registrar_carga(tabla.tipo_carga, n, "EXITOSO", None, inicio)
         logger.info("%s: snapshot de %s filas certificado y confirmado.", tabla.destino, n)
-        return {"tabla": tabla.destino, "filas": n, "filas_previas": n_previo,
-                "columnas_nuevas_no_replicadas": nuevas}
+        return {"clave": clave, "tabla": tabla.destino, "recargada": True, "motivo": motivo,
+                "filas": n, "filas_previas": n_previo, "columnas_nuevas_no_replicadas": nuevas}
 
     except Exception as exc:
         print(f"❌ {tabla.destino}: FALLÓ -- {exc}")
@@ -357,6 +385,11 @@ if __name__ == "__main__":
     parser.add_argument("--tabla", required=True, choices=[*TABLAS, "todas"])
     parser.add_argument("--permitir-caida", action="store_true",
                         help=f"Omite la protección de caída > {UMBRAL_CAIDA_MAXIMA:.0%} (solo tras revisarla).")
+    parser.add_argument("--forzar", action="store_true",
+                        help="Recarga aunque la huella de SIGER no haya cambiado.")
     args = parser.parse_args()
+    titulos_recargados = False
     for c in (TABLAS if args.tabla == "todas" else [args.tabla]):
-        cargar_tabla(c, permitir_caida=args.permitir_caida)
+        r = cargar_tabla(c, permitir_caida=args.permitir_caida, forzar=args.forzar,
+                         dependencia_recargada=(c == "facturacion" and titulos_recargados))
+        titulos_recargados = titulos_recargados or (c == "titulos" and r["recargada"])

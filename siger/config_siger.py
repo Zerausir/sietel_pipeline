@@ -107,6 +107,12 @@ IDSTH_UNIVERSO_SAI = {
 # fracción respecto al snapshot anterior, se aborta sin tocar el destino.
 UMBRAL_CAIDA_MAXIMA = 0.20
 
+# Día de la semana (lunes=0 ... domingo=6, fecha de la corrida en UTC) en
+# que el DAG recarga las 4 tablas aunque la huella no haya cambiado: cubre
+# lo que la huella no ve (ver siger/huella_siger.py) y vuelve a certificar
+# todo con validar_siger.
+DIA_RECARGA_COMPLETA = 6
+
 # Filas por lote en fetchmany / inserción.
 TAMANO_LOTE = 10_000
 

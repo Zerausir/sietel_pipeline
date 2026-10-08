@@ -179,6 +179,7 @@ sietel_pipeline/
 │   ├── probar_conexion.py                      # Prueba de conectividad y permisos (solo lectura)
 │   ├── aplicar_esquema_siger.py                # Aplica sql/12_ddl_siger.sql como siger_user
 │   ├── cargar_siger.py                         # Snapshot por reemplazo, certificado antes del COMMIT
+│   ├── huella_siger.py                         # Huella por tabla vs siger.huella_fuente: recarga solo si cambió
 │   ├── validar_siger.py                        # Certificación cruzada en ambas direcciones + accesos LOPDP
 │   ├── construir_cruce_obtel.py                # calidad.hallazgos_siger_obtel (como mart_user)
 │   ├── reglas.py                               # contrato_key, RUC resuelto, tipo_enlace
@@ -296,13 +297,31 @@ exploratorio de estos datos es un trabajo posterior: aquí solo se replica fielm
 
 ```
 aplicar_esquema_siger >> [cargar_servicios, cargar_concesionarios, cargar_titulos]
-    >> cargar_facturacion >> validar_siger >> construir_cruce_obtel
+    >> cargar_facturacion >> hubo_recargas >> validar_siger >> construir_cruce_obtel
 ```
 
 DAG **independiente** de los de SIETEL: otro servidor, otras credenciales y otra cadencia. Un fallo de SIGER no bloquea
 SIETEL, y este DAG no dispara ni modifica los de SIETEL. Corre todos los días a las **02:00** (`max_active_runs=1`,
 sin backfill), de modo que termina antes del detector de SIETEL (06:00) y no compiten por el PostgreSQL analítico. El
 `conf` `permitir_caida` solo se pasa al dispararlo a mano desde la UI.
+
+#### Detección de cambios
+
+Cada tabla se recarga **solo si cambió en SIGER** (`siger/huella_siger.py`, mismo criterio que el detector de SIETEL).
+Antes de extraer, se calcula en SQL Server una huella barata: `COUNT_BIG(*)` + `CHECKSUM_AGG(BINARY_CHECKSUM(...))` de
+las columnas replicadas. Si coincide con la del último snapshot confirmado (`siger.huella_fuente`), la tabla no se toca
+y `staging.control_cargas` registra `SIN_CAMBIOS`.
+
+- Se recarga si: cambió el conteo o el checksum, cambió la lista de columnas, no hay huella guardada, el destino no
+  tiene las filas que dice la huella o (solo facturación) se recargaron los títulos, porque `tipo_enlace` depende de ellos.
+- La huella se guarda en la **misma transacción** del snapshot y se toma antes de extraer. Si la carga se revierte, o
+  si SIGER cambia mientras se extrae, la próxima corrida vuelve a recargar.
+- `validar_siger` corre solo si algo se recargó (`hubo_recargas`) y solo sobre esas tablas. Si una tabla no certifica,
+  se borra su huella para forzar su recarga. El cruce con OBTEL corre siempre, porque OBTEL cambia aunque SIGER no.
+- **Los domingos** (`DIA_RECARGA_COMPLETA`) se recargan y certifican las 4 tablas igual. Eso cubre lo que la huella no
+  ve: cambios que se compensan en `CHECKSUM_AGG` y columnas `text`/`ntext`, que `BINARY_CHECKSUM` ignora.
+- Para recargar todo a mano (por ejemplo, tras cambiar `siger/reglas.py`): *Trigger DAG w/ config*
+  `{"forzar_recarga": true}`, o borrar la fila de la tabla en `siger.huella_fuente`.
 
 #### Fuente
 
@@ -663,6 +682,7 @@ parte del hash ni de las columnas versionables: son metadatos derivados de `par_
 | `concesionario`                 | Tabla  | Copia fiel de `dbo.VISTA_CONCESIONARIOS`, más `ruc_resuelto` y `ruc_origen`. **Datos personales: sin acceso para `mart_user`**    |
 | `facturacion_espectro`          | Tabla  | Copia fiel de `dbo.NR_PARAMETROS_FACTURACION` (99 columnas, incluidas las eliminadas), más `contrato_key` y `tipo_enlace`         |
 | `parametro_universo_sai`        | Tabla  | IDSTH del universo SAI, sincronizado desde `siger/config_siger.py`                                                                 |
+| `huella_fuente`                 | Tabla  | Huella (conteo + checksum) de cada tabla en su último snapshot; si no cambia, la tabla no se recarga                             |
 | `v_titulo_sai`                  | Vista  | Títulos del universo SAI, con `es_vigente` y `con_tomo_foja`                                                                      |
 | `v_prestador_sai`               | Vista  | Una fila por RUC con título SAI: vigencia, título de referencia, origen del RUC y banderas de anomalía                            |
 | `v_facturacion_contrato`        | Vista  | Facturación con `activo` y `cliente_coincide`, una fila por fila de origen                                                        |
@@ -1038,6 +1058,7 @@ comentarios de cada archivo.
 
 | Fecha        | Cambio                                                                                                                                                                                                                         |
 |--------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 08-oct-2026  | **SIGER diario con detección de cambios**: `siger_pipeline` corre a las 02:00 y recarga solo las tablas cuya huella cambió (`siger.huella_fuente`); recarga y certificación completas los domingos |
 | 05-oct-2026  | **SIGER_V3**: DAG `siger_pipeline`, esquema `siger` (réplica certificada por snapshot, vistas SAI por RUC, acceso restringido por LOPDP) y `calidad.hallazgos_siger_obtel`. `scripts/config.py` parametrizado por prefijo de variables, con tiempo límite de consulta; `SQL_RUC_LIMPIO` extraído en `mart/detectar_conflictos_peva.py` (SQL idéntico) |
 | 30-sep-2026  | **Detección automática y recarga por mes**: DAG `sietel_detector_cambios`, `staging.huella_fuente`, carga y validación por meses, `max_active_runs=1` e invalidación de caché con `mart.control_version`                         |
 | 29-sep-2026  | **Filtro territorial sin "Nivel geográfico"** en Evolución y Concentración, y nueva sección "Cuentas por territorio"                                                                                                             |
