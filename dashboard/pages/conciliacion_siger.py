@@ -244,9 +244,10 @@ def update_conciliacion(categorias, estados_sietel, estados_siger, buscar):
     conteo = df["categoria"].value_counts()
     ambos = int((df["en_sietel"] & df["en_siger"]).sum())
     coincide = int(conteo.get("COINCIDE", 0))
-    difiere_estado = int(conteo.get("DIFIERE_ESTADO", 0) + conteo.get("DIFIERE_NOMBRE_Y_ESTADO", 0))
-    nombre = int(conteo.get("REVISAR_NOMBRE", 0) + conteo.get("DIFIERE_NOMBRE", 0)
-                 + conteo.get("DIFIERE_NOMBRE_Y_ESTADO", 0))
+    # Por su propia columna, no por categoría: un nombre PARECIDO con el
+    # estado distinto queda en la categoría DIFIERE_ESTADO y no se vería aquí.
+    difiere_estado = int((df["coincide_estado"] == False).sum())  # noqa: E712 -- NULL no cuenta
+    nombre = int(df["nivel_nombre"].isin(["PARECIDO", "DIFIERE"]).sum())
     solo_sietel, solo_siger = int(conteo.get("SOLO_SIETEL", 0)), int(conteo.get("SOLO_SIGER", 0))
 
     # Barras por categoría, en el orden de _CATEGORIAS (más leve arriba).
