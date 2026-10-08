@@ -153,7 +153,7 @@ sietel_pipeline/
 │   ├── sietel_detector_cambios.py              # Diario: detecta meses nuevos o corregidos y dispara la carga
 │   ├── sietel_usuarios_cuentas_pipeline.py     # Capa 1: SIETEL → staging / analitico
 │   ├── sietel_mart_pipeline.py                 # Capas 2 y 3: calidad → capa2 → geografía de nodos → mart
-│   └── siger_pipeline.py                       # SIGER_V3 → siger, validación y cruce con OBTEL (manual)
+│   └── siger_pipeline.py                       # Diario 02:00: SIGER_V3 → siger, validación y cruce con OBTEL
 ├── scripts/                                    # Capa 1
 │   ├── config.py                               # Conexiones y ANIO_INICIO_HISTORICO / ANIO_FIN_HISTORICO
 │   ├── aplicar_esquema.py                      # Aplica sql/01_ddl_postgres.sql (idempotente)
@@ -300,7 +300,9 @@ aplicar_esquema_siger >> [cargar_servicios, cargar_concesionarios, cargar_titulo
 ```
 
 DAG **independiente** de los de SIETEL: otro servidor, otras credenciales y otra cadencia. Un fallo de SIGER no bloquea
-SIETEL, y este DAG no dispara ni modifica los de SIETEL. Es manual (`schedule=None`) y tiene `max_active_runs=1`.
+SIETEL, y este DAG no dispara ni modifica los de SIETEL. Corre todos los días a las **02:00** (`max_active_runs=1`,
+sin backfill), de modo que termina antes del detector de SIETEL (06:00) y no compiten por el PostgreSQL analítico. El
+`conf` `permitir_caida` solo se pasa al dispararlo a mano desde la UI.
 
 #### Fuente
 

@@ -22,9 +22,11 @@ a propósito: otro servidor (192.168.129.40), otras credenciales
 (SIGER_SQLSERVER_*, SIGER_PG_*), otra cadencia. Un fallo de SIGER no
 bloquea SIETEL, y este DAG no dispara ni modifica los de SIETEL.
 
-Manual (schedule=None) por ahora.
+Diario a las 02:00 (schedule="0 2 * * *"): termina antes de que arranque
+sietel_detector_cambios (06:00) y su cadena de carga, para no competir por
+el PostgreSQL analítico. El cruce usa el OBTEL cargado hasta el día anterior.
 
-conf DEL DAG RUN (opcional):
+conf DEL DAG RUN (opcional, solo en disparos manuales):
   {"permitir_caida": ["siger_facturacion"]} → omite la protección de caída
       > 20 % SOLO para esas tablas (tipo_carga), tras revisar que es real.
   {"permitir_caida": true}                   → para todas.
@@ -70,7 +72,7 @@ def _cargar(clave: str):
     dag_id="siger_pipeline",
     description="Réplica certificada SIGER_V3 → esquema siger y cruce con OBTEL en calidad",
     default_args=default_args,
-    schedule=None,
+    schedule="0 2 * * *",
     start_date=datetime(2026, 10, 1),
     catchup=False,
     max_active_runs=1,
